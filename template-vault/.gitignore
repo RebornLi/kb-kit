@@ -1,0 +1,47 @@
+# ============================================================
+# Obsidian 知识库 .gitignore
+# 边界依据：方案 v4.0 §2.4 —— 仅忽略"程序化产物 + Obsidian 本地态"
+# 铁律：.git/ memory/ reference/ media/ .obsidian(配置)/ 笔记正文 一律纳入版本库
+# ============================================================
+
+# ---- Obsidian 本地临时 / 锁文件（不入库）----
+.~lock.*
+未命名*
+.obsidian/workspace*.json
+.obsidian/.global-dnd.json
+.obsidian/url-map.json
+
+# ---- 运行时产物（不入库；来源已由 git 追踪）----
+logs/
+backups/
+vector index/
+_SELF_OPT/          # 方案 §5.2 可选隔离目录，默认关闭，隔离于主知识层
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ---- 成长引擎瞬态报表（可重新生成，cron 重跑不污染 tree）----
+intake_triage.md
+link_suggestions.md
+recall_deck.md
+recall_schedule.md
+feedback_hits.md
+
+# ---- 成长引擎瞬态 state（引擎写后自动重置，不入库；此四者为 §10 唯一例外）----
+.memory_sync_state.json
+.memory_ingest_state.json
+.feedback_state.json
+.recall_state.json
+.kb-agent.json
+kb-agent.json
+
+# ---- Python 缓存 / 虚拟环境 ----
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+
+# ---- 注意 ----
+# *.canvas / *.sql / *.json / *.yaml 等按 §10 仅在 Obsidian 侧栏隐藏，
+# 版本管理仍保留（不在此忽略）。

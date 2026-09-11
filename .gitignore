@@ -1,0 +1,34 @@
+# ================================
+# kb-kit 仓库忽略项（保持推送干净）
+# ================================
+
+# 可重新生成分发包（不必入库）
+kb-kit-*.zip
+
+# 内部开发体检报告（不进公开仓库）
+DEPLOYMENT_REPORT.md
+
+# Python 产物
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 若本地建仓留下的样例 vault
+KB/
+KB2/
+KB3/
+
+# 极端情况下建仓产物误放仓库根（保险）
+/**/.git/
+/**/vector\ index/
+/**/backups/
+/**/logs/
+
+# 操作系统产物
+.DS_Store
+Thumbs.db
+
+# 虚拟环境
+.venv/
+venv/
+env/
