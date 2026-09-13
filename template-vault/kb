@@ -6,27 +6,25 @@
 # 作用：把 pipeline/ 下各工具封装成语义命令，自动注入 --root（=本脚本所在目录=
 # vault 根），所以你不用记得 --root，也记不动一堆子命令。
 #
+# 插件化版本：所有命令统一通过 kb_launcher.py 路由到插件注册中心。
+#
 # 用法: kb <工具> [参数...]
 #   kb rag index                 # 重建本地向量索引（写新笔记后必跑）
-#   kb query "怎么备份知识库"      # 自然语言检索（+ 最佳片段；--answer 需配 ORNITH 凭证/地址）
-#   kb ingest                    # 收件箱摄入 triage 清单 -> intake_triage.md
-#   kb ingest move               # 按路由把收件箱挪到对应分区（写操作，先 review）
-#   kb ingest trash              # 把收件箱进归档（写操作，先 review）
-#   kb ingest agent              # 摄取本机 agent（OpenClaw/Hermes/DSH/Codex）记忆进 KB
-#   kb feedback                  # 命中信号计数 -> feedback_hits.md
-#   kb link                      # 孤岛补链建议 -> link_suggestions.md
-#   kb link apply                # 应用补链（写操作，先 suggestions 看清单）
-#   kb recall                    # 今日回忆 deck -> recall_deck.md
-#   kb recall status             # 今日回忆排期状态 -> recall_schedule.md
-#   kb healthcheck               # 健康巡检报告（死链/缺字段/空目录/超长）
-#   kb dashboard                 # 生成治理仪表盘 -> 70-知识治理 Governance/_INDEX.md
-#   kb clean --apply             # 清洗/分块（写操作，先 --dry-run）
+#   kb query "怎么备份知识库"      # 自然语言检索
+#   kb ingest                    # 收件箱摄入 triage 清单
+#   kb ingest move               # 按路由把收件箱挪到对应分区（写操作）
+#   kb ingest agent              # 摄取本机 agent 记忆进 KB
+#   kb feedback                  # 命中信号计数
+#   kb link                      # 孤岛补链建议
+#   kb link apply                # 应用补链（写操作）
+#   kb recall                    # 今日回忆 deck
+#   kb healthcheck               # 健康巡检报告
+#   kb dashboard                 # 生成治理仪表盘
+#   kb clean --apply             # 清洗/分块（写操作）
 #   kb validate                  # frontmatter 校验
-#   kb sync dry-run              # 知识同步管道（先看拟执行，不写）
-#   kb sync apply <note.md>      # 同步笔记到 PARA 区（写操作，先 dry-run）
-#   kb sync rollback             # 回滚上次 sync apply
-#   kb sync history              # 查看同步历史
+#   kb sync dry-run              # 知识同步管道
 #   kb backup [daily|weekly]     # 全量快照 -> backups/
+#   kb list                      # 列出所有插件
 #   kb help                      # 本说明
 # ============================================================
 set -euo pipefail
@@ -43,51 +41,10 @@ if [ -z "$PY" ]; then
   echo "❌ 未找到 Python，请先安装 Python 3.8+ 并加进 PATH。" >&2; exit 3
 fi
 
-PIPE="$VAULT/pipeline"
-
-# 记忆/备份相关的脚本（通过 bash 显式调用，避免权限问题）
+# backup 仍走 bash 脚本（不插件化）
 if [ "${1:-}" = "backup" ]; then
   exec bash "$SELF_DIR/scripts/backup_now.sh" "$VAULT" "${2:-daily}"
 fi
 
-TOOL="${1:-help}"; shift || true
-
-case "$TOOL" in
-  query)   exec "$PY" "$PIPE/rag.py" query "$@" --root "$VAULT" ;;
-  ingest)
-        case "${1:-}" in
-          move)   shift; exec "$PY" "$PIPE/intake_triage.py" apply --move --root "$VAULT" "$@" ;;
-          trash)  shift; exec "$PY" "$PIPE/intake_triage.py" apply --trash --root "$VAULT" "$@" ;;
-          review) shift; exec "$PY" "$PIPE/intake_triage.py" review --root "$VAULT" "$@" ;;
-          agent)  shift; exec "$PY" "$PIPE/agent_registry.py" ingest --root "$VAULT" "$@" ;;
-          *)      exec "$PY" "$PIPE/intake_triage.py" review --root "$VAULT" "$@" ;;
-        esac ;;
-  agent)    exec "$PY" "$PIPE/agent_registry.py" "$@" --root "$VAULT" ;;
-  feedback) case "${1:-}" in
-              hit) shift; exec "$PY" "$PIPE/feedback_loop.py" hit "$@" --root "$VAULT" ;;
-              apply) shift; exec "$PY" "$PIPE/feedback_loop.py" apply --root "$VAULT" "$@" ;;
-              *)   exec "$PY" "$PIPE/feedback_loop.py" ingest --root "$VAULT" "$@" ;;
-            esac ;;
-  link)     case "${1:-}" in
-              apply) shift; exec "$PY" "$PIPE/link_engine.py" apply --root "$VAULT" "$@" ;;
-              *)     exec "$PY" "$PIPE/link_engine.py" suggestions --root "$VAULT" "$@" ;;
-            esac ;;
-  recall)   case "${1:-}" in
-              mark)   shift; exec "$PY" "$PIPE/recall_schedule.py" mark --root "$VAULT" "$@" ;;
-              status) shift; exec "$PY" "$PIPE/recall_schedule.py" status --root "$VAULT" "$@" ;;
-              deck)   shift; exec "$PY" "$PIPE/recall_schedule.py" deck --root "$VAULT" "$@" ;;
-              *)      exec "$PY" "$PIPE/recall_schedule.py" deck --root "$VAULT" "$@" ;;
-            esac ;;
-  healthcheck) exec "$PY" "$PIPE/kb-healthcheck.py" "$@" ;;
-  health-metrics) exec "$PY" "$PIPE/kb_health.py" "$@" ;;
-  dashboard)   exec "$PY" "$PIPE/dashboard.py" --root "$VAULT" "$@" ;;
-  rag)       exec "$PY" "$PIPE/rag.py" "$@" --root "$VAULT" ;;
-  clean)     sub="${1:-dry-run}"; [ $# -gt 0 ] && shift; case "$sub" in --apply) sub="apply";; --report) sub="report";; --chunk) sub="chunk";; esac; exec "$PY" "$PIPE/clean.py" "$sub" "$@" --root "$VAULT" ;;
-  validate)  exec "$PY" "$PIPE/validate.py" --root "$VAULT" "$@" ;;
-  sync)      exec "$PY" "$PIPE/sync.py" "$@" --root "$VAULT" ;;
-  ingest-any) exec "$PY" "$PIPE/sync.py" ingest-any "$@" --root "$VAULT" ;;
-  user)      exec "$PY" "$PIPE/user_manager.py" "$@" --root "$VAULT" ;;
-  graph)     exec "$PY" "$PIPE/graph.py" "$@" --root "$VAULT" ;;
-  help|--help|-h) sed -n '/^# =/,/^# ===/p' "$0" | sed '1d' ;;
-  *) echo "❓ 未知工具: $TOOL  →  用 kb help" >&2; exit 2 ;;
-esac
+# 所有其他命令统一走 kb_launcher.py（插件注册中心动态路由）
+exec "$PY" "$VAULT/pipeline/kb_launcher.py" "$@" --root "$VAULT"
