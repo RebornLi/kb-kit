@@ -4,6 +4,60 @@
 
 ---
 
+## v2.0.0 — KB 插件化架构改造（2026-09-13）
+
+将 KB 从"宿主系统"改造为"插件式"架构，与 openclaw / DSH / hermes 等 Agent 插件
+统一为同一套插件接口和注册中心，保持 100% 向后兼容。
+
+### 🆕 新增
+- **`pipeline/plugin_base.py`** — 插件基协议
+  - `PluginBase`（抽象基类）：`metadata()` / `initialize()` / `execute()` / `shutdown()`
+  - `PluginContext`（依赖注入容器）：`vault_root` / `state_store` / `config` / `logger`
+  - `PluginMetadata`（元数据值对象）：`name` / `version` / `type` / `actions` / `dependencies` / `cli_aliases`
+- **`pipeline/plugin_registry.py`** — 插件注册中心
+  - `discover()`：扫描 `plugins/` 目录，`importlib` 动态加载所有 `PluginBase` 子类
+  - `register()`：检查插件名冲突、依赖缺失、配置启用/禁用
+  - `initialize_all()`：Kahn 拓扑排序按依赖顺序初始化，有环标记 disabled
+  - `execute()`：查找插件并调用 `execute(action, params)`，错误隔离
+  - `list_plugins()` / `resolve_alias()`：查询与 CLI 兼容映射
+- **`pipeline/kb_launcher.py`** — CLI 统一入口
+  - `COMPAT_MAP`：旧 CLI 命令 → `(plugin_name, action)` 兼容映射表
+  - `KBLauncher.run()`：解析命令 → 查映射 → 构造 params → 注册中心分发
+  - 自动注入 `--root`，支持 `kb list` / `kb help`
+- **`pipeline/plugins/` 目录** — 24 个插件文件
+  - 4 个 Agent 适配器插件：`agent_md` / `agent_json` / `agent_sqlite` / `agent_detect`
+  - 19 个 KB 功能模块插件：`rag` / `intake` / `feedback` / `link` / `recall` / `healthcheck` / `dashboard` / `clean` / `validate` / `sync` / `memory_sync` / `classify` / `graph` / `rerank` / `semantic_chunk` / `ingest_chat` / `ingest_convert` / `user_manager` / `health_metrics`
+  - 1 个 subprocess 封装基类：`_subprocess_plugin.py`（KB 模块插件统一通过 subprocess 调用原脚本，保持 100% 兼容）
+- **`reference/plugin-config.json`** — 23 个插件的启用/禁用配置
+
+### 🔧 改造
+- **`kb`（bash 启动器）**：删除 `case "$TOOL" in` 硬编码块，改为 `exec python3 pipeline/kb_launcher.py "$@" --root "$VAULT"`
+- **`kb.cmd`（Windows 启动器）**：删除 `if /i "%TOOL%"=="xxx"` 硬编码块，改为统一调用 `kb_launcher.py`
+- 原 25 个 pipeline 模块**保持原位不变**，插件封装层通过 import/subprocess 调用
+
+### 🧪 实测（2026-09-13）
+| 验证项 | 结果 |
+|---|---|
+| 插件加载 | ✅ 23 个插件全部 loaded |
+| `kb list` | ✅ 列出所有插件及状态 |
+| `kb help` | ✅ 显示完整帮助 |
+| `kb agent detect` | ✅ 探测到 OpenClaw / Hermes / DSH / Codex |
+| `kb validate` | ✅ 29 笔记校验通过 |
+| `kb healthcheck` | ✅ 与改造前行为一致 |
+| 扩展性 | ✅ 新插件自动发现，无需改核心代码 |
+| 错误隔离 | ✅ 语法错误插件被跳过，其他正常 |
+| `growth_cron.sh` | ✅ 直接调 .py，不受影响 |
+
+### 📐 设计原则
+- **开闭原则**：新增插件不改核心代码（注册中心、CLI 启动器）
+- **适配器模式**：插件封装层通过 import 调用原模块函数，不重写业务逻辑
+- **依赖注入**：插件通过 `PluginContext` 访问共享服务，不直接 import 其他模块
+- **零依赖**：仅使用 Python 标准库（abc / importlib / json / logging）
+- **错误隔离**：单个插件加载/执行失败不影响其他插件
+- **100% 向后兼容**：原 CLI 命令、`kb-agent.json`、`growth_cron.sh` 全部不变
+
+---
+
 ## v1.0.0 — 首次发布（2026-08，套件初始版本）
 
 kb-kit 初始交付：把一套会自成长的 Obsidian 知识库落成可一键部署的工程。

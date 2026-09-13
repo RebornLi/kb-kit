@@ -26,9 +26,35 @@
 | 看收件箱要不要路由 | `kb ingest` |
 | 看有没有孤岛/坏链/缺字段 | `kb healthcheck` |
 | 今天该回忆哪些 | `kb recall` |
+| 看所有插件状态 | `kb list` |
 
 > `kb`（Windows 用 `kb.cmd`）会自动找到你的 vault，不用记路径。
 > 完整命令清单见 `README.md`。
+
+## 插件化架构（v2.0.0+）
+
+KB 的所有功能模块和 Agent 适配器都是插件，统一放在 `pipeline/plugins/` 目录。
+
+**新增插件**：只需在 `pipeline/plugins/` 下创建 `.py` 文件，定义 `PluginBase` 子类，无需改核心代码：
+
+```python
+# pipeline/plugins/my_plugin.py
+from plugin_base import PluginBase, PluginContext, PluginMetadata
+
+class MyPlugin(PluginBase):
+    def metadata(self):
+        return PluginMetadata(name="my", version="1.0",
+                             plugin_type="kb_module", actions=["hello"])
+    def initialize(self, ctx): self._ctx = ctx
+    def execute(self, action, params):
+        print("Hello!"); return 0
+```
+
+```bash
+kb my hello    # 立即可用
+```
+
+**禁用插件**：编辑 `reference/plugin-config.json`，设 `"enabled": false`。
 
 ## 想让知识库"自己跑"（可选）
 

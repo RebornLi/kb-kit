@@ -7,6 +7,7 @@
 
 - **零依赖**：成长引擎只用 Python 标准库，**不需要 pip install**，任何装了 Python 3.8+ 的机器都能跑
 - **跨平台**：`install.sh`（Linux/macOS）、`install.ps1` / `install.bat`（Windows）
+- **插件化架构**：KB 功能模块和 Agent 适配器统一为插件，新增功能只需放入 `plugins/` 目录，无需改核心代码
 - **多 Agent**：自动探测并摄取 OpenClaw / Hermes / DSH / Codex 的记忆进知识库
 - **本地优先**：检索、向量索引、回忆调度全部本地完成，数据不出机器
 
@@ -21,9 +22,10 @@
 - [五、目录结构](#五目录结构)
 - [六、frontmatter 规范](#六frontmatter-规范)
 - [七、多 Agent 记忆摄取](#七多-agent-记忆摄取)
-- [八、让知识库"自己跑"](#八让知识库自己跑)
-- [九、常见问题](#九常见问题)
-- [十、版本演进](#十版本演进)
+- [八、插件化架构](#八插件化架构)
+- [九、让知识库"自己跑"](#九让知识库自己跑)
+- [十、常见问题](#十常见问题)
+- [十一、版本演进](#十一版本演进)
 - [License](#license)
 
 ---
@@ -117,6 +119,8 @@ bash install.sh          # Linux/macOS（无需 chmod；或先 chmod +x 再 ./in
 | `kb backup [daily\|weekly]` | 全量快照（zip + sha256） | **是**（写 `backups/`） |
 | `kb ingest agent` | 摄取本机 agent 记忆进 KB | **是**（先 `--dry-run`） |
 | `kb agent` | agent 注册表管理（detect/list/add/enable） | 否 |
+| `kb list` | 列出所有已注册插件及状态 | 否 |
+| `kb help` | 显示命令帮助 | 否 |
 
 ### 三条纪律（写在代码里）
 1. **写前 checkpoint**：任何 `apply` / `promote` 先 `review` / `--dry-run` 看清单。
@@ -203,9 +207,14 @@ kb-kit/                        ← 分发给别人就这个文件夹
     ├── 60-运营 Operations/    清洗/流转 SOP
     ├── 70-知识治理 Governance/ 元层：SOP / 指标 / 巡检 / 仪表盘
     ├── 90-归档 Archive/       收尾/过期
-    ├── pipeline/              成长引擎（25 个 Python 模块，纯标准库）
+    ├── pipeline/              成长引擎（25 个 Python 模块 + 插件化架构）
+    │   ├── plugin_base.py     插件基协议（PluginBase + PluginContext + PluginMetadata）
+    │   ├── plugin_registry.py 插件注册中心（发现/注册/拓扑排序/分发）
+    │   ├── kb_launcher.py     CLI 统一入口（兼容映射 + 动态路由）
+    │   ├── plugins/           插件目录（4 个 Agent + 19 个 KB 模块）
+    │   └── *.py               原 25 个业务模块（保持原位不变）
     ├── scripts/               备份 / 演练 / 定时 / 巡检脚本
-    ├── reference/             协议与规则（记忆写入路由 / PM 扣分 / agent 锚点页）
+    ├── reference/             协议与规则 + plugin-config.json（插件启用/禁用）
     ├── logs/                  运行日志（gitignore）
     ├── vector index/          向量索引（gitignore）
     └── .obsidian/             Obsidian 配置
@@ -215,6 +224,9 @@ kb-kit/                        ← 分发给别人就这个文件夹
 
 | 模块 | 职责 | 引擎编号 |
 |------|------|---------|
+| `plugin_base.py` | 插件基协议（PluginBase + PluginContext + PluginMetadata） | - |
+| `plugin_registry.py` | 插件注册中心（发现/注册/拓扑排序/分发） | - |
+| `kb_launcher.py` | CLI 统一入口（兼容映射 + 动态路由） | - |
 | `kb_common.py` | 公共工具：frontmatter 解析 + ROOT_DEFAULT + EXCLUDE + 分词 | - |
 | `rag.py` | 本地语义检索（TF-IDF 余弦，中文 unigram+bigram） | - |
 | `intake_triage.py` | 摄入 triage（四维打分 + 路由） | ① |
@@ -240,6 +252,36 @@ kb-kit/                        ← 分发给别人就这个文件夹
 | `semantic_chunk.py` | 语义分块（长文本 → 语义连贯片段） | - |
 | `state_manager.py` | 状态管理（引擎运行态持久化） | - |
 | `user_manager.py` | 用户管理（多用户配置 / 权限） | - |
+
+### plugins/ 插件清单
+
+所有插件统一放在 `pipeline/plugins/` 目录，通过 `PluginRegistry` 自动发现和加载。
+
+| 插件 | 类型 | 封装的原模块 | actions |
+|------|------|-------------|---------|
+| `agent_md_plugin.py` | agent | `memory_ingest.py` | mirror / sync / mirror-core / extract |
+| `agent_json_plugin.py` | agent | `memory_ingest_json.py` | ingest |
+| `agent_sqlite_plugin.py` | agent | `memory_ingest_sqlite.py` | ingest |
+| `agent_detect_plugin.py` | agent | `agent_registry.py` | detect / list / add / enable / setup / ingest |
+| `rag_plugin.py` | kb_module | `rag.py` | index / query |
+| `intake_plugin.py` | kb_module | `intake_triage.py` | review / apply |
+| `feedback_plugin.py` | kb_module | `feedback_loop.py` | ingest / hit / apply |
+| `link_plugin.py` | kb_module | `link_engine.py` | suggestions / apply |
+| `recall_plugin.py` | kb_module | `recall_schedule.py` | deck / mark / status |
+| `healthcheck_plugin.py` | kb_module | `kb-healthcheck.py` | check |
+| `health_metrics_plugin.py` | kb_module | `kb_health.py` | metrics |
+| `dashboard_plugin.py` | kb_module | `dashboard.py` | generate |
+| `clean_plugin.py` | kb_module | `clean.py` | dry-run / apply / report / chunk |
+| `validate_plugin.py` | kb_module | `validate.py` | validate |
+| `sync_plugin.py` | kb_module | `sync.py` | dry-run / apply / rollback / history / ingest-any |
+| `memory_sync_plugin.py` | kb_module | `memory_sync.py` | review / promote |
+| `classify_plugin.py` | kb_module | `classify.py` | classify |
+| `graph_plugin.py` | kb_module | `graph.py` | build |
+| `rerank_plugin.py` | kb_module | `rerank.py` | rerank |
+| `semantic_chunk_plugin.py` | kb_module | `semantic_chunk.py` | chunk |
+| `ingest_chat_plugin.py` | kb_module | `ingest_chat.py` | parse |
+| `ingest_convert_plugin.py` | kb_module | `ingest_convert.py` | convert |
+| `user_manager_plugin.py` | kb_module | `user_manager.py` | add / list / remove / check-perm |
 
 ### scripts/ 脚本清单
 
@@ -309,7 +351,102 @@ kb agent enable --name DSH --enable true
 
 ---
 
-## 八、让知识库"自己跑"
+## 八、插件化架构
+
+v2.0.0 将 KB 从"宿主系统"改造为"插件式"架构，与 Agent 适配器统一为同一套插件接口。
+
+### 架构概览
+
+```
+用户层 (CLI)
+  kb (bash) / kb.cmd (Windows)
+      ↓
+  kb_launcher.py        ← CLI 统一入口（兼容映射 + 动态路由）
+      ↓
+  plugin_registry.py    ← 插件注册中心（发现/注册/拓扑排序/分发）
+      ↓
+  pipeline/plugins/     ← 插件目录（4 个 Agent + 19 个 KB 模块）
+      ↓
+  原 pipeline 模块      ← 业务逻辑层（保持原位不变）
+```
+
+### 核心组件
+
+| 组件 | 职责 |
+|------|------|
+| `plugin_base.py` | 插件基协议：`PluginBase`（抽象基类）+ `PluginContext`（依赖注入）+ `PluginMetadata`（元数据） |
+| `plugin_registry.py` | 插件注册中心：发现 `plugins/` 目录 → 动态加载 → 依赖拓扑排序 → 统一分发 |
+| `kb_launcher.py` | CLI 统一入口：兼容映射表（旧命令 → 插件 action）+ 动态路由 |
+| `plugins/*.py` | 插件实现：薄封装层，延迟 import 原模块并调用，不重写业务逻辑 |
+
+### 插件接口
+
+每个插件继承 `PluginBase`，实现四个方法：
+
+```python
+class MyPlugin(PluginBase):
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(name="my", version="1.0",
+                             plugin_type="kb_module",  # 或 "agent"
+                             actions=["hello"])
+
+    def initialize(self, ctx: PluginContext) -> None:
+        self._ctx = ctx  # 接收依赖注入
+
+    def execute(self, action: str, params: dict) -> int:
+        if action == "hello":
+            print("Hello!")
+            return 0
+
+    def shutdown(self) -> None:
+        pass  # 可选：清理资源
+```
+
+### 扩展：新增插件
+
+只需在 `pipeline/plugins/` 目录下创建 `.py` 文件，定义 `PluginBase` 子类，**无需修改注册中心或 CLI 启动器**：
+
+```bash
+# 创建新插件
+cat > pipeline/plugins/my_plugin.py << 'EOF'
+from plugin_base import PluginBase, PluginContext, PluginMetadata
+
+class MyPlugin(PluginBase):
+    def metadata(self):
+        return PluginMetadata(name="my", version="1.0",
+                             plugin_type="kb_module", actions=["hello"])
+    def initialize(self, ctx): self._ctx = ctx
+    def execute(self, action, params):
+        print("Hello!"); return 0
+EOF
+
+# 立即可用
+kb my hello
+```
+
+### 插件配置
+
+`reference/plugin-config.json` 控制插件启用/禁用：
+
+```json
+{
+  "rag": { "enabled": true },
+  "my_plugin": { "enabled": false }
+}
+```
+
+### 设计原则
+
+- **开闭原则**：新增插件不改核心代码（注册中心、CLI 启动器）
+- **适配器模式**：插件封装层通过 import 调用原模块函数，不重写业务逻辑
+- **依赖注入**：插件通过 `PluginContext` 访问共享服务，不直接 import 其他模块
+- **零依赖**：仅使用 Python 标准库（abc/importlib/json/logging）
+- **错误隔离**：单个插件加载/执行失败不影响其他插件
+- **100% 向后兼容**：原 CLI 命令、`kb-agent.json`、`growth_cron.sh` 全部不变
+
+---
+
+## 九、让知识库"自己跑"
 
 把下面加进定时任务（Linux cron / Windows 任务计划）：
 
@@ -350,7 +487,7 @@ Windows 用任务计划调 `scripts/growth_cron.sh` 即可（需有 bash；或�
 
 ---
 
-## 九、常见问题
+## 十、常见问题
 
 - **一定要用 Obsidian 吗？** 建议用（看图、链接、仪表盘体验最好）。但引擎本身只看 `.md`，纯命令行也能跑（`pipeline/*.py`）。
 - **迁移旧知识库？** 把你的 `.md` 按 PARA 分类放进新建 vault，跑 `kb rag index` 即可。
@@ -363,9 +500,17 @@ Windows 用任务计划调 `scripts/growth_cron.sh` 即可（需有 bash；或�
 
 ---
 
-## 十、版本演进
+## 十一、版本演进
 
 详见 [CHANGELOG.md](CHANGELOG.md)。
+
+### v2.0.0 — KB 插件化架构改造（2026-09-13）
+- 将 KB 从"宿主系统"改造为"插件式"架构，与 Agent 插件统一接口
+- 新增 `plugin_base.py`（插件基协议）+ `plugin_registry.py`（注册中心）+ `kb_launcher.py`（CLI 统一入口）
+- 新增 `pipeline/plugins/` 目录：4 个 Agent 适配器插件 + 19 个 KB 功能模块插件
+- `kb` / `kb.cmd` 启动器改为统一调用 `kb_launcher.py`，删除硬编码 case/if-elif
+- 新增 `kb list` 命令列出所有插件，`reference/plugin-config.json` 控制启用/禁用
+- 100% 向后兼容：原 CLI 命令、`kb-agent.json`、`growth_cron.sh` 全部不变
 
 ### v1.0.0 — 首次发布（2026-08）
 kb-kit 初始交付：PARA 分区 + 成长引擎 + 本地语义检索 + 运维 + 跨平台安装器。
