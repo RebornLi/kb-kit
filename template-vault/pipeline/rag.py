@@ -9,7 +9,7 @@
 #   python3 pipeline/rag.py index  [--root R]
 #   python3 pipeline/rag.py query  "<问题>" [--top 3] [--root R] [--answer]
 # ============================================================
-import argparse, os, re, sys, json, math, time, datetime
+import argparse, os, re, sys, json, math, time, datetime, hashlib
 from pathlib import Path
 from collections import Counter
 from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint
