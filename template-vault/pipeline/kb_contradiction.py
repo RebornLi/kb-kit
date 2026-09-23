@@ -10,14 +10,17 @@
 #   1. 对编译笔记（排除 raw/ 不可变层、归档、收件箱、MOC）建 token 向量；
 #   2. 高语义相似度（同一主题）的笔记对，若"否定密度"差异很大
 #      （一篇大量否定/Contrast，一篇近乎肯定）→ 判为**陈述相反**的矛盾候选；
-#   3. 只**产出清单交人工复核**，绝不自动改/删笔记（lint 定位，同 kb_rsi 只读）。
+#   3. 扫描本身只**产出清单交人工复核**，绝不*自动*改/删笔记（lint 定位，同 kb_rsi 只读）；
+#   4. 人工用 `apply` 确认后才会写回：对其一做 retire（同 kb_engine T1 的字段
+#      kb_action=retire/status=legacy/category=contradicted，带 git checkpoint 可回滚）。
 #
 # 局限（诚实）：否定密度是否定词/转折词的代理，非真正的语义极性解析；
 #   可能漏报（同主题双方都否定）或误报（主题相关但并非对立）。故只供人审，
 #   且被人工采纳前不会进入 T1/T2 的自动流程（也就无法被"删一篇来藏矛盾"刷爆）。
 #
 # 用法:
-#   python3 pipeline/kb_contradiction.py [--root R] [--json] [--verbose]
+#   python3 pipeline/kb_contradiction.py [--root R] [--json] [--verbose]        # 检测（默认，只读）
+#   python3 pipeline/kb_contradiction.py apply [--root R] --retain 1:a 2:b [--id 1 2] [--force] [--json]  # 人工确认后写回
 # ============================================================
 import argparse, os, re, sys, json, math
 from pathlib import Path
@@ -29,6 +32,39 @@ from kb_common import norm as _norm, cos as _cos, build_inverted_index, candidat
 from kb_constants import CONTRA_SIM, MAX_NOTES_CONTRA as MAX_NOTES
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)
+
+# 写回三件套：复用 kb_engine 的写前 checkpoint + frontmatter 写入（含 raw/ 守卫），
+# 使人工 retire 与 kb_engine T1 retire 同字段、共享同一可回滚锚点。
+try:
+    from kb_engine import git_backup, set_fm_field
+except Exception:  # pragma: no cover — 两文件同目录，正常总会导入成功
+    import subprocess
+
+    def git_backup(root, msg):
+        subprocess.run(["git", "-C", str(root), "add", "-u"], capture_output=True)
+        if subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                          capture_output=True, text=True).stdout.strip():
+            subprocess.run(["git", "-C", str(root), "commit", "-q", "-m", msg],
+                           capture_output=True)
+
+    def set_fm_field(p, key, value):
+        p = Path(p)
+        text = p.read_text(encoding="utf-8")
+        m0 = re.match(r"^\s*---\s*$", text, re.M)
+        if not m0:
+            return False
+        rest = text[m0.end():]
+        m1 = re.search(r"^\s*---\s*$", rest, re.M)
+        if not m1:
+            return False
+        fm_txt, body = rest[:m1.start()], rest[m1.end():]
+        line = f"{key}: {value}"
+        if re.search(rf"^{re.escape(key)}\s*:", fm_txt, re.M):
+            new_fm = re.sub(rf"^{re.escape(key)}\s*:.*$", line, fm_txt, count=1, flags=re.M)
+        else:
+            new_fm = fm_txt.rstrip("\n") + "\n" + line + "\n"
+        p.write_text("---\n" + new_fm + "\n---\n" + body, encoding="utf-8")
+        return True
 
 # 中文按字符单字建向量（kb_rsi.tokenize 把整段中文当单一 token，致中文笔记间余弦恒近 0），
 # 英文按词。这样"系统已经拥有意识"与"系统没有意识"能通过共有字(系统意识...)产生余弦相似。
@@ -266,16 +302,166 @@ def render(pairs: List[Dict[str, Any]]) -> str:
     return "\n".join(L) + "\n"
 
 
+def _snap_path(root: Union[str, Path]) -> Path:
+    """矛盾快照（.kb_contradictions.json）路径。"""
+    return Path(root) / "pipeline" / ".kb_contradictions.json"
+
+
+def _parse_retain(specs: Optional[List[str]]) -> Dict[int, str]:
+    """'1:a' '2:b' → {1: 'a', 2: 'b'}。非法项（非 a/b、非数字）一律忽略。"""
+    out: Dict[int, str] = {}
+    for s in specs or []:
+        if ":" not in str(s):
+            continue
+        sid, side = str(s).rsplit(":", 1)
+        if side.strip().lower() not in ("a", "b"):
+            continue
+        try:
+            out[int(sid)] = side.strip().lower()
+        except ValueError:
+            continue
+    return out
+
+
+def _git_commit(root: Union[str, Path], rel: str, msg: str) -> None:
+    """只提交单个 rel 的改动（与 kb_query 同约定）；无改动则不提交。"""
+    import subprocess
+    subprocess.run(["git", "-C", str(root), "add", "--", rel], capture_output=True)
+    if subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                      capture_output=True, text=True).stdout.strip():
+        subprocess.run(["git", "-C", str(root), "commit", "-m", msg], capture_output=True)
+
+
+def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
+          retain: Optional[List[str]] = None, force: bool = False) -> Dict[str, Any]:
+    """人工确认后，对选定矛盾对做写回。
+
+    每对矛盾 {a, b} 人工保留 retain 指定的一侧，对其一侧做 retire（同 kb_engine T1：
+    kb_action=retire / status=legacy / category=contradicted），全程 git checkpoint 可回滚。
+    返回 {written, skipped, decisions, note}。写入不改变 raw/（不可变层硬守卫）。
+    """
+    sp = _snap_path(root)
+    if not sp.exists():
+        return {"written": [], "skipped": [], "decisions": [],
+                "note": "无矛盾快照；先运行 `python3 pipeline/kb_contradiction.py` 生成"}
+    snap = json.loads(sp.read_text(encoding="utf-8"))
+    pairs = snap.get("pairs", [])
+    by_id = {int(p.get("id")): p for p in pairs}  # id 归一化为 int（快照存 int，CLI 传 str）
+    if ids is not None:
+        try:
+            want = {int(x) for x in ids}
+        except (TypeError, ValueError):
+            want = set(ids)
+    else:
+        want = set(by_id.keys())
+    retain_map = _parse_retain(retain)
+
+    written, skipped, decisions = [], [], []
+    for pid in sorted(want, key=lambda x: (x is None, x if x is None else int(x))):
+        p = by_id.get(pid)
+        if p is None:
+            skipped.append({"id": pid, "reason": "快照中不存在该对"})
+            continue
+        side = retain_map.get(pid)
+        if side not in ("a", "b"):
+            skipped.append({"id": pid, "reason": "未指定保留侧（用 --retain %s:a|b）" % pid})
+            continue
+        keep_rel, drop_rel = p.get(side), p.get("b" if side == "a" else "a")
+        decisions.append({"id": pid, "keep": keep_rel, "drop": drop_rel})
+
+    if not decisions:
+        return {"written": written, "skipped": skipped, "decisions": [d["id"] for d in decisions],
+                "note": ("无有效决策。对每对矛盾用 --retain <id>:a|b 指定保留侧；"
+                         "保留侧不动，另一侧 retire。")}
+
+    # 写前一次性 checkpoint（可回滚锚点；与 kb_engine T1 同约定）
+    git_backup(root, "pre-kb-contradiction-apply: retire 矛盾笔记")
+
+    for d in decisions:
+        drop_rel, keep_rel = d["drop"], d["keep"]
+        dp = Path(root) / drop_rel
+        if not dp.is_file():
+            skipped.append({"id": d["id"], "drop": drop_rel, "reason": "文件不存在"})
+            continue
+        # raw/ 不可变层硬守卫（与 kb_engine 同约定）
+        rel = str(dp.relative_to(root))
+        if kb_rsi.is_raw(rel):
+            skipped.append({"id": d["id"], "drop": drop_rel, "reason": "raw/ 不可变，拒绝修改"})
+            continue
+        if not set_fm_field(dp, "kb_action", "retire"):
+            skipped.append({"id": d["id"], "drop": drop_rel, "reason": "frontmatter 写入失败（无 --- 段？）"})
+            continue
+        set_fm_field(dp, "status", "legacy")
+        set_fm_field(dp, "category", "contradicted")
+        set_fm_field(dp, "contradiction_pair_id", d["id"])
+        set_fm_field(dp, "contradiction_survivor", keep_rel)
+        # 同步：在保留侧标注它赢了该对矛盾（可逆的小标记）
+        if keep_rel:
+            kp = Path(root) / keep_rel
+            if kp.is_file() and not kb_rsi.is_raw(str(kp.relative_to(root))):
+                set_fm_field(kp, "contradiction_survived", d["id"])
+        _git_commit(root, drop_rel, f"kb: 矛盾[{d['id']}] retire `{drop_rel}`（保留`{keep_rel}`）")
+        written.append({"id": d["id"], "drop": drop_rel, "keep": keep_rel})
+
+    try:
+        import evolution_log
+        evolution_log.append(root, "CONTRADICTION",
+                             f"人工 apply retire {len(written)} 篇矛盾笔记（保留等价的另一侧）",
+                             detail="、".join(f"{w['id']}:{w['drop']}←{w['keep']}" for w in written) or "-")
+    except (ImportError, OSError, AttributeError, TypeError):
+        pass
+    note = (f"已 retire {len(written)} 篇 · 跳过 {len(skipped)} 篇。"
+            if written else "无成功写入；见 skipped 原因")
+    return {"written": written, "skipped": skipped,
+            "decisions": [d["id"] for d in decisions], "note": note}
+
+
+def _render_apply_result(res: Dict[str, Any]) -> None:
+    L = ["# ✅ 矛盾人工 apply 写回", ""]
+    for w in res.get("written", []):
+        L.append(f"· retire `{w['drop']}`（保留 `{w['keep']}`）— 矛盾对 #{w['id']}")
+    for s in res.get("skipped", []):
+        where = s.get("drop") or s.get("pairs_side")
+        L.append(f"· 跳过 {where} — {s.get('reason', '未知')}")
+    L.append("")
+    if res.get("written"):
+        L += ["> 保留侧仍在内存，被 retire 侧仅从活跃标记移除（git 历史可回滚）。"
+              "回滚：`git log` 找 `pre-kb-contradiction-apply` 后 `git reset --hard <sha>`。"]
+    else:
+        L.append(res.get("note", ""))
+    print("\n".join(L) + "\n")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=ROOT_DEFAULT)
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--verbose", action="store_true")
+    sub = ap.add_subparsers(dest="cmd")
+    ap_apply = sub.add_parser("apply", help="人工确认后写回（retire 冲突笔记侧，可回滚）")
+    # --root/--json 用 SUPPRESS：不覆盖从顶层解析出的值（避免 apply 跑到错误 vault）
+    ap_apply.add_argument("--root", default=argparse.SUPPRESS)
+    ap_apply.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    ap_apply.add_argument("--id", nargs="*", default=None,
+                          help="只处理这些矛盾对 id（省略=处理全部）")
+    ap_apply.add_argument("--retain", nargs="*", default=None,
+                          help="每对保留侧 '1:a' '2:b'：保留侧不动，另一侧 retire")
+    ap_apply.add_argument("--force", action="store_true", help="跳过确认提示直接执行")
     args = ap.parse_args()
     root = Path(args.root)
 
+    if args.cmd == "apply":
+        res = apply(root, ids=args.id, retain=args.retain, force=getattr(args, "force", False))
+        if args.json:
+            print(json.dumps(res, ensure_ascii=False, indent=2))
+        else:
+            _render_apply_result(res)
+        return 0
+
     pairs = detect(root)
     score = contradiction_zero_score(len(pairs))
+    for i, p in enumerate(pairs, 1):
+        p.setdefault("id", i)  # 稳定 id，供 apply --retain <id>:a|b 定位
     snap = {"n_contradictions": len(pairs), "zero_score": score, "pairs": pairs}
     # P2-2: lint 事件追加到统一演进日志
     try:

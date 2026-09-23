@@ -5,7 +5,7 @@
 #   2. `EVOLVED.md`           人类可读、按日期分组（**提交入库**，RSI 演进史）
 #
 # 事件类型用统一前缀标注，便于人眼扫读与机器过滤：
-#   INGEST | QUERY | LINT | ENGINE | HEALTH | T1 | T2 | T3 | NOTE
+#   INGEST | QUERY | LINT | ENGINE | HEALTH | T1 | T2 | T3 | NOTE | CONTRADICTION
 #
 # 用法：
 #   from evolution_log import append
@@ -18,12 +18,13 @@ from datetime import datetime
 from pathlib import Path
 
 # 统一前缀：ingest/query/lint/engine 四类 + 细分 tier/health/note
-EVENTS = ("INGEST", "QUERY", "LINT", "ENGINE", "HEALTH", "T1", "T2", "T3", "NOTE")
+EVENTS = ("INGEST", "QUERY", "LINT", "ENGINE", "HEALTH", "T1", "T2", "T3", "NOTE", "CONTRADICTION")
 # 人读颜色前缀（同事件固定配色语义，仅文档）
 _EVENT_LABEL = {
     "INGEST": "摄入记忆", "QUERY": "查询综合", "LINT": "质量lint",
     "ENGINE": "引擎整理", "HEALTH": "健康快照", "T1": "T1整理",
     "T2": "T2加权", "T3": "T3调参", "NOTE": "备注",
+    "CONTRADICTION": "矛盾纠正",
 }
 _HEADER = [
     "# 📚 RSI 演进日志（人可读）", "",
