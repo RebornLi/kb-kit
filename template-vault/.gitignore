@@ -1,0 +1,69 @@
+# ============================================================
+# Obsidian 知识库 .gitignore
+# 边界依据：方案 v4.0 §2.4 —— 仅忽略"程序化产物 + Obsidian 本地态"
+# 铁律：.git/ memory/ reference/ media/ .obsidian(配置)/ 笔记正文 一律纳入版本库
+# ============================================================
+
+# ---- Obsidian 本地临时 / 锁文件（不入库）----
+.~lock.*
+未命名*
+.obsidian/workspace*.json
+.obsidian/.global-dnd.json
+.obsidian/url-map.json
+
+# ---- 运行时产物（不入库；来源已由 git 追踪）----
+logs/
+backups/
+vector index/
+_SELF_OPT/          # 方案 §5.2 可选隔离目录，默认关闭，隔离于主知识层
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# ---- 成长引擎瞬态报表（可重新生成，cron 重跑不污染 tree）----
+intake_triage.md
+link_suggestions.md
+recall_deck.md
+recall_schedule.md
+feedback_hits.md
+
+# ---- 成长引擎瞬态 state（引擎写后自动重置，不入库）----
+.memory_sync_state.json
+.memory_ingest_state.json
+.recall_state.json
+# P0-3d: .kb/state/feedback_state.json（importance 加权依据）已纳入 git 版本控制，
+#   可 diff/回滚；故不再 blanket ignore。fallback 路径 pipeline/.feedback_state.json
+#   仅在 absence of state_manager 时写入，默认不入库。
+.pipeline/.feedback_state.json
+.kb-agent.json
+kb-agent.json
+# RSI 自我改进引擎运行时态（T3 开关/决策日志；默认 T3 关闭，见 RSI-自我改进设计.md）
+.kb_rsi_config.json
+.kb_engine_proposals.jsonl
+.kb_rsi_proposals.jsonl
+# P1-C: 矛盾检测瞬态快照 + 报告（每次运行重新生成）
+.kb_contradictions.json
+kb_contradictions_report.md
+# P2-1: 查询→知识 回路 transient 提案 + 频率额度（人工在环，未写库）
+.kb_query_proposals.jsonl
+.kb_query_state.json
+# P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
+.kb_evolution.jsonl
+EVOLVED.md
+# P3-2: 阈值标定仿真 ground truth + 标定曲线 CSV（synth/calibrate 产物，可重生成，不入库）
+gt_dup.json
+gt_over.json
+*.calibrate.csv
+
+# ---- Python 缓存 / 虚拟环境 ----
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+venv/
+# 本地 vLLM 接线（含服务密钥）：不入库
+.env
+
+# ---- 注意 ----
+# *.canvas / *.sql / *.json / *.yaml 等按 §10 仅在 Obsidian 侧栏隐藏，
+# 版本管理仍保留（不在此忽略）。

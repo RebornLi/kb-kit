@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# ============================================================
+# kb —— 知识库每日使用启动器（Linux / macOS）
+#   Windows 用户用同目录的 kb.cmd（双击，或 PowerShell 里 kb xxx）。
+#
+# 作用：把 pipeline/ 下各工具封装成语义命令，自动注入 --root（=本脚本所在目录=
+# vault 根），所以你不用记得 --root，也记不动一堆子命令。
+#
+# 插件化版本：所有命令统一通过 kb_launcher.py 路由到插件注册中心。
+#
+# 用法: kb <工具> [参数...]
+#   kb rag index                 # 重建本地向量索引（写新笔记后必跑）
+#   kb query "怎么备份知识库"      # 自然语言检索
+#   kb ingest                    # 收件箱摄入 triage 清单
+#   kb ingest move               # 按路由把收件箱挪到对应分区（写操作）
+#   kb ingest agent              # 摄取本机 agent 记忆进 KB
+#   kb feedback                  # 命中信号计数
+#   kb link                      # 孤岛补链建议
+#   kb link apply                # 应用补链（写操作）
+#   kb recall                    # 今日回忆 deck
+#   kb healthcheck               # 健康巡检报告
+#   kb dashboard                 # 生成治理仪表盘
+#   kb clean --apply             # 清洗/分块（写操作）
+#   kb validate                  # frontmatter 校验
+#   kb sync dry-run              # 知识同步管道
+#   kb backup [daily|weekly]     # 全量快照 -> backups/
+#   kb list                      # 列出所有插件
+#   kb help                      # 本说明
+# ============================================================
+set -euo pipefail
+
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+VAULT="$SELF_DIR"
+
+PY=""
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+elif command -v py >/dev/null 2>&1; then PY=py
+fi
+if [ -z "$PY" ]; then
+  echo "❌ 未找到 Python，请先安装 Python 3.8+ 并加进 PATH。" >&2; exit 3
+fi
+
+# backup 仍走 bash 脚本（不插件化）
+if [ "${1:-}" = "backup" ]; then
+  exec bash "$SELF_DIR/scripts/backup_now.sh" "$VAULT" "${2:-daily}"
+fi
+
+# 所有其他命令统一走 kb_launcher.py（插件注册中心动态路由）
+exec "$PY" "$VAULT/pipeline/kb_launcher.py" "$@" --root "$VAULT"

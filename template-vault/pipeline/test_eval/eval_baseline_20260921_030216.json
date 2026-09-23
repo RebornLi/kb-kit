@@ -1,0 +1,104 @@
+{
+  "schema": "kb_eval/1",
+  "aggregate": {
+    "context_recall": 0.265625,
+    "faithfulness": 0.3815477129930255,
+    "answer_relevance": 0.21962874535055044,
+    "golden_hit": 0.375,
+    "composite": 0.310450364585894,
+    "n_items": 8,
+    "rag": "rag.py",
+    "judge": "off",
+    "run_at": "2026-09-21T03:02:16"
+  },
+  "items": [
+    {
+      "id": "dec-tfidf",
+      "question": "为什么本地检索方案最终选 TF-IDF/BM25 而不是嵌入模型？",
+      "golden_note": "30-决策日志 Decisions/00-决策示例-选检索方案.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.375,
+      "golden_hit": 1.0,
+      "faithfulness": 0.7727272727272727,
+      "answer_relevance": 0.13333333333333333
+    },
+    {
+      "id": "tech-nojieba",
+      "question": "本地知识库为什么故意不用 jieba 分词？",
+      "golden_note": "20-技术 Technology/01-技术示例-本地知识库.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.0,
+      "golden_hit": 0.0,
+      "faithfulness": 0.0125,
+      "answer_relevance": 0.2153846153846154
+    },
+    {
+      "id": "metric-deadlink",
+      "question": "知识库死链率的健康阈值是多少？用什么命令检查？",
+      "golden_note": "70-知识治理 Governance/04-质量与指标.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.0,
+      "golden_hit": 0.0,
+      "faithfulness": 0.05555555555555555,
+      "answer_relevance": 0.4067796610169492
+    },
+    {
+      "id": "validate-gate",
+      "question": "kb validate --strict 的门禁行为是什么？",
+      "golden_note": "70-知识治理 Governance/04-质量与指标.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 1.0,
+      "golden_hit": 1.0,
+      "faithfulness": 0.8203125,
+      "answer_relevance": 0.0975609756097561
+    },
+    {
+      "id": "chunk-long",
+      "question": "超长笔记怎么处理？",
+      "golden_note": "70-知识治理 Governance/04-质量与指标.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.25,
+      "golden_hit": 0.0,
+      "faithfulness": 0.10714285714285714,
+      "answer_relevance": 0.0
+    },
+    {
+      "id": "project-rel",
+      "question": "技术示例笔记链接到哪个项目示例？",
+      "golden_note": "20-技术 Technology/01-技术示例-本地知识库.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.0,
+      "golden_hit": 0.0,
+      "faithfulness": 0.4351851851851852,
+      "answer_relevance": 0.48
+    },
+    {
+      "id": "backup-verify",
+      "question": "怎么验证向量索引在笔记变化后仍生效？",
+      "golden_note": "20-技术 Technology/01-技术示例-本地知识库.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.5,
+      "golden_hit": 1.0,
+      "faithfulness": 0.7708333333333333,
+      "answer_relevance": 0.3076923076923077
+    },
+    {
+      "id": "governance-loop",
+      "question": "知识库治理闭环由哪些规范构成？",
+      "golden_note": "70-知识治理 Governance/04-质量与指标.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.0,
+      "golden_hit": 0.0,
+      "faithfulness": 0.078125,
+      "answer_relevance": 0.11627906976744186
+    }
+  ]
+}

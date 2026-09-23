@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "摄入分类配置"
+  },
+  "weights": {
+    "structure": 25,
+    "density": 25,
+    "uniqueness": 25,
+    "value": 25
+  },
+  "thresholds": {
+    "route": 70,
+    "refine": 40,
+    "trash": 0
+  },
+  "merge_sim_threshold": 0.85,
+  "value_keywords": ["根因", "复盘", "决定", "决策", "为什么", "方案", "结论", "教训", "经验", "TODO", "下一步", "建议", "坑", "踩坑", "原则", "机制", "清洗", "路由", "入库", "管道", "治理", "知识"]
+}

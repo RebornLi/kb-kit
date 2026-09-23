@@ -1,0 +1,29 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "插件启用/禁用配置"
+  },
+  "rag": { "enabled": true },
+  "intake": { "enabled": true },
+  "feedback": { "enabled": true },
+  "link": { "enabled": true },
+  "recall": { "enabled": true },
+  "healthcheck": { "enabled": true },
+  "health_metrics": { "enabled": true },
+  "dashboard": { "enabled": true },
+  "clean": { "enabled": true },
+  "validate": { "enabled": true },
+  "sync": { "enabled": true },
+  "memory_sync": { "enabled": true },
+  "classify": { "enabled": true },
+  "graph": { "enabled": true },
+  "rerank": { "enabled": true },
+  "semantic_chunk": { "enabled": true },
+  "ingest_chat": { "enabled": true },
+  "ingest_convert": { "enabled": true },
+  "user_manager": { "enabled": true },
+  "agent_md": { "enabled": true },
+  "agent_json": { "enabled": true },
+  "agent_sqlite": { "enabled": true },
+  "agent_registry": { "enabled": true }
+}

@@ -1,0 +1,10 @@
+{
+  "_comment": "Node 0.1 评估阈值。kb_eval eval --strict 据此判退出码；默认非 strict 仅报告。阈值规模标定待真实数据积累后校准，先给经验基线。",
+  "thresholds_strict": {
+    "context_recall": 0.55,
+    "golden_hit": 0.50,
+    "faithfulness": 0.60
+  },
+  "faithful_support": 0.50,
+  "target_items": 20
+}

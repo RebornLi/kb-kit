@@ -1,0 +1,27 @@
+{
+  "schema": "kb_eval/1",
+  "aggregate": {
+    "context_recall": 0.375,
+    "faithfulness": 0.7727272727272727,
+    "answer_relevance": 0.13333333333333333,
+    "golden_hit": 1.0,
+    "composite": 0.5702651515151516,
+    "n_items": 1,
+    "rag": "rag.py",
+    "judge": "on",
+    "run_at": "2026-09-21T02:57:38"
+  },
+  "items": [
+    {
+      "id": "dec-tfidf",
+      "question": "为什么本地检索方案最终选 TF-IDF/BM25 而不是嵌入模型？",
+      "golden_note": "30-决策日志 Decisions/00-决策示例-选检索方案.md",
+      "n_hits": 3,
+      "error": null,
+      "context_recall": 0.375,
+      "golden_hit": 1.0,
+      "faithfulness": 0.7727272727272727,
+      "answer_relevance": 0.13333333333333333
+    }
+  ]
+}

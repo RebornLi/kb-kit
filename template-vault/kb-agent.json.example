@@ -1,0 +1,40 @@
+{
+  "_comment": "示例（仅参考，勿直接用）。实际安装的 vault 会自动生成同名的 kb-agent.json；本示例路径为占位，非真实私人路径。由 `kb install`/`create_vault.py` 探测本机 agent 后写入。可用环境变量覆盖探测位置：KB_OPENCLAW_HOME / KB_DSH_MEMORY / KB_DSH_EVOLVE_MEMORY / KB_CODEX_DATA / KB_DSH_PROJECT_CONTEXT_ROOT。",
+  "version": 1,
+  "agents": {
+    "openclaw": {
+      "type": "md",
+      "label": "OpenClaw",
+      "enabled": true,
+      "sources": {
+        "root": "<HOME>/.openclaw/workspace",
+        "daily_src": "<HOME>/.openclaw/workspace/memory"
+      }
+    },
+    "dsh": {
+      "type": "json",
+      "label": "DeepSeek Harness",
+      "enabled": true,
+      "sources": {
+        "json": "<HOME>/.dsh/storages/memory.json",
+        "evolve_json": "<HOME>/.dsh/storages/evolve_memory.json"
+      }
+    },
+    "project-context": {
+      "type": "project-context",
+      "label": "项目上下文",
+      "enabled": true,
+      "sources": {
+        "roots": ["<HOME>/workspace", "<HOME>/.dsh", "<HOME>/桌面", "<HOME>/deepseek-harness", "<HOME>/知识库"]
+      }
+    },
+    "codex": {
+      "type": "sqlite",
+      "label": "OpenAI Codex",
+      "enabled": true,
+      "sources": {
+        "data_dir": "<HOME>/.codex"
+      }
+    }
+  }
+}

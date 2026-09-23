@@ -1,0 +1,16 @@
+# Bundle patch layer for kb-context-dsh.
+#
+# One server-side hook plugin sharing one loader entry id. It:
+#   - injects local kb-kit knowledge-base search hits into every USER turn
+#     via the agent/pre-step cordis hook (mirror of the OpenClaw kb-context-hook),
+#   - registers an explicit `kb_query` model tool so the agent can search the KB on demand.
+#
+# No client UI (dsh.client.inject = []), no shared-package bundling: this is a
+# pure server-side hook, so nothing needs to be injected into the web client bundle.
+#
+# Install via dsh.profile.bundles (npm link / file path); the profile's own
+# cordis.patch.yml must stay an empty array [] — re-inserting here caused the
+# "duplicate loader entry id" hard-crash seen earlier with other bundles.
+- insert:
+    - id: kb-context-dsh
+      name: 'kb-context-dsh'

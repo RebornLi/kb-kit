@@ -1,0 +1,672 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "kb-kit-pure · 自成长知识库完整架构",
+    "output": "kb-kit-pure-architecture.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/RebornLi/kb-kit",
+      "revision": "4a54d62c866298d5e8e124cdeb555d22765f61b0"
+    },
+    "viewBox": [
+      1040,
+      1040
+    ],
+    "views": [
+      {
+        "id": "open-rsi-loop",
+        "label": "开放 RSI 闭环",
+        "focus": [
+          "para-vault",
+          "kb-usage",
+          "grounding",
+          "rsi-engine",
+          "governance"
+        ],
+        "note": "外部真实信号(embedding/LLM 判定/再问率)经 Layer0/1/2 外接阀喂入适应度, 驱动 T1/T2/T3, 写库必 git checkpoint 可回滚——走开放 RSI 而非自闭闭环。"
+      },
+      {
+        "id": "query-path",
+        "label": "检索→问答路径",
+        "focus": [
+          "para-vault",
+          "retrieve-answer",
+          "kb-usage",
+          "knowledge-graph"
+        ],
+        "note": "TF-IDF 语义检索→精排→综合出答案; 命中与窗口内再问率经 _record_hits 回写 feedback_state 反哺适应度。"
+      },
+      {
+        "id": "governance",
+        "label": "治理与防塌",
+        "focus": [
+          "governance",
+          "rsi-engine",
+          "kb-usage"
+        ],
+        "note": "六维度健康 + 矛盾检测 + 演进日志 + 巡检八门禁; 四道闸门(外接闸/适应度闸/有界+回滚闸/多样性闸)防 Model Collapse。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "user-human",
+      "type": "external",
+      "label": "用户 / 运营者",
+      "sublabel": "提问 · useful 反馈 · 人工在环",
+      "pos": [
+        44,
+        56
+      ],
+      "size": [
+        190,
+        52
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/kb_query.py",
+          "line": 170,
+          "end_line": 219,
+          "label": "query() 入口 / apply 人工确认入库"
+        }
+      ]
+    },
+    {
+      "id": "agent-dsh",
+      "type": "external",
+      "label": "DSH Agent 记忆流",
+      "sublabel": ".agents/memory · evolve 结晶",
+      "pos": [
+        296,
+        56
+      ],
+      "size": [
+        190,
+        52
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/memory_ingest_json.py",
+          "line": 73,
+          "end_line": 90,
+          "label": "ingest() memory.json/evolve 结晶"
+        }
+      ]
+    },
+    {
+      "id": "agent-codex",
+      "type": "external",
+      "label": "Codex / Chat 记忆",
+      "sublabel": "SQLite 源 · 对话记录",
+      "pos": [
+        548,
+        56
+      ],
+      "size": [
+        190,
+        52
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/memory_ingest_sqlite.py",
+          "line": 128,
+          "end_line": 145,
+          "label": "ingest() SQLite 源"
+        },
+        {
+          "path": "template-vault/pipeline/ingest_chat.py",
+          "line": 313,
+          "end_line": 333,
+          "label": "main() 对话摄入"
+        }
+      ]
+    },
+    {
+      "id": "raw-feed",
+      "type": "external",
+      "label": "原始 raw/ 流入",
+      "sublabel": "template-vault/raw",
+      "pos": [
+        800,
+        56
+      ],
+      "size": [
+        190,
+        52
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/memory_ingest.py",
+          "line": 197,
+          "end_line": 255,
+          "label": "mirror() 镜像入库"
+        }
+      ]
+    },
+    {
+      "id": "ingest-etl",
+      "type": "backend",
+      "label": "摄入 & ETL",
+      "sublabel": "归一 · 分块 · 分类 · 建索引",
+      "pos": [
+        44,
+        220
+      ],
+      "size": [
+        966,
+        56
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/memory_ingest.py",
+          "line": 329,
+          "end_line": 402,
+          "label": "sync/extract/mirror 多源 ETL"
+        },
+        {
+          "path": "template-vault/pipeline/intake_triage.py",
+          "line": 182,
+          "end_line": 233,
+          "label": "apply_moves() 收件箱 triage"
+        },
+        {
+          "path": "template-vault/pipeline/classify.py",
+          "line": 107,
+          "end_line": 183,
+          "label": "classify() 内容类型/域归类"
+        }
+      ]
+    },
+    {
+      "id": "para-vault",
+      "type": "database",
+      "label": "PARA 知识库 vault",
+      "sublabel": "00收件箱…90归档 · reference",
+      "pos": [
+        44,
+        384
+      ],
+      "size": [
+        966,
+        66
+      ],
+      "sources": [
+        {
+          "path": "template-vault/📖-知识库管理方案.md",
+          "label": "知识库管理方案 v4 (架构依据)"
+        },
+        {
+          "path": "README.md",
+          "line": 201,
+          "end_line": 237,
+          "label": "目录结构 / frontmatter 规范"
+        }
+      ]
+    },
+    {
+      "id": "retrieve-answer",
+      "type": "backend",
+      "label": "检索 & 问答综合",
+      "sublabel": "TF-IDF 余弦 · 精排 · 耐久门",
+      "pos": [
+        44,
+        580
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/rag.py",
+          "line": 414,
+          "end_line": 563,
+          "label": "cmd_query() 检索+命中记录"
+        },
+        {
+          "path": "template-vault/pipeline/kb_query.py",
+          "line": 170,
+          "end_line": 219,
+          "label": "query() 检索→综合→durability"
+        },
+        {
+          "path": "template-vault/pipeline/rerank.py",
+          "line": 97,
+          "end_line": 131,
+          "label": "rerank() 二次精排"
+        }
+      ]
+    },
+    {
+      "id": "kb-usage",
+      "type": "backend",
+      "label": "Layer 2 · 使用捕获",
+      "sublabel": "requery_rate · query_success",
+      "pos": [
+        240,
+        580
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "tag": "外接阀",
+      "sources": [
+        {
+          "path": "template-vault/pipeline/kb_usage.py",
+          "line": 267,
+          "end_line": 320,
+          "label": "analyze() 再问率/成功率代理"
+        },
+        {
+          "path": "template-vault/pipeline/rag.py",
+          "line": 397,
+          "end_line": 413,
+          "label": "_record_hits() 写 agent_hits"
+        }
+      ]
+    },
+    {
+      "id": "knowledge-graph",
+      "type": "backend",
+      "label": "知识图谱",
+      "sublabel": "节点 / 边 / 聚类洞察",
+      "pos": [
+        436,
+        580
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/graph.py",
+          "line": 121,
+          "end_line": 136,
+          "label": "main()"
+        },
+        {
+          "path": "template-vault/pipeline/graph.py",
+          "line": 47,
+          "end_line": 70,
+          "label": "build_mermaid() 节点构建"
+        }
+      ]
+    },
+    {
+      "id": "grounding",
+      "type": "backend",
+      "label": "开放 RSI 外接阀 L0/L1/L2",
+      "sublabel": "语义地基 · 声明验证 · 现实奖励",
+      "pos": [
+        632,
+        580
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "tag": "外部真值锚",
+      "sources": [
+        {
+          "path": "template-vault/pipeline/kb_embed.py",
+          "line": 108,
+          "end_line": 133,
+          "label": "Layer0 embed() vLLM+L2 归一"
+        },
+        {
+          "path": "template-vault/pipeline/kb_claim.py",
+          "line": 311,
+          "end_line": 355,
+          "label": "Layer1 validate() 证实/证伪"
+        },
+        {
+          "path": "template-vault/pipeline/kb_fitness.py",
+          "line": 101,
+          "end_line": 142,
+          "label": "Layer2 fitness() 多分量合并"
+        }
+      ]
+    },
+    {
+      "id": "rsi-engine",
+      "type": "backend",
+      "label": "RSI 自我改进引擎",
+      "sublabel": "T1 整理 · T2 加权 · T3 调参",
+      "pos": [
+        828,
+        580
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "tag": "核心编排器",
+      "sources": [
+        {
+          "path": "template-vault/pipeline/kb_engine.py",
+          "line": 487,
+          "end_line": 560,
+          "label": "main() run t1,t2,t3 编排"
+        },
+        {
+          "path": "template-vault/pipeline/kb_engine.py",
+          "line": 209,
+          "end_line": 320,
+          "label": "tier_t1() 去重/补链/retire"
+        },
+        {
+          "path": "template-vault/pipeline/kb_engine.py",
+          "line": 379,
+          "end_line": 477,
+          "label": "tier_t3() 有界调参(默认关)"
+        }
+      ]
+    },
+    {
+      "id": "governance",
+      "type": "backend",
+      "label": "治理 & 度量",
+      "sublabel": "健康分六维 · 矛盾 · 演进日志 · 巡检",
+      "pos": [
+        828,
+        760
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/dashboard.py",
+          "line": 82,
+          "end_line": 110,
+          "label": "main() 刷新治理仪表盘"
+        },
+        {
+          "path": "template-vault/pipeline/kb-healthcheck.py",
+          "line": 446,
+          "end_line": 470,
+          "label": "main() all 健康巡检八门禁"
+        },
+        {
+          "path": "template-vault/pipeline/evolution_log.py",
+          "line": 43,
+          "end_line": 69,
+          "label": "append() 四类事件追加日志"
+        }
+      ]
+    },
+    {
+      "id": "runtime",
+      "type": "backend",
+      "label": "插件化运行时 + 定时编排",
+      "sublabel": "plugin 协议 / 注册 / kb CLI / cron",
+      "pos": [
+        436,
+        760
+      ],
+      "size": [
+        168,
+        56
+      ],
+      "sources": [
+        {
+          "path": "template-vault/pipeline/plugin_base.py",
+          "line": 62,
+          "end_line": 91,
+          "label": "PluginBase 抽象接口"
+        },
+        {
+          "path": "template-vault/pipeline/plugin_registry.py",
+          "line": 167,
+          "end_line": 228,
+          "label": "initialize_all() 依赖拓扑排序"
+        },
+        {
+          "path": "template-vault/scripts/growth_cron.sh",
+          "line": 30,
+          "end_line": 50,
+          "label": "growth_cron 隔离单步流水线"
+        }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "① 外部输入源 (Sources)",
+      "wraps": [
+        "user-human",
+        "agent-dsh",
+        "agent-codex",
+        "raw-feed"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "② 摄入 & 存储 (Ingest → PARA vault)",
+      "wraps": [
+        "ingest-etl",
+        "para-vault"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "③ 检索 & 问答 (Retrieve & Answer)",
+      "wraps": [
+        "retrieve-answer",
+        "kb-usage",
+        "knowledge-graph"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "④ RSI 自我改进引擎 (Tier1/2/3 + 外接阀)",
+      "wraps": [
+        "grounding",
+        "rsi-engine"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "⑤ 治理 & 运行时 (Governance & Runtime)",
+      "wraps": [
+        "governance",
+        "runtime"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "user-to-ingest",
+      "from": "user-human",
+      "to": "ingest-etl",
+      "label": "投递收件箱 / 提问",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "agentdsh-to-ingest",
+      "from": "agent-dsh",
+      "to": "ingest-etl",
+      "label": "记忆流 ETL",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "agentcodex-to-ingest",
+      "from": "agent-codex",
+      "to": "ingest-etl",
+      "label": "Chat/SQLite 记忆",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "raw-to-ingest",
+      "from": "raw-feed",
+      "to": "ingest-etl",
+      "label": "原始流镜像",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "ingest-to-vault",
+      "from": "ingest-etl",
+      "to": "para-vault",
+      "label": "归一写入 KB",
+      "labelAt": [
+        527,
+        290
+      ],
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "vault-to-retrieve",
+      "from": "para-vault",
+      "to": "retrieve-answer",
+      "label": "语义检索",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "vault-to-usage",
+      "from": "para-vault",
+      "to": "kb-usage",
+      "label": "读取使用信号",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "vault-to-graph",
+      "from": "para-vault",
+      "to": "knowledge-graph",
+      "label": "图谱数据",
+      "labelAt": [
+        520,
+        560
+      ],
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "vault-to-grounding",
+      "from": "para-vault",
+      "to": "grounding",
+      "label": "抽取/判定/分析",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "vault-to-rsi",
+      "from": "para-vault",
+      "to": "rsi-engine",
+      "label": "collect notes / 度量",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "retrieve-to-usage",
+      "from": "retrieve-answer",
+      "to": "kb-usage",
+      "label": "命中 → agent_hits",
+      "labelAt": [
+        226,
+        650
+      ],
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "usage-to-grounding",
+      "from": "kb-usage",
+      "to": "grounding",
+      "label": "query_success → fitness",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          324,
+          695
+        ],
+        [
+          716,
+          695
+        ]
+      ]
+    },
+    {
+      "id": "grounding-to-rsi",
+      "from": "grounding",
+      "to": "rsi-engine",
+      "label": "真实适应度锚",
+      "labelAt": [
+        814,
+        650
+      ],
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "rsi-to-gov",
+      "from": "rsi-engine",
+      "to": "governance",
+      "label": "T1/T2/T3 事件 → 演进日志",
+      "labelAt": [
+        912,
+        650
+      ],
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "gov-to-runtime",
+      "from": "governance",
+      "to": "runtime",
+      "label": "门禁节拍 → cron",
+      "fromSide": "left",
+      "toSide": "right"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "① 输入 → ② 存储",
+      "items": [
+        "用户投递收件箱/提问; DSH·Codex·Chat·raw 四类源经 memory_ingest ETL 归一",
+        "intake 只给路由建议(保守防自闭)、classify 补 domain 轴、语义分块、clean 退役兼容",
+        "全部落 PARA vault; 写前 git checkpoint、写后留回滚锚点, 可 reset --hard"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "③ 检索 → 问答",
+      "items": [
+        "rag.py TF-IDF 余弦(中文 unigram+bigram+synonyms)→ rerank 精排 → kb_query 综合",
+        "durability 门达标则提议存为编译笔记(source=query),人工 apply 入库",
+        "命中与窗口内再问率经 _record_hits 回写 feedback_state, 反哺 Layer 2 适应度"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "④ RSI 自我改进 (开放闭环)",
+      "items": [
+        "kb_rsi 只读探针产出 22 项指标 → kb_engine T1 整理 / T2 加权 / T3 调参(双保险默认关)",
+        "四道防塌闸: 外部接地闸 · 适应度闸 · 有界+回滚闸 · 多样性闸; 默认走开放 RSI",
+        "Layer0 语义地基(L2向量)→ Layer1 声明验证(证实/证伪)→ Layer2 真实使用捕获; 矛盾检测 lint 交人工, 把适应度锚向现实而非自抬"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "⑤ 治理 & 运行时",
+      "items": [
+        "kb_health 六维度 + kb_contradiction 矛盾 + evolution_log 演进日志 + kb-healthcheck 八门禁",
+        "插件化运行时: plugin_base 协议 → plugin_registry 拓扑排序分发 → kb_launcher 统一路由",
+        "cron 节拍(成长/巡检/备份-演练)隔离单步, 全失败非 0 退出供监控察觉"
+      ]
+    }
+  ]
+}

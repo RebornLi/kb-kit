@@ -1,0 +1,19 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "用户注册表：记录所有用户及其角色/权限",
+    "roles": {
+      "admin": "全部权限（用户管理/摄取/检索/归档/配置）",
+      "editor": "摄取/检索/编辑笔记（不能管理用户/不能改配置）",
+      "reader": "只读检索（不能摄取/不能编辑）"
+    }
+  },
+  "users": {
+    "default": {
+      "role": "admin",
+      "display_name": "默认用户",
+      "created": "2026-09-10",
+      "inbox": "00-收件箱 Inbox"
+    }
+  }
+}

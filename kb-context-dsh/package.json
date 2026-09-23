@@ -1,0 +1,54 @@
+{
+  "name": "kb-context-dsh",
+  "version": "1.0.0",
+  "description": "DeepSeek Harness plugin: auto-inject local kb-kit knowledge-base search hits into every user turn (plus an explicit `kb_query` model tool). Pure server-side hook — no client UI. Mirrors the kb-context-hook OpenClaw plugin, written for the DSH cordis runtime.",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [],
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "kb-kit",
+    "knowledge-base",
+    "rag",
+    "context-injection",
+    "hook"
+  ],
+  "license": "MIT",
+  "author": "kb-kit",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node scripts/test.mjs && node scripts/load-probe.mjs"
+  },
+  "comment_deps": "@deepseek-ai/* are host-provided shared packages kept in devDependencies (NOT dependencies) so host diagnostics that scan `dependencies` for shared packages stay quiet, while an editor still resolves their types at dev time. They are injected by the host at boot and never bundled.",
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.2",
+    "@deepseek-ai/dsh-llm": ">=0.1.5-rc.2",
+    "@deepseek-ai/dsh-tools": ">=0.1.5-rc.2",
+    "@types/node": "^22.20.0",
+    "typescript": "~5.7.2"
+  }
+}

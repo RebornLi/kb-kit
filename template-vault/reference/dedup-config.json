@@ -1,0 +1,41 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "去重阈值配置",
+    "usage": "memory_ingest/memory_sync/link_engine 去重时从本文件加载阈值"
+  },
+  "global": {
+    "dup_sim": 0.92,
+    "novel_sim": 0.70,
+    "sync_sim": 0.85,
+    "replace_sim": 0.85,
+    "merge_sim": 0.70
+  },
+  "by_domain": {
+    "开发": {"dup_sim": 0.88, "novel_sim": 0.65},
+    "综合": {"dup_sim": 0.94, "novel_sim": 0.75}
+  },
+  "sim_method": "tfidf",
+  "exact_dedup": {
+    "method": "sha256",
+    "action": "skip",
+    "description": "内容指纹完全一致 → 跳过（不写入）"
+  },
+  "semantic_dedup": {
+    "method": "tfidf_cosine",
+    "threshold": 0.92,
+    "action": "skip",
+    "description": "TF-IDF 余弦相似度 > 0.92 → 语义重复，跳过"
+  },
+  "semantic_related": {
+    "method": "tfidf_cosine",
+    "threshold_min": 0.70,
+    "threshold_max": 0.92,
+    "action": "mark_related",
+    "description": "TF-IDF 相似度 0.70-0.92 → 语义相关，标 related_to 但不合并"
+  },
+  "jaccard_dedup": {
+    "threshold": 0.85,
+    "description": "Jaccard 相似度阈值（用于 link_engine 去重候选）"
+  }
+}
