@@ -48,6 +48,7 @@ tags: ["管理"]
   - ③ `link_engine` 孤岛补链 · ④ `recall_schedule` 间隔回忆
   - ⑤ `kb_health` / `dashboard` 健康与治理面
   - `clean` 清洗分块 · `validate` 校验 · `rag` 本地语义检索
+  - RSI **自我治理**（主用）：`kb_engine` T1/T2 编排 · `kb_rsi` 只读探针 · `kb_claim`/`kb_usage` 适应度闸 · `kb_embed` 语义地基 · `kb_query` 查询→知识正回路
 - **本地语义检索** `rag`（TF-IDF / BM25 风格，中文 unigram+bigram 兜底，免 jieba）
 - **运维**：备份 / 恢复演练 / 定时节拍 / 健康巡检
 - **多 Agent 记忆摄取**：OpenClaw / Hermes / DSH（原生 + evolve 结晶）/ Codex 的记忆自动归一到 KB（project-context 等可手动 `kb agent add` 摄取）
@@ -222,7 +223,7 @@ kb-kit/                        ← 分发给别人就这个文件夹
     ├── 60-运营 Operations/    清洗/流转 SOP
     ├── 70-知识治理 Governance/ 元层：SOP / 指标 / 巡检 / 仪表盘
     ├── 90-归档 Archive/       收尾/过期
-    ├── pipeline/              成长引擎（25 个 Python 模块 + 插件化架构）
+    ├── pipeline/              成长引擎 + RSI 自我治理（44 个 Python 模块 + 插件化架构）
     │   ├── plugin_base.py     插件基协议（PluginBase + PluginContext + PluginMetadata）
     │   ├── plugin_registry.py 插件注册中心（发现/注册/拓扑排序/分发）
     │   ├── kb_launcher.py     CLI 统一入口（兼容映射 + 动态路由）
@@ -267,6 +268,29 @@ kb-kit/                        ← 分发给别人就这个文件夹
 | `semantic_chunk.py` | 语义分块（长文本 → 语义连贯片段） | - |
 | `state_manager.py` | 状态管理（引擎运行态持久化） | - |
 | `user_manager.py` | 用户管理（多用户配置 / 权限） | - |
+
+### RSI 自我治理引擎（主用系统）
+
+自 2026-09-20 起，知识库自我改进**默认走 RSI 引擎**（详见第四章节尾注释）。`kb_rsi` 负责只读采集与建议，`kb_engine` 负责有回滚的可执行编排，其余为适应度/地基/回路支撑：
+
+| 模块 | 职责 | 角色 |
+|------|------|------|
+| `kb_rsi.py` | 只读探针：孤儿 / 去重 / 外部接地% / 跨域比 / 陈旧 / 新鲜度等指标 + 改进建议（四道闸：外部接地 / 适应度 / 有界可回滚 / 多样性） | 采集 |
+| `kb_engine.py` | RSI 编排器：T1 回填链接 / T2 去重收敛 / T3 升级（带开关 + 质量门 + 可回滚） | 执行 |
+| `kb_calibrate.py` | 阈值标定：在仿真大语料上 A/B 标定 `DUP_SIM` / `MERGE_MIN_SIM` / `RETIRE_AGE_DAYS` 等硬编码阈值 | 标定 |
+| `kb_fitness.py` | 外部锚定适应度：把 fitness 对齐"对现实的预测误差"（修 Goodhart 闭环） | 适应度 |
+| `kb_usage.py` | 真实使用捕获（Layer 2）：查询成功率 / 再问率 | 适应度 |
+| `kb_claim.py` | 声明验证循环（Layer 1）：把适应度闸落地为对现实的预测 | 适应度 |
+| `kb_embed.py` | 语义向量地基（Layer 0）：给 `rag` / `kb_rsi` 提供可选语义向量路径 | 地基 |
+| `kb_query.py` | 闭合"查询→知识"正回路：合成耐久性答案写提案（人工在环 + 有界，绝不自动入库） | 回路 |
+| `kb_ingest.py` | 真实外部摄入：把外部素材永久存入不可变 `raw/` 层（`external_inflow` 真值来源，阈值 ≥5%） | 摄入 |
+| `kb_eval.py` | RAG 检索质量评估网：把"检索变好了吗"变成可复跑的量化基线 | 度量 |
+| `kb_scale.py` | 规模路径预留：元数据桥接，让 RSI 感知 `vector index` 层 | 规模 |
+| `kb_contradiction.py` | 矛盾检测 lint：发现谈同一主题却给出相反断言的笔记对 | 质量 |
+| `kb_schema_migrate.py` | 分类体系细化迁移：由顶级分区客观推导 `domain × category` 二维分类 | 结构 |
+| `kb_constants.py` | 阈值统一源：收敛散布在各模块的硬编码阈值与魔法数字 | 基建 |
+| `kb_types.py` | 类型定义：`Frontmatter` / `NoteInfo` / `SimResult` 等 TypedDict | 基建 |
+| `evolution_log.py` | RSI 统一演进日志：四类事件追加到 `.kb_evolution.jsonl`（机读、可 diff）+ `EVOLVED.md`（人读、按日期） | 日志 |
 
 ### plugins/ 插件清单
 
