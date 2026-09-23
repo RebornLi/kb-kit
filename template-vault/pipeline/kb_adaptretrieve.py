@@ -25,7 +25,7 @@
 #    python3 pipeline/kb_adaptretrieve.py apply   --root R [--id 1 2] [--all] [--force]   # 人工后写契约
 #    python3 pipeline/kb_adaptretrieve.py status  --root R
 # ============================================================
-import argparse, json, os, re, sys, uuid
+import argparse, json, math, os, re, sys, uuid
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -158,6 +158,23 @@ def propose(root: Union[str, Path], sim_min: float = SIM_MIN,
     suspect_q = _suspect_failed_queries(root)
     notes = _index_notes(root)
 
+    # 倒排索引 + 笔记向量（每笔记只 tokenize 一次，避免每事件重算 body bigram；
+    # 余弦与 _cosine 完全同公式：dot / (qmag · note_mag)，结果逐字节一致）
+    note_vec = {}     # rel -> Counter(bigram)
+    note_mag = {}     # rel -> 向量模长
+    inv_idx = {}      # bigram -> 含该 bigram 的 rel 集合
+    for rel, body in notes:
+        gc = Counter(_ngrams(body))
+        if not gc:
+            continue
+        note_vec[rel] = gc
+        mag = math.sqrt(sum(c * c for c in gc.values()))
+        if mag <= 0.0:
+            continue
+        note_mag[rel] = mag
+        for gr in gc:
+            inv_idx.setdefault(gr, set()).add(rel)
+
     proposals: List[Dict[str, Any]] = []
     seen = set()
     for ev in events:
@@ -166,11 +183,27 @@ def propose(root: Union[str, Path], sim_min: float = SIM_MIN,
         if not q:
             continue
         hits_set = {str(h) for h in ev.get("paths", [])}
+        qv = Counter(_ngrams(q))
+        if not qv:
+            continue
+        qmag = math.sqrt(sum(c * c for c in qv.values()))
+        if qmag <= 0.0:
+            continue
+        # 候选 = 与 query 共享 ≥1 bigram 的笔记（真实高相似记号的超集）
+        cand: set = set()
+        for gr in qv:
+            c = inv_idx.get(gr)
+            if c:
+                cand |= c
         stop = False
-        for rel, body in notes:
+        for rel in sorted(cand):
             if rel in hits_set:
                 continue  # 已命中，不算缺口
-            s = _cosine(q, body)
+            nv = note_vec[rel]
+            dot = (sum(c * nv.get(w, 0) for w, c in qv.items())
+                   if len(qv) <= len(nv)
+                   else sum(c * qv.get(w, 0) for w, c in nv.items()))
+            s = dot / (qmag * note_mag[rel]) if dot > 0 else 0.0
             if s < sim_min:
                 continue
             key = (nq, rel)
@@ -191,8 +224,8 @@ def propose(root: Union[str, Path], sim_min: float = SIM_MIN,
         if stop:
             break  # 已达上限 → 停止扫描后续事件
 
-    # 确定性排序(先重问失败、再 sim 降序) → id 稳定
-    proposals.sort(key=lambda p: (0 if p["issue"].startswith("requery") else 1, -p["sim"]))
+    # 确定性排序(先重问失败、再 sim 降序、最后 note 路径) → id 跨运行稳定
+    proposals.sort(key=lambda p: (0 if p["issue"].startswith("requery") else 1, -p["sim"], p["note"]))
     for i, p in enumerate(proposals, 1):
         p["id"] = i
         p["severity"] = "high" if p["issue"].startswith("requery") else "medium"
