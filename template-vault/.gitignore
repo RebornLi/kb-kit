@@ -50,6 +50,9 @@ kb_contradictions_report.md
 # L1 查询即反馈 (kb_adaptretrieve): 检索修正 transient 提案 + 人工 apply 落契约（每次重新生成，不入库）
 .kb_adaptretrieve_proposals.jsonl
 .kb_retrieval_adjust.json
+# L2 自我加权 (kb_selfweight): 权重提升 transient 提案 + 累计提升账本（人工 apply 写回，每次重新生成）
+.kb_selfweight_proposals.jsonl
+.kb_selfweight_applied.json
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md
