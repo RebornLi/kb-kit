@@ -50,7 +50,7 @@ tags: ["管理"]
   - `clean` 清洗分块 · `validate` 校验 · `rag` 本地语义检索
 - **本地语义检索** `rag`（TF-IDF / BM25 风格，中文 unigram+bigram 兜底，免 jieba）
 - **运维**：备份 / 恢复演练 / 定时节拍 / 健康巡检
-- **多 Agent 记忆摄取**：OpenClaw / Hermes / DSH（原生 + evolve 结晶）/ project-context / Codex 的记忆自动归一到 KB
+- **多 Agent 记忆摄取**：OpenClaw / Hermes / DSH（原生 + evolve 结晶）/ Codex 的记忆自动归一到 KB（project-context 等可手动 `kb agent add` 摄取）
 
 > 为什么零依赖？引擎只用了 Python 标准库，所以**不需要 pip install**，任何装了 Python 3 的机器都能跑。这就是"一键"的关键。
 
