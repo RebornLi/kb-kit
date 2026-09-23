@@ -47,6 +47,9 @@ kb_contradictions_report.md
 # P2-1: 查询→知识 回路 transient 提案 + 频率额度（人工在环，未写库）
 .kb_query_proposals.jsonl
 .kb_query_state.json
+# L1 查询即反馈 (kb_adaptretrieve): 检索修正 transient 提案 + 人工 apply 落契约（每次重新生成，不入库）
+.kb_adaptretrieve_proposals.jsonl
+.kb_retrieval_adjust.json
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md
