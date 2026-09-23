@@ -3,7 +3,7 @@ domain: 管理
 status: active
 importance: 0.5
 created: 2026-09-19
-updated: 2026-09-19
+updated: 2026-09-23
 tags: ["管理"]
 ---
 # 🏠 知识库一键套件（kb-kit）
@@ -60,7 +60,7 @@ tags: ["管理"]
 
 ### 通用前提
 - **Python 3.8+**（Windows 装时勾选 "Add to PATH"）。装之前终端敲 `python --version` 确认在。
-- **Obsidian**（免费笔记 GUI，用来打开 / 阅读 / 编辑）。
+- **Obsidian**（可选，免费笔记 GUI，用来打开 / 阅读 / 编辑；纯命令行也能跑）。
 
 ### 自己机器上试用（克隆本套件）
 ```bash
@@ -535,6 +535,13 @@ Windows 用任务计划调 `scripts/growth_cron.sh` 即可（需有 bash；或�
 ## 十一、版本演进
 
 详见 [CHANGELOG.md](CHANGELOG.md)。
+
+### 未发布 — 多源记忆归一 & RSI 默认治理（2026-09-16 → 2026-09-23）
+
+- **自我改进默认走 RSI 引擎**：`kb_engine`（T1/T2/T3 编排）/ `kb_rsi`（指标·去重）/ `kb_claim`（Layer1 声明验证）/ `kb_usage`（Layer2 真实使用）/ `kb_embed`（Layer0 语义地基）。旧 `clean.py` / `sync.py` 标 **superseded**（函数保留供摄入兼容），`feedback_loop.py` 加权核心仍被 RSI `import` 复用。**仅其独立 CLI（ingest/apply）停用**，健康巡检/补链/回忆仍按需保留。
+- **多源归一**：DSH·evolve 结晶（`evolve_memory.json`）与原生 `memory.json` 一套 schema 一起归一摄取；`project-context` 归一能力**保留**（不再自动列出，可手动 `kb agent add --name project-context` 摄取）。
+- **回到 4 种自动探测 agent**：OpenClaw / Hermes / DSH / Codex（`project-context` 从 `detect_agents()` 移除，摄取能力仍在）。
+- **安装加固**：`install.bat` / `install.ps1` 重复参数 bug 修复（首个非 flag 参数=目标目录，其余透传，与 `install.sh` 一致）；**Obsidian 降级为可选**（缺失仅告警，不再阻断安装）；自动安装失败优雅降级（告警不阻断，仍要求 Python）。
 
 ### v2.0.0 — KB 插件化架构改造（2026-09-13）
 - 将 KB 从"宿主系统"改造为"插件式"架构，与 Agent 插件统一接口
