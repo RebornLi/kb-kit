@@ -41,6 +41,14 @@ RSI 引擎与旧"成长引擎 loops"功能重叠，**自即日起 kb-kit 自我�
   - `detect_project_context()` + `detect_agents()` 接入；`cmd_add` 加 `--project-context-root`
     （`nargs="+"` 多根；`KB_DSH_PROJECT_CONTEXT_ROOT` 逗号分隔多根覆盖）
 - `kb-agent.json` 新增 `project-context` agent（type=project-context，sources 空=自动探测）
+- **反馈阶梯 L3 元调参（`kb_meta.py` · M3）**：用阶梯自身真实结果（`kb_usage` 漏检）调
+  L0/L2 的阈值旋钮，实现"阶梯自我调参"——
+  - 旋钮（有界·单步）：覆盖门 `L0_MIN_IDF` / `L2_SIGNAL_MIN`（漏检多且该层未动作→下调松覆盖）、
+    加权 `L2_L1_MISS_BONUS`（漏检多且 L2 未动作→上调多加权），范围/步长收敛于 `kb_constants`
+  - 铁律：外部锚=真实漏检（`kb_usage.analyze`，无信号 best-effort 降级）· 接地阀 P0-1 冻结
+    闭库内部调参 · 连续负 delta≥2 → 回滚该旋钮到 `last_good`（写配置 + checkpoint 可回滚）·
+    只写运行时配置 `.kb_meta_config.json`，**不改分发仓常量、不改笔记正文**
+  - CLI：`report/propose/apply/calibrate/status`（`calibrate` 为主回路：量漏检→回滚→产提议）
 
 ### 🐛 修复
 - **`memory_ingest_json.ingest()` dry_run 真只读**：原实现 dry-run 无条件 `write_text` 写 vault

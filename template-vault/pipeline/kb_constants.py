@@ -51,3 +51,13 @@ L0_NOTE_MAX_TAGS = 12           # 单篇笔记 tags 总数上限（只升·有�
 L0_SUMMARY_TOKENS = 8           # 充实 kb_summary 时最多拼接的缺口 token 数
 L0_SUMMARY_MIN_LEN = 4          # kb_summary 少于该字数视为"缺失"才充实（只升·不覆盖已有）
 L0_TOTAL_PROPOSALS = 50         # 单次 propose 最多产出提议数（有界，接 L1 MAX_PROPOSALS）
+
+# ── L3 元调参（反馈阶梯·L3 元调参 · kb_meta）─────────
+# L3 观察 L0/L1/L2 的真实结果（kb_usage 漏检）来调它们的阈值旋钮，有界·接地阀冻结·
+#   连续负 delta 回滚。旋钮方向：覆盖门(L0_MIN_IDF/L2_SIGNAL_MIN)越大越严→漏检多且该层未
+#   动作下调松覆盖；加权(L2_L1_MISS_BONUS)越小忽视漏检→漏检多且 L2 未动作上调多加权。
+L3_KNOB_MIN = {"L0_MIN_IDF": 0.5, "L2_SIGNAL_MIN": 0.10, "L2_L1_MISS_BONUS": 0.05}   # 旋钮下限
+L3_KNOB_MAX = {"L0_MIN_IDF": 4.5, "L2_SIGNAL_MIN": 0.60, "L2_L1_MISS_BONUS": 0.40}   # 旋钮上限
+L3_KNOB_STEP = {"L0_MIN_IDF": 0.5, "L2_SIGNAL_MIN": 0.05, "L2_L1_MISS_BONUS": 0.05}  # 单步步长
+L3_ROLLBACK_CONSEC = 2        # 连续负 delta 回滚阈值（≥此连续次数 → 回滚该旋钮到 last_good）
+L3_MISS_HIGH = 3              # suspect_failed ≥ 此值判"漏检偏多"（触发松覆盖/多加权的调参）

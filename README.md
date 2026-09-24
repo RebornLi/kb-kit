@@ -286,6 +286,7 @@ kb-kit/                        ← 分发给别人就这个文件夹
 | `kb_adaptretrieve.py` | L1 查询即反馈（反馈阶梯·实时回路）：把"被重问却漏检"喂回检索修正（只提议·人工 apply） | 回路 |
 | `kb_selfweight.py` | L2 自我加权（反馈阶梯·代谢回路）：外部锚定信号·importance 只升不降·封顶+多样性地板；接地不足冻结内部人气 | 回路 |
 | `kb_retriage.py` | L0 检索表层修正（反馈阶梯·检索纠错 · M2b）：接 L1 漏检缺口，只增补 `tags` / 充实 `kb_summary`（rag.py 打分只用 token）；接地阀冻结 + raw/ 隔离 + 单次 checkpoint 可回滚 | 回路 |
+| `kb_meta.py` | L3 元调参（反馈阶梯·元调参层 · M3）：用阶梯真实结果（`kb_usage` 漏检）调 L0/L2 阈值旋钮（`L0_MIN_IDF`/`L2_SIGNAL_MIN`/`L2_L1_MISS_BONUS`）；有界单步·接地阀冻结·连续负 delta（≥2）回滚到 last_good·不改仓内常量/笔记正文 | 回路 |
 | `kb_ingest.py` | 真实外部摄入：把外部素材永久存入不可变 `raw/` 层（`external_inflow` 真值来源，阈值 ≥5%） | 摄入 |
 | `kb_eval.py` | RAG 检索质量评估网：把"检索变好了吗"变成可复跑的量化基线 | 度量 |
 | `kb_scale.py` | 规模路径预留：元数据桥接，让 RSI 感知 `vector index` 层 | 规模 |
