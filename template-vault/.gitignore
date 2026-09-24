@@ -53,6 +53,9 @@ kb_contradictions_report.md
 # L2 自我加权 (kb_selfweight): 权重提升 transient 提案 + 累计提升账本（人工 apply 写回，每次重新生成）
 .kb_selfweight_proposals.jsonl
 .kb_selfweight_applied.json
+# L0 检索表层修正 (kb_retriage): 只增型检索元数据修复 transient 提案 + 累计写回账本（人工 apply 写回，每次重新生成；接 L1 漏检缺口）
+.kb_retriage_proposals.jsonl
+.kb_retriage_applied.json
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md
