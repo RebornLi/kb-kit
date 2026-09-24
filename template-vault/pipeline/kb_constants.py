@@ -61,3 +61,11 @@ L3_KNOB_MAX = {"L0_MIN_IDF": 4.5, "L2_SIGNAL_MIN": 0.60, "L2_L1_MISS_BONUS": 0.4
 L3_KNOB_STEP = {"L0_MIN_IDF": 0.5, "L2_SIGNAL_MIN": 0.05, "L2_L1_MISS_BONUS": 0.05}  # 单步步长
 L3_ROLLBACK_CONSEC = 2        # 连续负 delta 回滚阈值（≥此连续次数 → 回滚该旋钮到 last_good）
 L3_MISS_HIGH = 3              # suspect_failed ≥ 此值判"漏检偏多"（触发松覆盖/多加权的调参）
+
+# ── L4 宪法（反馈阶梯·L4 人工裁判 · kb_l4）─────────
+# L4 由真人逐条裁决 L0–L3 的自动调整；连续被裁决为错 → 冻结该 rung（宪法 veto，人工解冻）。
+#   与 L3 同构：L3 在指标负 delta 回滚旋钮；L4 在裁决负冻结 rung。真人裁决=最硬外部锚。
+L4_RUNGS = ("l0", "l1", "l2", "l3")              # 被宪法监管的 rung（其 auto 调整供真人裁决）
+L4_FREEZE_CONSEC = 3        # 连续错裁决 >= 此数 → 冻结该 rung（宪法否决）
+L4_MIN_SAMPLE = 5           # 至少如此多裁决才具统计意义（连续错且样本够才冻；避免 3 错就冻）
+L4_TRUST_FLOOR = 0.5        # 信任度下限（仅陈述；仍由连续负裁决触发冻结）

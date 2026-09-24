@@ -49,6 +49,17 @@ RSI 引擎与旧"成长引擎 loops"功能重叠，**自即日起 kb-kit 自我�
     闭库内部调参 · 连续负 delta≥2 → 回滚该旋钮到 `last_good`（写配置 + checkpoint 可回滚）·
     只写运行时配置 `.kb_meta_config.json`，**不改分发仓常量、不改笔记正文**
   - CLI：`report/propose/apply/calibrate/status`（`calibrate` 为主回路：量漏检→回滚→产提议）
+- **反馈阶梯 L4 宪法层·人工裁判（`kb_l4.py` · M4）**：让"反馈阶梯本身"可被真人所裁判——
+  L0–L3 各自优化一个*代理信号*（会 Goodhart 失真），L4 由真人逐条裁决低层 auto 调整是否真正确：
+  - 裁决值：`correct` / `wrong` / `ignore`（`ignore` 仅记档，不进信任度分母）
+  - 信任度：每 rung = `correct/(correct+wrong)` ∈[0,1]；`docket` 汇编四 rung 已应用·待裁清单
+  - 宪法 veto：连续负裁决（`wrong` 尾部连续 ≥`L4_FREEZE_CONSEC=3` 且样本 ≥`L4_MIN_SAMPLE=5`）
+    → 冻结该 rung（写 `.kb_l4_config.json` + git checkpoint 可回滚；冻结=进入人工复核，
+    **须人工 `unfreeze`** 解除）
+  - 铁律：外部锚=真人显式裁决（`judge` CLI 逐条传入）——**最强锚**，非 rung 自述"我有用"；
+    接地阀 P0-1 未接地→不*自动*冻 rung（闭锁系统自动冻只会更锁死）但真人裁决照常记录 ·
+    raw/ 不改 · best-effort 降级（无账本→信任 unknown·不冻结）
+  - CLI：`docket/report/judge/freeze/unfreeze/status`
 
 ### 🐛 修复
 - **`memory_ingest_json.ingest()` dry_run 真只读**：原实现 dry-run 无条件 `write_text` 写 vault

@@ -60,6 +60,10 @@ kb_contradictions_report.md
 .kb_meta_proposals.jsonl
 .kb_meta_state.json
 .kb_meta_config.json
+# L4 宪法/人工裁判 (kb_l4): 真人裁决账本 + 逐 rung 信任尾部状态 + 冻结配置（人工 judge/freeze/unfreeze 写，force-add 作回滚锚，每次重新生成）
+.kb_l4_verdicts.jsonl
+.kb_l4_state.json
+.kb_l4_config.json
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md

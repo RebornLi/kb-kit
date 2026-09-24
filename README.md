@@ -287,6 +287,7 @@ kb-kit/                        ← 分发给别人就这个文件夹
 | `kb_selfweight.py` | L2 自我加权（反馈阶梯·代谢回路）：外部锚定信号·importance 只升不降·封顶+多样性地板；接地不足冻结内部人气 | 回路 |
 | `kb_retriage.py` | L0 检索表层修正（反馈阶梯·检索纠错 · M2b）：接 L1 漏检缺口，只增补 `tags` / 充实 `kb_summary`（rag.py 打分只用 token）；接地阀冻结 + raw/ 隔离 + 单次 checkpoint 可回滚 | 回路 |
 | `kb_meta.py` | L3 元调参（反馈阶梯·元调参层 · M3）：用阶梯真实结果（`kb_usage` 漏检）调 L0/L2 阈值旋钮（`L0_MIN_IDF`/`L2_SIGNAL_MIN`/`L2_L1_MISS_BONUS`）；有界单步·接地阀冻结·连续负 delta（≥2）回滚到 last_good·不改仓内常量/笔记正文 | 回路 |
+| `kb_l4.py` | L4 宪法层·人工裁判（反馈阶梯·宪法层 · M4）：真人逐条裁决 L0–L3 的 auto 调整（`judge` 传入 correct/wrong/ignore，裁决=最强外部锚）→ 聚合每 rung 信任度（correct/(correct+wrong)，ignore 不进分母）→ 连续负裁决（≥3 且样本≥5）冻结该 rung（宪法 veto·git checkpoint·须人工 `unfreeze`）· docket 汇编四 rung 待裁清单·接地阀未接地→不自动冻但仍记录裁决·raw/ 隔离·best-effort 降级 | 宪法 |
 | `kb_ingest.py` | 真实外部摄入：把外部素材永久存入不可变 `raw/` 层（`external_inflow` 真值来源，阈值 ≥5%） | 摄入 |
 | `kb_eval.py` | RAG 检索质量评估网：把"检索变好了吗"变成可复跑的量化基线 | 度量 |
 | `kb_scale.py` | 规模路径预留：元数据桥接，让 RSI 感知 `vector index` 层 | 规模 |
