@@ -60,6 +60,16 @@ RSI 引擎与旧"成长引擎 loops"功能重叠，**自即日起 kb-kit 自我�
     接地阀 P0-1 未接地→不*自动*冻 rung（闭锁系统自动冻只会更锁死）但真人裁决照常记录 ·
     raw/ 不改 · best-effort 降级（无账本→信任 unknown·不冻结）
   - CLI：`docket/report/judge/freeze/unfreeze/status`
+- **反馈阶梯 L5 元策略层（`kb_l5.py` · M5）**：站在 L4 宪法之上——L4 裁"对不对"（真人裁决），
+  L5 学"值不值"（阶梯到底帮到库了吗）：
+  - 信号=**真实结果趋势**（外部锚 = `external_inflow` + `cross_ratio`，非阶梯自打分防 Goodhart）；
+    每 rung 的"活跃期"跟着来的是库变好还是变差 → running score ±单步（`L5_STEP=0.25`，score∈[-1,1]）
+  - 归化成每 rung **激活权重** ∈`[L5_WEIGHT_FLOOR=0.05, 1]`（绝不归零·保留探索·防阶梯塌缩）；
+    `propose` 算权重（只读），`apply` 才发布 `.kb_l5_policy.json` + checkpoint
+  - 有界：≥`L5_MIN_SAMPLE=3` cycle 才有参考（样本少→权重中性，绝不拍脑袋）；接地阀 P0-1 闭库→
+    冻结内部自学习（记 cycle 日志但不加分，不给回声室加杠杆）
+  - 铁律：外部锚最硬·有界·人工在环（`train` 只学不强制·`apply` 才发布·调度器读 policy）·raw/ 不改·best-effort 降级
+  - CLI：`report/train/propose/apply/status`（`train` 为主回路：记 cycle→score±步长）
 
 ### 🐛 修复
 - **`memory_ingest_json.ingest()` dry_run 真只读**：原实现 dry-run 无条件 `write_text` 写 vault

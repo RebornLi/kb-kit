@@ -64,6 +64,9 @@ kb_contradictions_report.md
 .kb_l4_verdicts.jsonl
 .kb_l4_state.json
 .kb_l4_config.json
+# L5 元策略 (kb_l5): 逐 rung running score + cycle 历史（运行态，force-add 作回滚锚）+ 发布的元策略权重（人工 apply 写，每次重新生成）
+.kb_l5_state.json
+.kb_l5_policy.json
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md

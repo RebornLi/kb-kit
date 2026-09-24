@@ -69,3 +69,19 @@ L4_RUNGS = ("l0", "l1", "l2", "l3")              # 被宪法监管的 rung（其
 L4_FREEZE_CONSEC = 3        # 连续错裁决 >= 此数 → 冻结该 rung（宪法否决）
 L4_MIN_SAMPLE = 5           # 至少如此多裁决才具统计意义（连续错且样本够才冻；避免 3 错就冻）
 L4_TRUST_FLOOR = 0.5        # 信任度下限（仅陈述；仍由连续负裁决触发冻结）
+
+# ── L5 元策略（反馈阶梯·L5 元策略层 · kb_l5）─────────
+# L5 = 反馈阶梯的"投资组合 / 调度策略"层：不亲自调旋钮（L3）、也不由真人裁决冻结（L4），
+#   而是观察"阶梯自身活动"是否换来*真实结果*：某个 rung 在它的活跃期里，跟着来的是库变好还是
+#   变差 → 给它的 running score ±单步；score 归一成 ∈[0,1] 的激活权重（分高→调度器越该多跑它）。
+#   与 L4 异：L4 看真人裁决（对错），L5 看真实结果（阶梯帮到库了吗）。最硬外部锚 = raw/ 新鲜流入
+#   趋势（external_inflow）+ 跨域连接（cross_ratio），非阶梯自打分（防 Goodhart）。
+L5_RUNGS = ("l0", "l1", "l2", "l3")              # L5 组合/加权对象（被 L4 监管的那几个 auto rung）
+L5_SCORE_MIN = -1.0        # 单 rung running score 下限（-1=持续拖后腿）
+L5_SCORE_MAX = 1.0         # 单 rung running score 上限（+1=持续有效）
+L5_STEP = 0.25             # 单 cycle score 调整步长（有界·单步，绝不一次大跳）
+L5_IMPROVE_MIN = 0.5       # external_inflow 上升≥此(%) 判"改善"（其余→stable）
+L5_DEGRADE_MIN = 1.0       # external_inflow 下降≥此(%) 判"变差"
+L5_WEIGHT_FLOOR = 0.05     # 单 rung 最低激活权重（绝不归零·保留探索·防阶梯塌缩）
+L5_WEIGHT_CEIL = 1.0       # 单 rung 最高激活权重
+L5_MIN_SAMPLE = 3          # ≥此 cycle 数 score 才具参考意义（样本少→权重中性，绝不拍脑袋）
