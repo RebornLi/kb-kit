@@ -39,7 +39,7 @@ def _kb_target(content):
         return "10-项目 Projects/项目记忆.md"
     if "决策" in content or "decision" in content.lower():
         return "30-决策日志 Decisions/决策记录.md"
-    submap = {"运维": "部署运维", "安全": "安全", "开发": "AI与LLM AI",
+    submap = {"运维": "部署运维", "安全": "安全", "开发": "AI与LLM",
               "测试": "测试", "基础设施": "基础设施", "数据": "数据库"}
     sub = submap.get(dom, "综合")
     return f"20-技术 Technology/{sub}/{sub}.md"
