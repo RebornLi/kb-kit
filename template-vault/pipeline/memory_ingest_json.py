@@ -33,9 +33,9 @@ def _kb_target(content):
     dom = _domain(content)
     # 项目/decision 类 -> 10-项目 Projects / 30-决策日志（补 .md 变文件路径）
     if "项目" in content or "project" in content.lower():
-        return "10-项目 Projects/项目记忆项目记忆.md"
+        return "10-项目 Projects/项目记忆.md"
     if "决策" in content or "decision" in content.lower():
-        return "30-决策日志 Decisions/决策记录决策记录.md"
+        return "30-决策日志 Decisions/决策记录.md"
     # 技术域 -> 20-技术 Technology/<子域>/<子域>.md
     submap = {"运维": "部署运维", "安全": "安全", "开发": "AI与LLM AI",
               "测试": "测试", "基础设施": "基础设施", "数据": "数据库"}
