@@ -13,7 +13,9 @@ import argparse, os, re, sys, json, math
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, FM, tokenize, load_note, iter_notes, norm, cos, build_inverted_index, candidate_pairs
+from kb_common import (ROOT_DEFAULT, EXCLUDE, FM, tokenize, load_note, iter_notes, norm, cos,
+                       build_inverted_index, candidate_pairs, parse_importance,
+                       is_source_note, is_generated_report)
 from kb_constants import PERF_WARN_THRESHOLD
 
 load = load_note  # 兼容本模块原有 load(p) 调用
@@ -32,7 +34,16 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
     notes, stem2rel, vecs = {}, {}, {}
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue  # 运行期报告产物不参与补链
         fm, text, body = load(p)
+        if is_source_note(fm):
+            continue  # 原始来源笔记不参与补链
+        try:
+            if parse_importance(fm.get("importance")) < 0.1:
+                continue  # 无 importance 的产物/草稿不参与
+        except (ValueError, TypeError):
+            continue
         stem = p.stem
         stem2rel[stem] = rel
         txt = body + " " + " ".join(t.strip() for t in
@@ -66,7 +77,7 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
                 continue
             shared = notes[a]["tags"] & notes[b]["tags"]
             rec = {"score": round(sc, 3), "from": a, "to": b,
-                   "shared_tags": sorted(shared), "cross": False}
+                   "shared_tags": sorted(shared), "cross": False, "kind": "concept"}
             recs.append(rec)
 
     # 跨域比对（不同 domain 之间）—— 合并两个桶的 rels 生成候选对，再过滤跨域
@@ -87,7 +98,7 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
                     continue
                 shared = notes[a]["tags"] & notes[b]["tags"]
                 rec = {"score": round(sc, 3), "from": a, "to": b,
-                       "shared_tags": sorted(shared), "cross": True}
+                       "shared_tags": sorted(shared), "cross": True, "kind": "cross"}
                 recs.append(rec)
                 cross.append(rec)
     recs.sort(key=lambda r: r["score"], reverse=True)
@@ -149,22 +160,68 @@ def apply_links(root: Union[str, Path], threshold: float, limit: int) -> int:
         fm, text, body = load(p)
         if "## 🔗 智能建议链接" in text:
             continue  # 幂等：本笔记已有建议区块，跳过
-        # 去重：已有 [[...]] 目标不在建议里
-        want = sorted({r["to"] for r in rs}, key=lambda x: -[rr["score"] for rr in rs if rr["to"] == x][0])
-        block = "\n## 🔗 智能建议链接\n\n" + "".join(f"- [[{t}]]\n" for t in want)
+        # 去重：排除已存在的出链（按 basename 比对）与自引用；按类型分组
+        existing = outbound(text)  # basename 集合
+
+        def _want(pred):
+            return sorted((t for t in {r["to"] for r in rs if pred(r)}
+                           if Path(t).stem not in existing and t != a),
+                          key=lambda t: -[rr["score"] for rr in rs if rr["to"] == t][0])
+
+        cross_want = _want(lambda r: r.get("kind") == "cross")
+        concept_want = _want(lambda r: r.get("kind") != "cross")
+        if not (cross_want or concept_want):
+            continue
+        parts = ["\n## 🔗 智能建议链接\n"]
+        if cross_want:
+            parts.append("\n### 🌐 跨域（洞察来源）\n")
+            parts += [f"- [[{t}]]\n" for t in cross_want]
+        if concept_want:
+            parts.append("\n### 🧩 同域（概念关联）\n")
+            parts += [f"- [[{t}]]\n" for t in concept_want]
+        block = "".join(parts)
         new_text = text + ("\n" if not text.endswith("\n") else "") + block
         p.write_text(new_text, encoding="utf-8")
         inserted += 1
         staged.append(a)
     if staged:
-        # 精确暂存被改笔记，绝不 git add -A
+        # 精确暂存被改笔记，绝不 git add -A；提交也只限这些路径
         subprocess.run(["git", "-C", root, "add", "--", *staged], capture_output=True)
         if subprocess.run(["git", "-C", root, "status", "--porcelain"],
                           capture_output=True, text=True).stdout.strip():
             subprocess.run(["git", "-C", root, "commit", "-q",
-                            "-m", f"kb: 连接引擎补链 {inserted} 条笔记（建议区块，可人工移除）"],
+                            "-m", f"kb: 连接引擎补链 {inserted} 条笔记（建议区块，可人工移除）",
+                            "--", *staged],
                            capture_output=True)
     print(f"✅ 已写入建议区块 {inserted} 条笔记（共 {len(recs)} 条建议）")
+    return 0
+
+
+def moc(root: Union[str, Path]) -> int:
+    """生成/刷新 MOC 知识地图（按 domain 汇总 + 跨域洞察）；幂等覆盖，不改其它笔记。"""
+    from collections import defaultdict
+    _rels, notes, _recs, cross = suggestions(root, 0.75)
+    bydom = defaultdict(list)
+    for rel, n in notes.items():
+        bydom[n["domain"]].append(rel)
+    lines = ["# 🗺️ MOC · 知识地图（自动生成）", "",
+             "> 按 domain 汇总笔记 + 跨域洞察弱连接；由 `kb link moc` 生成（请勿手改）。", ""]
+    for dom in sorted(bydom):
+        lines.append(f"## {dom}（{len(bydom[dom])}）")
+        for rel in sorted(bydom[dom]):
+            fm = notes[rel]["fm"]
+            title = fm.get("title") or Path(rel).stem
+            summ = str(fm.get("kb_summary") or "")[:60]
+            lines.append(f"- [[{Path(rel).stem}]] —— {summ}")
+        lines.append("")
+    if cross:
+        lines += ["## 🌐 跨域洞察（弱连接）", ""]
+        for r in cross[:30]:
+            lines.append(f"- [[{Path(r['from']).stem}]] ↔ [[{Path(r['to']).stem}]]（{r['score']}）")
+    out = Path(root) / "70-知识治理 Governance" / "_MOC.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"🗺️ MOC 已生成: {out.relative_to(root)}（{len(notes)} 笔记 / {len(cross)} 跨域）")
     return 0
 
 
@@ -176,6 +233,7 @@ def main() -> int:
     a = sub.add_parser("apply"); a.add_argument("--root", default=ROOT_DEFAULT)
     a.add_argument("--threshold", type=float, default=0.75)
     a.add_argument("--limit", type=int, default=50)
+    mo = sub.add_parser("moc"); mo.add_argument("--root", default=ROOT_DEFAULT)
     args = ap.parse_args()
     if args.cmd == "suggestions":
         rels, notes, recs, cross = suggestions(args.root, args.threshold)
@@ -183,6 +241,8 @@ def main() -> int:
             build_report(rels, notes, recs, cross, args.threshold), encoding="utf-8")
         print(f"🔗 建议链接 {len(recs)} 对（跨域 {len(cross)}），已写入 link_suggestions.md")
         return 0
+    if args.cmd == "moc":
+        return moc(args.root)
     return apply_links(args.root, args.threshold, args.limit)
 
 

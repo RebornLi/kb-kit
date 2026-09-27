@@ -14,11 +14,12 @@ import { existsSync } from 'node:fs';
 // ============================================================
 
 // Candidate vault locations relative to this source file, checked in order.
-// src/config.js → src/ → kb-context-dsh/ → kb-kit-pure/ → template-vault/
+// src/config.js → src/ → kb-context-dsh/ → kb-kit-pure/template-vault   (仓库布局)
+// src/config.js → src/ → kb-context-dsh/template-vault                  (打包时与插件同级)
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VAULT_CANDIDATES = [
-  resolve(__dirname, '../../../template-vault'), // workspace/kb-kit-pure/template-vault
-  resolve(__dirname, '../../template-vault'),   // kb-context-dsh/template-vault (bundled)
+  resolve(__dirname, '..', '..', 'template-vault'), // kb-kit-pure/template-vault
+  resolve(__dirname, '..', 'template-vault'),       // kb-context-dsh/template-vault（打包/同级）
 ];
 
 /**

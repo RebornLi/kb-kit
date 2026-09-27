@@ -1,44 +1,25 @@
 #!/usr/bin/env bash
 # ============================================================
-# backup_now.sh —— 手动全量快照（方案 v4.0 §2.2）
-#   用法: scripts/backup_now.sh [vault_root] [daily|weekly]
-#   产出: backups/<daily|weekly>/<date>.vault.zip  (+ .sha256)
-#   真实 zip（排除 .git 与现有 backups/，避免递归打包）
+# backup_now.sh —— 全量快照（兼容包装）
+#
+# 真正的实现已迁到跨平台的 pipeline/backup.py（Windows 的 kb.cmd 也能用）。
+# 本脚本保留为兼容入口，供 cron / 旧文档 / 手动调用：
+#     scripts/backup_now.sh [vault_root] [daily|weekly]
+# 产物同前：backups/<daily|weekly>/<date>-vault.zip (+ .sha256)
 # ============================================================
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 VAULT="${1:-$SELF_DIR/..}"
 KIND="${2:-daily}"
-[ "$KIND" = "weekly" ] && DST="$VAULT/backups/weekly" || DST="$VAULT/backups/daily"
-mkdir -p "$DST"
 
-BASE="$(date +%F)-vault.zip"
-OUT="$DST/$BASE"
-
-# 真实 zip 整仓快照（排除 .git 与 backups 自身）
-python3 - "$VAULT" "$OUT" <<'PY'
-import os, sys, zipfile
-vault, out = sys.argv[1], sys.argv[2]
-excl = {".git", "backups"}
-with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
-    for dp, dn, fn in os.walk(vault):
-        dn[:] = [d for d in dn if d not in excl]
-        for f in fn:
-            full = os.path.join(dp, f)
-            if os.path.islink(full) and not os.path.exists(full):
-                continue                     # 悬空软链（目标已删），跳过不中断整包
-            try:
-                z.write(full, os.path.relpath(full, vault))
-            except (OSError, ValueError):
-                continue                     # 个别文件读失败也跳过（best-effort）
-PY
-
-# 校验和（标准 `hash  文件名` 格式，可用 sha256sum -c 直接验；缺 sha256sum 则回退 openssl）
-if command -v sha256sum >/dev/null 2>&1; then
-  ( cd "$DST" && sha256sum "$(basename "$OUT")" > "$(basename "$OUT").sha256" )
-else
-  ( cd "$DST" && openssl dgst -sha256 "$(basename "$OUT")" | awk '{print $2"  "$(basename "$OUT")"}' > "$(basename "$OUT").sha256" )
+PY=""
+if command -v python3 >/dev/null 2>&1; then PY=python3
+elif command -v python >/dev/null 2>&1; then PY=python
+elif command -v py >/dev/null 2>&1; then PY=py
+fi
+if [ -z "$PY" ]; then
+  echo "❌ 未找到 Python，无法备份。" >&2; exit 3
 fi
 
-echo "[backup] $OUT  ($(du -h "$OUT" | cut -f1))  sha256=$(awk '{print $1}' "$OUT.sha256")"
+exec "$PY" "$VAULT/pipeline/backup.py" --root "$VAULT" --kind "$KIND"

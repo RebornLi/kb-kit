@@ -11,13 +11,14 @@
 #   python3 pipeline/intake_triage.py review [--root R] [--thr T]
 #   python3 pipeline/intake_triage.py apply  [--root R] [--thr T] --move --trash
 # ============================================================
-import argparse, os, re, sys, math
+import argparse, os, re, sys, math, datetime
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 from kb_common import (ROOT_DEFAULT, EXCLUDE, parse_frontmatter, tokenize, CJK,
                        iter_notes, load_note, norm, cos, load_config,
-                       parse_importance as _parse_importance)
+                       parse_importance as _parse_importance, is_generated_report,
+                       add_alias_text, record_lineage)
 
 INBOX = "00-收件箱 Inbox"
 TRASH = "90-归档 Archive/_trash"
@@ -156,15 +157,15 @@ def triage(root: Union[str, Path], threshold: float) -> List[Dict[str, Any]]:
         fm, _, body = load_note(p)
         text = p.read_text(encoding="utf-8")
         # 在库内找最相似的一条(排除自己)
-        best_v, best_rel, best_imp = None, None, -1
+        best_v, best_rel = None, None
+        own = vault[rel]
         for r, v in vault.items():
             if r == rel:
                 continue
-            sc = cos(v, vault[rel])
+            sc = cos(v, own)
             if sc > (best_v or 0):
                 best_v, best_rel = sc, r
         if best_v is not None and best_v >= threshold:
-            imp = meta[best_rel]["importance"] if best_rel in meta else 0
             res = evaluate(rel, p, fm, text, body, round(best_v, 3), best_rel, config)
         else:
             res = evaluate(rel, p, fm, text, body, None, "", config)
@@ -198,56 +199,164 @@ def build_report(results: List[Dict[str, Any]]) -> str:
     return "\n".join(out) + "\n"
 
 
+def _unique_path(path: Path) -> Path:
+    """返回不与现有文件冲突的路径（追加 -1/-2…），绝不覆盖。"""
+    base, ext = path.stem, path.suffix
+    cand, i = path, 1
+    while cand.exists():
+        cand = path.with_name(f"{base}-{i}{ext}")
+        i += 1
+    return cand
+
+
+def _safe_place(dest_dir: Path, dest_name: str, content: str) -> Tuple[Path, str]:
+    """把 content 放到 dest_dir/dest_name，避免覆盖已有文件。
+
+    目标不存在 → 写入（'new'）；已存在且内容相同 → 判重不写（'dup'）；
+    已存在但内容不同 → 改名避让（'renamed'）。返回 (最终路径, 结果)。
+    """
+    dest = dest_dir / dest_name
+    if dest.exists():
+        try:
+            if dest.read_text(encoding="utf-8") == content:
+                return dest, "dup"
+        except OSError:
+            pass
+        dest = _unique_path(dest)   # 同名不同内容：改名，绝不覆盖
+    dest.write_text(content, encoding="utf-8")
+    return dest, ("renamed" if dest.name != dest_name else "new")
+
+
+def _is_raw_rel(rel: str) -> bool:
+    """rel 是否在 raw/ 不可变层内。"""
+    try:
+        return "raw" in [str(x).lower() for x in Path(rel).parts[:-1]]
+    except (TypeError, ValueError, AttributeError):
+        return False
+
+
+def _git_stage(root: Union[str, Path], paths: List[str]) -> List[str]:
+    """暂存变更，容忍被移动后已不存在的源路径。
+
+    - 存在的路径（目标/新建/修改）→ `git add -A`
+    - 不存在但确为已跟踪文件的路径 → 单独 `git add -A`(staged 删除)
+    - 不存在且未跟踪（新笔记被移走的源）→ 跳过（无需暂存）
+    返回存在路径列表，供 `git commit -- <paths>` 使用（避免 pathspec 报错）。
+    """
+    import subprocess
+    existing = [p for p in paths if (Path(root) / p).exists()]
+    if existing:
+        subprocess.run(["git", "-C", str(root), "add", "-A", "--", *existing],
+                       capture_output=True)
+    for p in paths:
+        if (Path(root) / p).exists():
+            continue
+        tracked = subprocess.run(["git", "-C", str(root), "ls-files", "--error-unmatch", "--", p],
+                                 capture_output=True)
+        if tracked.returncode == 0:
+            subprocess.run(["git", "-C", str(root), "add", "-A", "--", p], capture_output=True)
+    return existing
+
+
+def _tombstone(rel: str, tgt_rel: str, fm_src: Dict[str, Any], body: str) -> str:
+    """生成合并墓碑：可回溯原文 + redirect_to（归档层，不参与检索）。"""
+    today = datetime.date.today().isoformat()
+    fm = {
+        "tags": '["knowledge"]', "status": "archived",
+        "domain": fm_src.get("domain") or "综合",
+        "created": today, "updated": today, "importance": 0.0,
+        "kb_target": "90-归档 Archive/_trash", "kb_action": "retire",
+        "kb_summary": f"已合并到 {tgt_rel}",
+        "redirect_to": tgt_rel, "merged_from": rel,
+    }
+    head = "\n".join(f"{k}: {v}" for k, v in fm.items())
+    return ("---\n" + head + "\n---\n\n# 已合并：`" + rel + "`\n\n"
+            f"> 已合并到 [[{Path(tgt_rel).stem}]]（`redirect_to`）。原正文保留于下，可回溯。\n\n"
+            + body.strip() + "\n")
+
+
 def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
                 move: bool, trash: bool) -> int:
     import subprocess
-    moved, trashed, reviewed = 0, 0, 0
+    moved, trashed, reviewed, merged, dups = 0, 0, 0, 0, 0
     touched = []  # 收集被改动的笔记路径，用于精确 git add
     REVIEW_DIR = "70-知识治理 Governance/_review"
     for r in results:
+        rel = r["rel"]
+        src = Path(root) / rel
         if move and r["action"] == "route":
-            src_top = r["rel"].split(os.sep)[0]
+            src_top = rel.split(os.sep)[0]
             if r["route_to"] == src_top:
                 continue  # 已在目标区,跳过
             dest_dir = Path(root) / r["route_to"]
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_name = r["rel"].split("/")[-1]
-            (dest_dir / dest_name).write_text(
-                (Path(root) / r["rel"]).read_text(encoding="utf-8"), encoding="utf-8")
-            (Path(root) / r["rel"]).unlink()
-            touched.append(str(Path(r["route_to"]) / dest_name))
-            touched.append(r["rel"])
+            dest, kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
+            src.unlink()
+            touched += [str(dest.relative_to(root)), rel]
             moved += 1
-        elif trash and r["action"] in ("trash", "merge"):
+            if kind == "dup":
+                dups += 1
+        elif move and r["action"] == "merge":
+            # 真合并：把源正文并入最相似的目标笔记（去重），再移除源
+            tgt_rel = r.get("sim_to") or ""
+            tgt = Path(root) / tgt_rel if tgt_rel else None
+            if not (tgt and tgt.exists() and not _is_raw_rel(tgt_rel)
+                    and not is_generated_report(tgt_rel)):
+                continue  # 目标不可用：保留原件，下次再处理
+            fm_src, _text, body = load_note(src)
+            marker = f"<!-- merged:{rel} -->"
+            tgt_text = tgt.read_text(encoding="utf-8")
+            if marker not in tgt_text:
+                tgt.write_text(
+                    tgt_text.rstrip() + f"\n\n{marker}\n## 合并自 {rel}\n\n{body.strip()}\n",
+                    encoding="utf-8")
+                # 旧 [[source]] 链接重定向：目标声明 source stem 别名
+                aliased = add_alias_text(tgt.read_text(encoding="utf-8"), Path(rel).stem)
+                if aliased:
+                    tgt.write_text(aliased, encoding="utf-8")
+                touched.append(str(tgt.relative_to(root)))
+            # 墓碑：归档可回溯 + redirect_to（不参与检索）
+            trash_dir = Path(root) / TRASH
+            trash_dir.mkdir(parents=True, exist_ok=True)
+            tomb = trash_dir / f"{Path(rel).stem}-merged-{datetime.date.today()}.md"
+            i = 1
+            while tomb.exists():
+                tomb = trash_dir / f"{Path(rel).stem}-merged-{datetime.date.today()}-{i}.md"
+                i += 1
+            tomb.write_text(_tombstone(rel, tgt_rel, fm_src, body), encoding="utf-8")
+            touched.append(str(tomb.relative_to(root)))
+            src.unlink()
+            touched.append(rel)
+            record_lineage(root, rel, tgt_rel, "merge")
+            merged += 1
+        elif trash and r["action"] == "trash":
             dest_dir = Path(root) / TRASH
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_name = r["rel"].split("/")[-1]
-            (dest_dir / dest_name).write_text(
-                (Path(root) / r["rel"]).read_text(encoding="utf-8"), encoding="utf-8")
-            (Path(root) / r["rel"]).unlink()
-            touched.append(str(Path(TRASH) / dest_name))
-            touched.append(r["rel"])
+            dest, kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
+            src.unlink()
+            touched += [str(dest.relative_to(root)), rel]
             trashed += 1
+            if kind == "dup":
+                dups += 1
         elif move and r["action"] == "refine":
-            # 待审队列：复制到 _review/ 供 dashboard 计数 + 人工补写（不删原文件）
+            # 待审队列：移入 _review/（原件离开收件箱，避免每轮重复 triage）
             dest_dir = Path(root) / REVIEW_DIR
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest_name = r["rel"].split("/")[-1]
-            review_path = dest_dir / dest_name
-            if not review_path.exists():
-                review_path.write_text(
-                    (Path(root) / r["rel"]).read_text(encoding="utf-8"), encoding="utf-8")
-                touched.append(str(Path(REVIEW_DIR) / dest_name))
-                reviewed += 1
-    # 精确 add 被移动/归档/待审的笔记，不 sweep Obsidian 运行时态
-    if touched:
-        subprocess.run(["git", "-C", root, "add", "--", *touched], capture_output=True)
-    if subprocess.run(["git", "-C", root, "status", "--porcelain"],
-                      capture_output=True, text=True).stdout.strip():
+            dest, _kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
+            src.unlink()
+            touched += [str(dest.relative_to(root)), rel]
+            reviewed += 1
+    # 精确 add 被移动/合并/归档/待审的笔记，不 sweep Obsidian 运行时态
+    staged_paths = _git_stage(root, touched) if touched else []
+    if staged_paths and subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                                       capture_output=True, text=True).stdout.strip():
         subprocess.run(["git", "-C", root, "commit", "-q",
-                        "-m", f"kb: 摄入 triage 处理(moved{moved}/trashed{trashed}/review{reviewed},可回滚)"],
+                        "-m", f"kb: 摄入 triage 处理(moved{moved}/merged{merged}/trashed{trashed}/review{reviewed},可回滚)",
+                        "--", *staged_paths],
                        capture_output=True)
-    print(f"✅ 路由 {moved} 篇 | 归档 {trashed} 篇 | 待审 {reviewed} 篇(均在 _trash/ 或 _review/ 可回滚)")
+    dup_msg = f" | 判重跳过 {dups} 篇" if dups else ""
+    print(f"✅ 路由 {moved} 篇 | 合并 {merged} 篇 | 归档 {trashed} 篇 | 待审 {reviewed} 篇{dup_msg}"
+          f"(均在目标区/_trash/_review 可回滚；同名不同内容已改名避让，绝不覆盖)")
     return 0
 
 

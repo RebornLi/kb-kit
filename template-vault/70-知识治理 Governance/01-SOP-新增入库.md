@@ -3,7 +3,7 @@ tags: [template, sop]
 status: active
 domain: 管理
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-09-27
 importance: 1
 kb_target: 70-知识治理 Governance
 kb_action: new
@@ -13,10 +13,10 @@ category: meta
 # 01-SOP：新增入库
 
 1. 新建知识 → `00-收件箱 Inbox/`（带 frontmatter 或先无）。
-2. `intake_triage.py review` 看四维打分。
-3. 达标 → `intake_triage.py apply --move` 路由到 PARA 对应区。
-4. 缺字段 → 拒绝入库，进待审队列（`validate.py` 会标红）。
-5. 落库后补链（独立操作）：跑 `kb link` 看建议链接清单 → `kb link apply` 写入建议区块。
+2. `kb ingest` 看四维打分（只读，写 `intake_triage.md`）。
+3. 达标 → `kb ingest move` 路由到 PARA 对应区（写操作）。
+4. 缺字段 → 拒绝入库，进待审队列（`kb validate` 会标红）。
+5. 落库后补链：`kb link` 看建议清单 → `kb link apply` 写入建议区块。
 
 ---
 <!-- RSI补链 -->

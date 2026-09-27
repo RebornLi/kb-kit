@@ -33,8 +33,8 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     # 摄入
     ("ingest", None):      ("intake", "review"),
     ("ingest", "review"):  ("intake", "review"),
-    ("ingest", "move"):    ("intake", "apply"),
-    ("ingest", "trash"):   ("intake", "apply"),
+    ("ingest", "move"):    ("intake", "move"),
+    ("ingest", "trash"):   ("intake", "trash"),
     ("ingest", "agent"):   ("agent_registry", "ingest"),
 
     # Agent 管理
@@ -57,6 +57,7 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("link", None):        ("link", "suggestions"),
     ("link", "apply"):     ("link", "apply"),
     ("link", "suggestions"):("link", "suggestions"),
+    ("link", "moc"):       ("link", "moc"),
 
     # 回忆
     ("recall", None):      ("recall", "deck"),
@@ -78,9 +79,15 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("clean", "apply"):    ("clean", "apply"),
     ("clean", "report"):   ("clean", "report"),
     ("clean", "chunk"):    ("clean", "chunk"),
+    ("clean", "refine"):   ("clean", "refine"),
+    ("clean", "taxonomy"): ("clean", "taxonomy"),
 
     # 校验
     ("validate", None):    ("validate", "validate"),
+
+    # 备份（跨平台：pipeline/backup.py；kb / kb.cmd 均经此路由）
+    # 只映射到插件；daily/weekly 作为位置参数透传，故不单列 (backup, daily/weekly)
+    ("backup", None):      ("backup", "backup"),
 
     # 同步
     ("sync", None):        ("sync", None),
@@ -109,6 +116,10 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
 
     # 分类
     ("classify", None):    ("classify", "classify"),
+
+    # 研究层：查询→知识 正回路 / RSI 只读探针
+    ("compile", None):     ("compile", None),        # action 由子命令决定
+    ("rsi", None):         ("rsi", "probe"),
 
     # 特殊命令
     ("list", None):        ("__list__", None),
@@ -302,6 +313,7 @@ class KBLauncher:
         print("  kb feedback               命中信号计数")
         print("  kb link                   孤岛补链建议")
         print("  kb link apply             应用补链（写操作）")
+        print("  kb link moc               生成知识地图 MOC")
         print("  kb recall                 今日回忆 deck")
         print("  kb recall status          回忆排期状态")
         print("")
@@ -309,6 +321,8 @@ class KBLauncher:
         print("  kb healthcheck            健康巡检")
         print("  kb dashboard              生成治理仪表盘")
         print("  kb clean --apply          清洗/分块（写操作）")
+        print("  kb clean refine           一键：结构化+去重→分块→重建索引→校验")
+        print("  kb clean taxonomy [--apply] 标签归一（受控词表：别名/层级）")
         print("  kb validate               frontmatter 校验")
         print("")
         print("同步:")
@@ -316,6 +330,12 @@ class KBLauncher:
         print("  kb sync apply <note.md>   同步笔记（写操作）")
         print("  kb sync rollback          回滚上次 sync")
         print("  kb sync history           查看同步历史")
+        print("")
+        print("成长引擎（研究层，可选）:")
+        print("  kb rsi                     RSI 只读探针（改进建议）")
+        print("  kb compile query --query Q 查询→知识（写提案，人工在环）")
+        print("  kb compile status          查看待审提案")
+        print("  kb compile apply --all     写入全部待审提案（写操作）")
         print("")
         print("其他:")
         print("  kb backup [daily|weekly]  全量快照")

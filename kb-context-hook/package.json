@@ -1,0 +1,13 @@
+{
+  "name": "kb-context-hook",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Auto-inject kb-kit search hits into every user turn prompt via before_prompt_build hook.",
+  "openclaw": {
+    "extensions": ["./index.mjs"],
+    "compat": { "pluginApi": ">=2026.9.0" }
+  },
+  "scripts": {
+    "test": "node scripts/test.mjs"
+  }
+}

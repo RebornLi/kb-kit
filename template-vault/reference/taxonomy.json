@@ -1,0 +1,27 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "受控词表：domain/category/status 枚举 + tag 层级分组 + 别名归一"
+  },
+  "domains": ["运维", "开发", "安全", "产品", "数据", "管理", "综合"],
+  "categories": ["project", "experience", "reference", "sop", "meta", "knowledge"],
+  "statuses": ["draft", "active", "stable", "legacy", "archived"],
+  "tag_hierarchy": {
+    "work": ["meeting", "project", "review", "plan"],
+    "tech": ["ai", "data", "security", "dev", "ops"],
+    "knowledge": ["note", "moc", "template", "decision", "lesson"]
+  },
+  "aliases": {
+    "ai": "tech/ai",
+    "ml": "tech/ai",
+    "机器学习": "tech/ai",
+    "会议": "work/meeting",
+    "会议记录": "work/meeting",
+    "复盘": "work/review",
+    "回顾": "work/review",
+    "经验": "knowledge/lesson",
+    "教训": "knowledge/lesson",
+    "决策": "knowledge/decision",
+    "模板": "knowledge/template"
+  }
+}

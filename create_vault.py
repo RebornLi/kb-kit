@@ -24,12 +24,14 @@ import os
 import shutil
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 REPO_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = REPO_DIR / "template-vault"
 STATE_IGNORE = shutil.ignore_patterns(
-    ".git", ".git/*", "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info"
+    ".git", ".git/*", "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info",
+    "vector index",  # 运行时向量索引：不随模板分发，安装时由 run_demo 重建
 )
 
 
@@ -78,6 +80,43 @@ def copy_template(vault):
     return True
 
 
+def _template_rel_files():
+    """按 STATE_IGNORE 语义列出模板将被复制的文件（相对路径，/ 分隔）。"""
+    out = []
+    for dp, dn, fn in os.walk(TEMPLATE_DIR):
+        ignored = set(STATE_IGNORE(dp, dn + fn))
+        dn[:] = [d for d in dn if d not in ignored]
+        for f in fn:
+            if f in ignored:
+                continue
+            out.append(os.path.relpath(os.path.join(dp, f), TEMPLATE_DIR).replace(os.sep, "/"))
+    return sorted(out)
+
+
+def write_install_manifest(vault):
+    """写安装基线清单（供 scripts/verify.py 按清单核对文件完整性）。
+
+    清单 = 本次从模板复制的文件 + 安装器生成的文件（kb-agent.json / 兜底文档）。
+    只记「安装基线」，不含用户后续新增的笔记，故用户增删自己的内容不会误报。
+    """
+    files = set(_template_rel_files())
+    for name in ("kb-agent.json", "如何使用.md", "🏠-知识库首页.md"):
+        if (vault / name).exists():
+            files.add(name)
+    manifest = {
+        "version": 1,
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "files": sorted(files),
+    }
+    dest = vault / ".kb" / "install-manifest.json"
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"✅ 已写安装清单: {dest.relative_to(vault)}（{len(files)} 个基线文件）")
+    except OSError as e:
+        print(f"⚠️ 写安装清单失败: {e}", file=sys.stderr)
+
+
 def _consume_agent_disabled_prefs():
     """读取并消费（删除）precheck 写入的全局 agent 偏好，返回禁用集合（无则 None）。"""
     prefs = Path.home() / ".kb-kit-agent-prefs.json"
@@ -93,6 +132,16 @@ def _consume_agent_disabled_prefs():
             pass
 
 
+def _write_empty_registry(vault):
+    """写空运行时注册表，保证自检依赖的 kb-agent.json 始终存在。"""
+    try:
+        (vault / "kb-agent.json").write_text(
+            json.dumps({"version": 1, "agents": {}}, ensure_ascii=False, indent=2),
+            encoding="utf-8")
+    except OSError:
+        pass
+
+
 def wire_agents(vault, interactive):
     """探测本机 agent 并写入 kb-agent.json（注册表，运行时态，gitignore）。"""
     pipe = vault / "pipeline"
@@ -102,6 +151,7 @@ def wire_agents(vault, interactive):
     except Exception as e:  # noqa: BLE001 - 注册表加载失败不应让安装崩在复制之后
         print(f"⚠️ 无法加载 agent_registry（{e}）；可稍后手动 `kb ingest-agent --setup`。",
               file=sys.stderr)
+        _write_empty_registry(vault)
         return
 
     agents = ar.detect_agents()
@@ -272,6 +322,66 @@ def open_obsidian(vault):
         print("⚠️ 无法自动打开 Obsidian，请手动打开 Obsidian 后选择该文件夹。", file=sys.stderr)
 
 
+def generate_homepage(vault):
+    """知识库首页兜底生成（模板已含则跳过）。
+
+    快捷卡会引用 `🏠-知识库首页.md`；精简分发包不含内容文件时，这里补一个最小
+    总览页，保证卡片引用有效、上手路径完整。绝不覆盖模板自带首页。
+    """
+    page = vault / "🏠-知识库首页.md"
+    if page.exists():
+        return
+    content = """\
+---
+tags: [moc, dashboard, toc]
+status: active
+domain: 综合
+created: 2026-08-05
+updated: 2026-08-05
+importance: 1
+kb_target: 🏠-知识库首页.md
+kb_action: new
+kb_summary: 🏠 知识库首页（总览 + 规则速览）
+cssclass: dashboard
+category: knowledge
+---
+# 🏠-知识库首页
+
+> 这是一个**会自成长**的 Obsidian 知识库：你只管写，**成长引擎**负责维护。
+
+## 结构（PARA + 治理层）
+
+| 分区 | 用途 |
+|------|------|
+| `00-收件箱` | 原始输入，自然积压 |
+| `10-项目` | 进行中的项目 |
+| `20-技术` | 可复用技术沉淀 |
+| `30-决策日志` | 决策 + 理由 |
+| `40-资源库` | 通用方法论/资料 |
+| `50-模板` | 模板（新建笔记时套用） |
+| `60-运营` | 清洗/流转 SOP |
+| `70-知识治理` | 元层：约定/指标/仪表盘 |
+| `90-归档` | 收尾/过期 |
+
+## 三条铁律
+
+1. **写前 checkpoint**：任何 `apply`/`promote` 先 `--dry-run` 看清单。
+2. **importance 只升不降**：防刷票。
+3. **不 sweep Obsidian**：脚本只 `git add` 自己改的文件。
+
+## 现在做什么
+
+- 看 [[01-如何开始.md|🚀 如何开始]]
+- 规则见 [[📖-知识库管理方案.md|📖-知识库管理方案]]
+- 巡检见 `70-知识治理 Governance/_INDEX.md`（跑 `kb dashboard` 生成）
+"""
+    try:
+        page.write_text(content, encoding="utf-8")
+        print(f"✅ 已生成知识库首页: {page.name}")
+    except OSError as e:
+        print(f"⚠️ 生成知识库首页失败: {e}", file=sys.stderr)
+
+
 def generate_quickstart_card(vault):
     """快捷卡兜底生成（模板已含则跳过）。"""
     card = vault / "如何使用.md"
@@ -283,17 +393,22 @@ domain: 管理
 status: active
 importance: 0.5
 created: 2026-09-22
-updated: 2026-09-22
+updated: 2026-09-27
 tags: ["管理"]
 ---
 # 🚀 如何使用你的知识库
 
+> 面向**第一次使用**的朋友，不需要技术背景。
+
 ## 你现在有什么
 
 一个会**自己成长**的知识库：
-- 往 `00-收件箱` 丢想法，引擎帮你整理、路由、补链
+
+- 往 `00-收件箱` 丢想法，引擎帮你**整理、路由、补链**
 - 用 `kb query "问题"` 搜知识
-- 每天自动回忆该复习的笔记
+- 每天自动**回忆**该复习的笔记
+- 自动**巡检**死链、空目录、缺字段
+- 自动**备份**
 
 ## 最常用的 5 件事
 
@@ -305,20 +420,80 @@ tags: ["管理"]
 | 检查知识库健康度 | `kb healthcheck` |
 | 今天该复习哪些 | `kb recall` |
 
-> `kb` 会自动找到你的知识库，不用记路径。
+> `kb` 默认以自身所在目录为知识库；安装器已把它注册为全局命令。
+> Windows 用 `kb.cmd`，或直接 `kb`（已加入 PATH）。
+
+> 进阶：`kb clean refine`（一键整理：结构化+去重→分块→重建索引→校验）、
+> `kb link moc`（生成知识地图）、`kb recall mark --grade good`（记录复习，SM-2 排期）。
 
 ## 在 Obsidian 里
 
-- 用 Obsidian 打开这个文件夹
-- 左侧文件树就是你的知识库结构
-- `🏠-知识库首页.md` 是总览页
-- `00-收件箱 Inbox/` 是你丢想法的地方
+1. 用 Obsidian 打开这个文件夹（安装时已自动打开）
+2. 左侧文件树就是你的知识库结构
+3. `🏠-知识库首页.md` 是总览页，从这里开始浏览
+4. `00-收件箱 Inbox/` 是你丢想法的地方
+5. `70-知识治理 Governance/` 有仪表盘与巡检报告
+
+### 知识库的分区
+
+| 文件夹 | 放什么 |
+|--------|--------|
+| `00-收件箱 Inbox` | 原始想法，随手丢进来 |
+| `10-项目 Projects` | 进行中的项目 |
+| `20-技术 Technology` | 可复用的技术沉淀 |
+| `30-决策日志 Decisions` | 重要决策 + 理由 |
+| `40-资源库 Resources` | 通用方法论、资料 |
+| `50-模板 Templates` | 笔记模板 |
+| `60-运营 Operations` | 清洗、流转 SOP |
+| `70-知识治理 Governance` | 指标、巡检、仪表盘 |
+| `90-归档 Archive` | 收尾、过期的内容 |
+
+## 让知识库「自己跑」（可选）
+
+把下面加进定时任务（Linux/macOS）：
+
+```
+40 4 * * *  /path/to/vault/scripts/growth_cron.sh /path/to/vault
+```
+
+它会每天自动：建索引 → 整理收件箱 → 算命中信号 → 出回忆清单 → 补链 → 刷仪表盘 →
+同步/摄取 Agent 记忆。
+
+> Windows（无 bash）不适用 `growth_cron.sh`，可用任务计划自行编排 `kb` 子命令。
 
 ## 常见问题
 
-- **kb 命令找不到？** 重启终端，或在知识库目录内用 `./kb`
-- **搜不到结果？** 先跑 `kb rag index` 建索引
-- **看所有功能？** `kb help` 或 `kb list`
+### kb 命令找不到？
+- **Linux/macOS**：重启终端，或在知识库目录内用 `./kb`
+- **Windows**：重启终端，或在知识库目录内用 `kb.cmd`
+
+### 搜不到结果？
+先跑 `kb rag index` 建索引。写了新笔记后也要重跑（增量）。
+
+### 想看所有功能？
+```
+kb help     # 显示帮助
+kb list     # 列出所有插件
+```
+
+### 想摄取其他 agent 的记忆？
+```
+kb agent detect            # 探测本机 agent
+kb ingest agent --dry-run  # 预览（只读）
+kb ingest agent            # 摄取
+```
+
+### 想备份？
+```
+kb backup daily    # 日常备份
+kb backup weekly   # 周备份
+```
+
+## 一句话理念
+
+**你只管往收件箱丢想法；引擎帮你清洗、路由、补链、回忆、巡检、备份。**
+
+完整文档见 `README.md` 的「命令参考」。
 """
     try:
         card.write_text(content, encoding="utf-8")
@@ -353,7 +528,9 @@ def main():
     if not args.no_global_kb:
         register_global_kb(vault)
 
+    generate_homepage(vault)
     generate_quickstart_card(vault)
+    write_install_manifest(vault)
 
     if not args.no_verify:
         ok = verify_install(vault)

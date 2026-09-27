@@ -13,7 +13,7 @@ import argparse, os, re, sys, json, math, time, datetime, hashlib, uuid
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint
+from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status
 
 IDX_DIR = "vector index"
 IDX_VERSION = 2  # df_idf.json schema 版本；v2 新增 doc_hashes/doc_mtimes/inverted_index
@@ -63,6 +63,8 @@ def main() -> int:
     q.add_argument("--tags", default=None, help="逗号分隔的标签")
     q.add_argument("--date-from", default=None, dest="date_from")
     q.add_argument("--date-to", default=None, dest="date_to")
+    q.add_argument("--exclude-stale", action="store_true", dest="exclude_stale",
+                   help="排除非 active/stable 或陈旧的笔记（freshness 过滤）")
     args = ap.parse_args()
 
     if args.cmd == "index":
@@ -74,7 +76,8 @@ def main() -> int:
                          domain=args.domain, content_type=args.content_type,
                          author=args.author, min_importance=args.min_importance,
                          enforce_level=args.enforce_level, tags=args.tags,
-                         date_from=args.date_from, date_to=args.date_to)
+                         date_from=args.date_from, date_to=args.date_to,
+                         exclude_stale=args.exclude_stale)
     return 1
 
 def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
@@ -98,9 +101,11 @@ def _full_rebuild(root, idx):
     df = Counter()
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue  # 运行期报告产物不入检索
         fm, body = load_meta(p)
-        if fm.get("kb_action") == "retire":
-            continue  # 归档/停用不入检索
+        if index_excluded(fm):
+            continue  # 归档/来源/显式退出：不入检索
         toks = tokenize(body + " " + " ".join(fm.get("tags", "").split()))
         if not toks:
             continue
@@ -132,10 +137,17 @@ def _incremental_update(root, idx, old):
 
     changed, deleted = [], []
     current_hashes, current_mtimes = {}, {}
+    retired = set()  # 归档/来源/显式退出：文件仍在但需从索引移除
 
     for rel, p in current_files.items():
+        if is_generated_report(rel):
+            retired.add(rel)  # 报告产物：从索引移除（若曾入过）
+            continue
         fm, body = load_meta(p)
-        if fm.get("kb_action") == "retire":
+        if index_excluded(fm):
+            # 归档/停用/来源：不入本次索引；同时确保旧索引里的同 rel 被清掉
+            # （文件仍在 current_files 里，不会被“物理删除”分支捕获，故显式记录）
+            retired.add(rel)
             continue
         mtime = p.stat().st_mtime
         if old_mtimes.get(rel) == mtime:
@@ -149,7 +161,8 @@ def _incremental_update(root, idx, old):
         if old_hashes.get(rel) != h:
             changed.append((rel, p, fm, body))
 
-    deleted = [rel for rel in old_hashes if rel not in current_files]
+    # 从索引移除：物理删除的文件 + 新近 retire 的文件（与 _full_rebuild 行为一致）
+    deleted = [rel for rel in old_hashes if rel not in current_files or rel in retired]
 
     if not changed and not deleted:
         print("✅ 索引已是最新（无变更）")
@@ -196,6 +209,35 @@ def _vec(counter, vocab, idf):
 def _cos(a, b):
     if len(a) > len(b): a, b = b, a
     return sum(av * b[k] for k, av in a.items() if k in b)
+
+
+# ── P0 Stage3: 混合检索（TF-IDF 余弦 × BM25）──────────────
+HYBRID_ALPHA = 0.5   # 余弦权重；BM25 权重 = 1 - HYBRID_ALPHA
+
+
+def _bm25_scores(tf_all, q_tokens, k1=1.5, b=0.75):
+    """纯标准库 BM25（Okapi）。返回 {rel: score}（>0）。"""
+    df = Counter()
+    for c in tf_all.values():
+        for t in c:
+            df[t] += 1
+    N = len(tf_all) or 1
+    dl = {r: sum(c.values()) for r, c in tf_all.items()}
+    avgdl = (sum(dl.values()) / N) or 1.0
+    out = {}
+    for r, c in tf_all.items():
+        L = dl[r]
+        s = 0.0
+        for t in q_tokens:
+            f = c.get(t, 0)
+            if not f:
+                continue
+            n = df[t]
+            idf_t = math.log((N - n + 0.5) / (n + 0.5) + 1)
+            s += idf_t * (f * (k1 + 1)) / (f + k1 * (1 - b + b * L / avgdl))
+        if s > 0:
+            out[r] = s
+    return out
 
 
 # ── 倒排索引（FR-3!（3.2.2）──────────────────────────────────
@@ -420,7 +462,8 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
               content_type: Optional[str] = None, author: Optional[str] = None,
               min_importance: Optional[float] = None, enforce_level: Optional[str] = None,
               tags: Optional[str] = None,
-              date_from: Optional[str] = None, date_to: Optional[str] = None) -> int:
+              date_from: Optional[str] = None, date_to: Optional[str] = None,
+              exclude_stale: bool = False) -> int:
     t0 = time.time()
     # 捕获打通：无 session 时自动生成，确保每次查询都写 per-query 事件（供 kb_usage 量再问率）
     if not session:
@@ -431,6 +474,9 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         "author": author, "min_importance": min_importance,
         "enforce_level": enforce_level, "tags": tags,
         "date_from": date_from, "date_to": date_to,
+        # context（片段长度）与 answer（是否调 LLM 作答）都会改变输出，必须入键
+        "context": context, "answer": bool(answer),
+        "exclude_stale": bool(exclude_stale),
     }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     try:
         from state_manager import StateStore
@@ -441,6 +487,11 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
                 print(json.dumps(entry["result"], ensure_ascii=False, indent=2))
             else:
                 print(entry["text"])
+            # 反馈闭环：命中缓存也要记录本次查询命中（供 kb_usage 量再问率），
+            # 不能被缓存短路，否则重复查询不再产生反馈信号。
+            paths = entry.get("paths") or []
+            if session and paths:
+                _record_hits(q, [{"path": p} for p in paths], session, root)
             return 0
     except ImportError:
         cache = None
@@ -468,6 +519,16 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     scored.sort(key=lambda x: x[1], reverse=True)
     scored = [(r, s) for r, s in scored if s > 0]
 
+    # P0 Stage3: 混合检索 —— 余弦 + BM25 归一加权（提升召回与稳健性）
+    bm25 = _bm25_scores(tf_all, tokenize(q_expanded))
+    if bm25:
+        cmax = max((s for _, s in scored), default=0.0) or 1.0
+        bmax = max(bm25.values()) or 1.0
+        merged = {r: HYBRID_ALPHA * (s / cmax) for r, s in scored}
+        for r, s in bm25.items():
+            merged[r] = merged.get(r, 0.0) + (1.0 - HYBRID_ALPHA) * (s / bmax)
+        scored = sorted(merged.items(), key=lambda x: x[1], reverse=True)
+
     # 倒排索引命中加成（FR-3.2.2）
     inverted_index = payload.get("inverted_index", {})
     if inverted_index:
@@ -487,6 +548,15 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     if has_filters:
         scored = _apply_filters(scored, root, domain, content_type, author,
                                 min_importance, enforce_level, tags, date_from, date_to)
+
+    # P0 Stage3: freshness 过滤 —— 排除非可检索状态 / 陈旧（review_after 到期或超龄）
+    if exclude_stale:
+        kept = []
+        for r, s in scored:
+            fm = load_meta(Path(root) / r)[0]
+            if retrievable_status(fm) and not is_stale(fm):
+                kept.append((r, s))
+        scored = kept
 
     # 检索结果去重（FR-3.1.8）
     deduped = _dedup_chunks(scored, top)
@@ -521,7 +591,9 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
                 from state_manager import StateStore
                 Store = StateStore(root)
                 Store.update("query_cache.json",
-                    lambda c: c.update({cache_key: {"result": output, "ts": time.time()}}) or c)
+                    lambda c: c.update({cache_key: {
+                        "result": output, "ts": time.time(),
+                        "paths": [h["path"] for h in hit_list]}}) or c)
             except (ImportError, OSError, json.JSONDecodeError, KeyError, TypeError):
                 pass
     else:
@@ -539,7 +611,9 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
             try:
                 from state_manager import StateStore
                 StateStore(root).update("query_cache.json",
-                    lambda c: c.update({cache_key: {"text": text_output, "ts": time.time()}}) or c)
+                    lambda c: c.update({cache_key: {
+                        "text": text_output, "ts": time.time(),
+                        "paths": [rel for rel, _sc in hits]}}) or c)
             except (ImportError, OSError, json.JSONDecodeError, KeyError, TypeError):
                 pass
         if answer:

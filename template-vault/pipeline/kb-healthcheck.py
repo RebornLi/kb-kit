@@ -24,7 +24,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # 默认 vault 根：脚本位于 pipeline/，parents[1] 即 vault 根（可用 KB_ROOT 覆盖）
-from kb_common import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE
+from kb_common import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter, is_source_note, freshness, retrievable_status
 # kb-healthcheck 用 Path 对象
 ROOT_DEFAULT = Path(_ROOT_DEFAULT_STR)
 # 全名分区（与脚手架目录名一致）
@@ -359,27 +359,49 @@ def check_overlong(root):
         if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板"):
             continue
         text = fp.read_text(encoding="utf-8", errors="replace")
-        # 去掉 frontmatter 取正文
-        if text.startswith("---"):
-            end = text.find("\n---\n", 3)
-            body = text[end + 4:] if end != -1 else text
-        else:
-            body = text
+        fm, body = parse_frontmatter(text)
+        if is_source_note(fm):
+            continue  # 原始来源笔记不入检索，也不计颗粒度告警
         n = len(body.replace("\n", ""))
         if n > BODY_LIMIT:
             over.append((n, rel))
     over.sort(reverse=True)
-    print(f"📏 超长未分块: {len(over)} 个(>{BODY_LIMIT}字，建议 kb clean --chunk)\n   阈值: 0")
+    print(f"📏 超长未分块: {len(over)} 个(>{BODY_LIMIT}字，建议 kb clean chunk)\n   阈值: 0")
     for n, rel in over[:20]:
         print(f"   ⚠ {n} 字  {rel}")
     return len(over)
 
 
 # ── 统一巡检入口（供文本/JSON/HTML 三类消费，避免重复扫描 vault）───────────
+def check_freshness(root):
+    """新鲜度巡检：陈旧（review_after 到期 / updated 超龄）与非可检索状态的笔记。"""
+    stale, blocked = [], []
+    for fp in collect_md(root):
+        rel = str(fp.relative_to(root))
+        if any(h in rel for h in SYSTEM_HINTS):
+            continue
+        fm, _ = parse_frontmatter(fp.read_text(encoding="utf-8", errors="replace"))
+        if is_source_note(fm):
+            continue
+        fr = freshness(fm)
+        if fr["stale"]:
+            stale.append((fr["age_days"] if fr["age_days"] is not None else -1, rel))
+        if not retrievable_status(fm):
+            blocked.append((str(fm.get("status", "") or "?"), rel))
+    stale.sort(reverse=True)
+    print(f"🕒 freshness: 陈旧 {len(stale)} · 非可检索状态 {len(blocked)}\n   阈值: 0")
+    for age, rel in stale[:20]:
+        print(f"   ⚠ 陈旧({age}天)  {rel}")
+    for st, rel in blocked[:20]:
+        print(f"   ⚠ 状态[{st}] 不进检索  {rel}")
+    return len(stale) + len(blocked)
+
+
 CHECKS = {"deadlinks": check_deadlinks, "skeletons": check_skeletons,
           "tags": check_tags, "empty": check_empty,
           "frontmatter": check_frontmatter, "discipline": check_discipline,
-          "overlong": check_overlong, "orphans": check_orphans}
+          "overlong": check_overlong, "orphans": check_orphans,
+          "freshness": check_freshness}
 CHECK_ORDER = list(CHECKS)  # 稳定顺序，供 JSON schema 输出
 
 
@@ -451,7 +473,7 @@ def main():
         prog="kb-healthcheck.py",
         description="知识库健康巡检（仅检测+报告，不自动修改笔记）",
     )
-    check_names = ["deadlinks", "skeletons", "tags", "empty", "frontmatter", "discipline", "overlong", "orphans"]
+    check_names = ["deadlinks", "skeletons", "tags", "empty", "frontmatter", "discipline", "overlong", "orphans", "freshness"]
     parser.add_argument("check", nargs="?", default="all",
                         choices=["all", "summary"] + check_names,
                         help="巡检项：all（默认）/summary（JSON 健康汇总）或 deadlinks/skeletons/...")

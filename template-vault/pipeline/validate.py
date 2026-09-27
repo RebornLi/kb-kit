@@ -10,7 +10,7 @@
 import argparse, os, re, sys, json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST
+from kb_common import ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, is_generated_report
 
 ENUM_STATUS  = {"draft", "active", "stable", "legacy", "archived"}
 REQUIRED = ["tags", "status", "domain", "created", "updated", "importance"]
@@ -120,7 +120,10 @@ def validate_file(path: Union[str, Path]) -> Tuple[List[str], List[str], Dict[st
         if "status: active" in text or "status: stable" in text:
             warn.append("kb_action=retire 但正文标注 active/stable，建议先降级")
     body = text.split("---", 2)[-1] if "---" in text else text
-    if len(body.replace("\n", "")) > BODY_LIMIT:
+    # 原始来源笔记（raw 抓取物等）不做颗粒度告警：它们本就不入检索
+    is_src = (str(g("is_source") or "").strip().lower() in ("true", "yes", "1")
+              or str(g("kind") or "").strip().lower() == "source")
+    if len(body.replace("\n", "")) > BODY_LIMIT and not is_src:
         warn.append(f"正文过长: {len(body.replace(chr(10),''))} 字（建议 500-2000，§3.3 颗粒度）")
     tg = g("tags")
     if isinstance(tg, list):
@@ -162,7 +165,7 @@ def main() -> int:
         for fn in fns:
             if not fn.endswith(".md"):
                 continue
-            if fn in REPORTS:                      # 引擎自生成的报表，不参与校验
+            if fn in REPORTS or is_generated_report(fn):  # 引擎自生成的报表/产物，不参与校验
                 continue
             full = os.path.join(dp, fn)
             rel = os.path.relpath(full, root)

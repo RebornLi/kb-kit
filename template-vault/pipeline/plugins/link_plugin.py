@@ -7,14 +7,14 @@ from plugins._subprocess_plugin import SubprocessPlugin
 
 class LinkPlugin(SubprocessPlugin):
     SCRIPT_NAME = "link_engine.py"
-    ACTION_MAP = {"suggestions": "suggestions", "apply": "apply"}
+    ACTION_MAP = {"suggestions": "suggestions", "apply": "apply", "moc": "moc"}
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="link",
             version="1.0",
             plugin_type="kb_module",
-            actions=["suggestions", "apply"],
+            actions=["suggestions", "apply", "moc"],
             cli_aliases={"link": "suggestions"},
             description="孤岛补链引擎",
         )

@@ -8,7 +8,7 @@
 #   deck  :打印今日回忆 deck(默认,不改文件)
 #   mark  :标记已回忆 → 推进稳定性(写前 checkpoint)
 #   status: upcoming due 一览
-# 状态: pipeline/.recall_state.json(运行时,已 gitignore)
+# 状态: .kb/state/recall_state.json（运行时；兼容读取旧路径 pipeline/.recall_state.json）
 # 用法:
 #   python3 pipeline/recall_schedule.py deck      [--n 10] [--root R]
 #   python3 pipeline/recall_schedule.py mark      [--deck N | --recalls "a,b"] [--root R]
@@ -33,6 +33,31 @@ INTERVAL_TABLE = [
     (0.3, 14,  "L2"),
     (0.0, 7,   "<0.3 频繁复核"),
 ]
+
+# ── P1 Stage6: SM-2 式复习（interval/ease/reps）+ 负载均衡 ──
+EASE_DEFAULT = 2.5
+EASE_MIN = 1.3
+MAX_INTERVAL = 365        # 间隔上限（天）
+DAILY_CAP = 20            # 单日复习上限（防积压）
+GRADE_Q = {"again": 1, "hard": 3, "good": 4, "easy": 5}
+
+
+def review_update(interval, ease, reps, q):
+    """SM-2 式更新：按评分调整 ease；间隔按 ease 增长，遗忘则缩短。
+
+    首次回忆(reps 从 0 →1)保持种子间隔(来自 importance)；之后 interval *= ease。
+    """
+    ease = ease + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
+    ease = max(EASE_MIN, min(2.5, ease))
+    if q < 3:
+        reps = 0
+        interval = max(1.0, interval * 0.5)   # 遗忘 → 缩短
+    else:
+        reps += 1
+        if reps > 1:
+            interval = interval * ease
+    interval = max(1.0, min(interval, MAX_INTERVAL))
+    return round(interval, 2), round(ease, 3), reps
 
 try:
     import rag  # 复用 rag.py 的分词/_vec/_cos,避免每篇 shell out
@@ -59,14 +84,29 @@ def base_interval(imp: float) -> int:
 
 
 def load_state(root: Union[str, Path]) -> Dict[str, Any]:
-    sp = Path(root) / "pipeline" / STATE
-    return json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+    """加载回忆状态：优先 StateStore(.kb/state/，原子写)，回退旧路径 pipeline/.recall_state.json。"""
+    try:
+        from state_manager import StateStore
+        store = StateStore(root)
+        if store.exists("recall_state.json"):
+            return store.load("recall_state.json", {})
+        legacy = Path(root) / "pipeline" / STATE
+        if legacy.exists():
+            return json.loads(legacy.read_text(encoding="utf-8"))
+        return {}
+    except ImportError:
+        sp = Path(root) / "pipeline" / STATE
+        return json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
 
 
 def save_state(root: Union[str, Path], st: Dict[str, Any]) -> None:
-    sp = Path(root) / "pipeline" / STATE
-    sp.parent.mkdir(parents=True, exist_ok=True)
-    sp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    try:
+        from state_manager import StateStore
+        StateStore(root).save("recall_state.json", st)
+    except ImportError:
+        sp = Path(root) / "pipeline" / STATE
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def load_index(root: Union[str, Path]) -> Optional[Dict[str, Any]]:
@@ -114,27 +154,25 @@ def build(root: Union[str, Path], deck_n: int) -> Tuple[List[Dict[str, Any]], Li
         if imp < 0.1:
             continue  # 无 importance 的报表/产物不参与回忆(由 intake triage 处理)
         base = base_interval(imp)
-        st = state.get(rel)
-        if st:
-            last = datetime.date.fromisoformat(st.get("last_seen", "1970-01-01"))
-            stab = st.get("stability", base)
-            recalls = st.get("recalls", 0)
-        else:
-            last = datetime.date.fromisoformat(fm.get("created", "1970-01-01")[:10])
-            stab, recalls = float(base), 0
-        due = last + datetime.timedelta(days=int(stab))
+        st = state.get(rel) or {}
+        last = datetime.date.fromisoformat(
+            st.get("last_seen") or fm.get("created", "1970-01-01")[:10])
+        interval = float(st.get("interval", st.get("stability", base)))
+        ease = float(st.get("ease", EASE_DEFAULT))
+        reps = int(st.get("reps", st.get("recalls", 0)))
+        due = last + datetime.timedelta(days=max(1, int(round(interval))))
         overdue = (now - due).days
-        urgency = imp * (1 + max(0, overdue) / max(base, 1))
+        urgency = imp * (1 + max(0, overdue) / max(interval, 1))
         summary = fm.get("kb_summary") or body.strip().splitlines()[0].strip()[:60]
-        notes.append({"rel": rel, "imp": imp, "base": base, "stab": stab,
-                      "recalls": recalls, "due": due.isoformat(),
+        notes.append({"rel": rel, "imp": imp, "base": base, "interval": interval,
+                      "ease": ease, "reps": reps, "due": due.isoformat(),
                       "overdue": overdue, "urgency": round(urgency, 3),
                       "summary": summary, "retrievable": retrievable(idx, rel, summary),
                       "domain": fm.get("domain", "-")})
     # deck = 已到期(overdue≥0),按 urgency; status = 全部到期按 due 升序
     due_list = sorted(notes, key=lambda n: (n["due"], -n["urgency"]))
     deck = sorted([n for n in notes if n["overdue"] >= 0],
-                  key=lambda n: (-n["urgency"], n["rel"]))[:deck_n]
+                  key=lambda n: (-n["urgency"], n["rel"]))[:max(0, min(deck_n, DAILY_CAP))]
     return notes, deck, due_list
 
 
@@ -148,7 +186,7 @@ def report_deck(deck: List[Dict[str, Any]]) -> str:
         flag = "✅ 检索浮层✓" if n["retrievable"] else "⚠️ 检索未置顶"
         overdue = f"逾期{n['overdue']}天" if n["overdue"] > 0 else f"到期{1+n['overdue']}天"
         out += [f"\n### {i}. {n['rel']}  [{n['imp']:.2f} · {flag}]",
-                f"- {overdue} · 稳定性{n['stab']:.0f}天 · 已回忆{n['recalls']}次",
+                f"- {overdue} · 间隔{n['interval']:.0f}天 · ease{n['ease']:.2f} · 已复习{n['reps']}次",
                 f"- 🧠 回忆测试:{n['summary']}",
                 f"- 📎 提示:回忆本笔记要点后 `rag.py query \"{n['summary']}\"` 核对"]
     return "\n".join(out) + "\n"
@@ -165,27 +203,40 @@ def report_status(due_list: List[Dict[str, Any]]) -> str:
     return "\n".join(out) + "\n"
 
 
-def mark(root: Union[str, Path], deck_n: int, rels: Optional[str]) -> int:
+def mark(root: Union[str, Path], deck_n: int, rels: Optional[str], grade: str = "good") -> int:
+    """标记已复习（SM-2 式）：按评分调整 ease，更新间隔与复习次数。
+
+    grade ∈ again/hard/good/easy（映射 SM-2 q=1/3/4/5）。
+    """
     state = load_state(root)
     _, deck, _ = build(root, 999)
-    picked = []
-    if rels:
-        picked = [r for r in rels.split(",")]
-    else:
-        picked = [n["rel"] for n in deck[:deck_n]]
+    picked = [r for r in rels.split(",")] if rels else [n["rel"] for n in deck[:deck_n]]
+    q = GRADE_Q.get(grade, 4)
     today = datetime.date.today().isoformat()
     advanced = []
     for rel in picked:
         st = state.setdefault(rel, {})
-        base = st.get("stability", base_interval(0.5))
-        st["last_seen"] = today
-        st["stability"] = min(float(base) * 1.4, 180)  # 递增稳定性
-        st["recalls"] = int(st.get("recalls", 0)) + 1
-        advanced.append(rel)
+        imp = 0.5
+        try:
+            fm, _text, _body = load_meta(Path(root) / rel)
+            imp = _parse_importance(fm.get("importance"))
+        except OSError:
+            pass
+        interval = float(st.get("interval", st.get("stability", base_interval(imp))))
+        ease = float(st.get("ease", EASE_DEFAULT))
+        reps = int(st.get("reps", st.get("recalls", 0)))
+        new_interval, new_ease, new_reps = review_update(interval, ease, reps, q)
+        st.pop("stability", None)   # 迁移旧字段
+        st.pop("recalls", None)
+        st.update({"last_seen": today, "interval": new_interval,
+                   "ease": new_ease, "reps": new_reps})
+        if q < 3:
+            st["lapses"] = int(st.get("lapses", 0)) + 1
+        advanced.append((rel, new_interval, new_ease))
     save_state(root, state)
-    print(f"✅ 已回忆 {len(advanced)} 篇 → 稳定性递增(下次间隔更长):\n" +
-          "\n".join(f"- {r}" for r in advanced[:20]))
-    print("   说明:回忆状态存于 pipeline/.recall_state.json(已 gitignore,可手改/删除)")
+    print(f"✅ 已复习 {len(advanced)} 篇（grade={grade}）→ 间隔/ease 更新：\n" +
+          "\n".join(f"- {r}  间隔{iv:.0f}天 ease{e:.2f}" for r, iv, e in advanced[:20]))
+    print("   说明:复习状态存于 .kb/state/recall_state.json(运行时,可手改/删除)")
     return 0
 
 
@@ -195,6 +246,8 @@ def main() -> int:
     dd = sub.add_parser("deck"); dd.add_argument("--n", type=int, default=10); dd.add_argument("--root", default=ROOT_DEFAULT)
     mk = sub.add_parser("mark"); mk.add_argument("--deck", type=int, default=10)
     mk.add_argument("--recalls", default=None); mk.add_argument("--root", default=ROOT_DEFAULT)
+    mk.add_argument("--grade", choices=list(GRADE_Q), default="good",
+                    help="复习评分（SM-2）：again/hard/good/easy")
     su = sub.add_parser("status"); su.add_argument("--root", default=ROOT_DEFAULT)
     args = ap.parse_args()
     if args.cmd == "deck":
@@ -205,7 +258,7 @@ def main() -> int:
         print("\n" + rep)
         return 0
     if args.cmd == "mark":
-        return mark(args.root, args.deck, args.recalls)
+        return mark(args.root, args.deck, args.recalls, args.grade)
     if args.cmd == "status":
         _, _, due = build(args.root, 0)
         rep = report_status(due)

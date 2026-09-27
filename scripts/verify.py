@@ -40,13 +40,18 @@ REQUIRED_DIRS = [
     "scripts",
 ]
 
-# 必需文件
+# 必备文件：安装流程一定产出，缺任一即判失败
 REQUIRED_FILES = [
     "kb",
     "kb.cmd",
-    "kb-agent.json",
+    "kb-agent.json",   # create_vault.wire_agents 总会写入（无 agent 时写空注册表）
+]
+
+# 内容/引导文件：精简分发包可能不随模板提供（内容可按需生成），缺失只提示不判失败
+CONTENT_FILES = [
     "🏠-知识库首页.md",
     "📖-知识库管理方案.md",
+    "如何使用.md",
 ]
 
 
@@ -54,7 +59,11 @@ REQUIRED_FILES = [
 # 检查项
 # ============================================================
 def check_vault_structure(vault: Path) -> VerifyItem:
-    """检查 vault 目录结构完整性。"""
+    """检查 vault 目录结构完整性。
+
+    只硬性要求安装流程必然产出的机制文件；示例内容文件（首页/管理方案/快捷卡）
+    缺失时降级为提示——精简分发包可不含它们，不应因此判安装失败。
+    """
     missing_dirs = []
     missing_files = []
 
@@ -67,8 +76,11 @@ def check_vault_structure(vault: Path) -> VerifyItem:
             missing_files.append(f)
 
     if not missing_dirs and not missing_files:
-        return VerifyItem("目录结构", True,
-                          f"{len(REQUIRED_DIRS)} 目录 + {len(REQUIRED_FILES)} 文件齐全")
+        detail = f"{len(REQUIRED_DIRS)} 目录 + {len(REQUIRED_FILES)} 文件齐全"
+        missing_content = [f for f in CONTENT_FILES if not (vault / f).exists()]
+        if missing_content:
+            detail += f"（可选内容未随包提供: {', '.join(missing_content)}）"
+        return VerifyItem("目录结构", True, detail)
 
     missing = []
     if missing_dirs:
@@ -102,10 +114,11 @@ def check_vector_index(vault: Path) -> VerifyItem:
                           "kb rag index")
 
     # 验证可查询
+    n_docs = data.get("n_docs", 0) if isinstance(data.get("n_docs", 0), int) else 0
     rag = vault / "pipeline" / "rag.py"
     if not rag.exists():
         return VerifyItem("向量索引", True,
-                          f"索引存在（{len(data)} 条），rag.py 缺失跳过查询验证")
+                          f"索引存在（{n_docs} 篇），rag.py 缺失跳过查询验证")
 
     try:
         r = subprocess.run(
@@ -114,13 +127,13 @@ def check_vector_index(vault: Path) -> VerifyItem:
         )
         if r.returncode == 0:
             return VerifyItem("向量索引", True,
-                              f"索引存在（{len(data)} 条），查询正常")
+                              f"索引存在（{n_docs} 篇），查询正常")
         return VerifyItem("向量索引", False,
                           f"查询返回非 0: {r.stderr[:100]}",
                           "kb rag index")
     except subprocess.TimeoutExpired:
         return VerifyItem("向量索引", True,
-                          f"索引存在（{len(data)} 条），查询超时（不影响使用）")
+                          f"索引存在（{n_docs} 篇），查询超时（不影响使用）")
     except Exception as e:
         return VerifyItem("向量索引", False,
                           f"查询异常: {e}",
@@ -159,6 +172,30 @@ def check_kb_command(vault: Path) -> VerifyItem:
                           "检查 Python 是否可用")
 
 
+def check_install_manifest(vault: Path) -> VerifyItem:
+    """按安装清单核对基线文件是否齐全（安装完整性）。
+
+    清单由 create_vault 在安装时写入 `.kb/install-manifest.json`，只含「安装基线」
+    （模板文件 + 生成文件），不含用户后续新增笔记——故不会因用户增删内容误报。
+    无清单（旧版/精简安装）时跳过，保持向后兼容。
+    """
+    mf = vault / ".kb" / "install-manifest.json"
+    if not mf.exists():
+        return VerifyItem("安装清单", True, "无清单（旧版/精简安装），跳过")
+    try:
+        files = json.loads(mf.read_text(encoding="utf-8")).get("files", [])
+    except (json.JSONDecodeError, OSError) as e:
+        return VerifyItem("安装清单", False, f"清单损坏: {e}",
+                          "删除 .kb/install-manifest.json 后重装")
+    missing = [f for f in files if not (vault / f).exists()]
+    if missing:
+        head = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
+        return VerifyItem("安装清单", False,
+                          f"缺失 {len(missing)} 个基线文件: {head}",
+                          f"python3 create_vault.py --vault {vault} --force")
+    return VerifyItem("安装清单", True, f"{len(files)} 个基线文件齐全")
+
+
 # ============================================================
 # 主入口
 # ============================================================
@@ -169,6 +206,7 @@ def run(vault: Path) -> int:
 
     items: List[VerifyItem] = [
         check_vault_structure(vault),
+        check_install_manifest(vault),
         check_vector_index(vault),
         check_kb_command(vault),
     ]

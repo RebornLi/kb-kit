@@ -89,52 +89,56 @@ class PluginRegistry:
         if plugins_pkg not in sys.path:
             sys.path.insert(0, plugins_pkg)
 
-        # 扫描所有 .py 文件（排除 __init__.py、__pycache__）
+        # 扫描所有 .py 文件：跳过 __init__ 与下划线开头的内部辅助模块
+        # （如 _subprocess_plugin.py —— 它是被插件 import 的基类，不是插件本身）
         py_files = sorted(self._plugins_dir.glob("*.py"))
         for py_file in py_files:
-            if py_file.name.startswith("__"):
+            if py_file.name.startswith("_"):
                 continue
             self._load_plugin_module(py_file)
 
-    def _load_plugin_module(self, module_path: Path) -> Optional[PluginBase]:
-        """加载单个插件模块，查找 PluginBase 子类并实例化。"""
+    def _load_plugin_module(self, module_path: Path) -> List[PluginBase]:
+        """加载单个插件模块，实例化并注册其中**所有**具体 PluginBase 子类。
+
+        一个模块可定义多个插件；不再只取首个（避免静默丢弃）。
+        返回成功实例化的插件列表。
+        """
         module_name = module_path.stem
         try:
             # 优先用 import_module（支持包内 import）
             mod = importlib.import_module(module_name)
         except Exception as e:  # 宽泛捕获: 外部服务不可控（第三方插件代码不可控）
             self._logger.warning(f"插件模块 {module_name} 加载失败: {e}")
-            return None
+            return []
 
-        # 遍历模块属性，查找 PluginBase 的非抽象子类
-        found_plugin = None
+        instances: List[PluginBase] = []
         for attr_name in dir(mod):
             attr = getattr(mod, attr_name, None)
             if (attr is None or not isinstance(attr, type)
                     or attr is PluginBase):
                 continue
             try:
-                if issubclass(attr, PluginBase):
-                    # 跳过抽象类（有未实现的 abstractmethod）
-                    abstract_methods = getattr(attr, "__abstractmethods__", set())
-                    if abstract_methods:
-                        continue
-                    found_plugin = attr
-                    break
+                if not issubclass(attr, PluginBase):
+                    continue
             except TypeError:
                 continue
+            # 跳过抽象类（有未实现的 abstractmethod）
+            if getattr(attr, "__abstractmethods__", set()):
+                continue
+            # 只注册本模块定义的具体子类，跳过 import 进来的（防重复/误注册）
+            if getattr(attr, "__module__", "") != module_name:
+                continue
+            try:
+                instance = attr()
+                self.register(instance)
+                instances.append(instance)
+            except Exception as e:  # 宽泛捕获: 外部服务不可控（第三方插件代码不可控）
+                self._logger.warning(f"插件 {module_name}.{attr_name} 实例化失败: {e}")
 
-        if found_plugin is None:
-            self._logger.warning(f"{module_name}.py 中未找到 PluginBase 子类")
-            return None
-
-        try:
-            instance = found_plugin()
-            self.register(instance)
-            return instance
-        except Exception as e:  # 宽泛捕获: 外部服务不可控（第三方插件代码不可控）
-            self._logger.warning(f"插件 {module_name} 实例化失败: {e}")
-            return None
+        if not instances:
+            # 正常情况（纯辅助模块）不刷屏；调试时才看得到
+            self._logger.debug(f"{module_name}.py 未定义具体 PluginBase 子类")
+        return instances
 
     # ── 注册 ───────────────────────────────────────────────
     def register(self, plugin: PluginBase) -> bool:

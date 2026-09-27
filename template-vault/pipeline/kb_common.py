@@ -17,7 +17,7 @@
 """
 import os, re, math, json, hashlib
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, date
 from collections import Counter
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
 
@@ -157,6 +157,116 @@ def content_fingerprint(body):
     用于精确去重和变更检测。零依赖（hashlib 标准库）。
     """
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+# ── 索引纳入判定（raw/来源归档不参与检索，防噪声与超长污染）──────
+def is_source_note(fm) -> bool:
+    """是否为「原始来源」笔记（如 raw/ 抓取物）：`is_source: true` 或 `kind: source`。"""
+    v = fm.get("is_source")
+    if v is True or str(v).strip().lower() in ("true", "yes", "1"):
+        return True
+    return str(fm.get("kind", "")).strip().lower() == "source"
+
+
+# ── 来源权威 + 新鲜度（生命周期治理）────────────────────────
+RETRIEVABLE_STATUSES = {"active", "stable"}  # 仅这些状态参与检索
+DEFAULT_STALE_DAYS = 180                      # updated/created 超过此天数视为陈旧
+
+
+def retrievable_status(fm) -> bool:
+    """来源权威：仅 active/stable 可检索；无 status 宽松放行（兼容旧笔记）。"""
+    st = str(fm.get("status", "") or "").strip().lower()
+    return True if not st else st in RETRIEVABLE_STATUSES
+
+
+def _parse_day(v):
+    s = str(v or "")[:10]
+    try:
+        return date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def freshness(fm, today=None) -> dict:
+    """新鲜度：内容年龄 + review_after 到期。返回 {age_days, review_after, review_due, stale}。"""
+    today = today or date.today()
+    upd = _parse_day(fm.get("updated")) or _parse_day(fm.get("created"))
+    age = (today - upd).days if upd else None
+    ra = _parse_day(fm.get("review_after"))
+    review_due = bool(ra and ra <= today)
+    stale = review_due or (age is not None and age > DEFAULT_STALE_DAYS)
+    return {"age_days": age, "review_after": str(fm.get("review_after") or ""),
+            "review_due": review_due, "stale": stale}
+
+
+def is_stale(fm, today=None) -> bool:
+    """笔记是否陈旧（review_after 到期，或 updated/created 超过 DEFAULT_STALE_DAYS）。"""
+    return freshness(fm, today)["stale"]
+
+
+def index_excluded(fm) -> bool:
+    """是否应从 RAG 索引排除：归档(retire)、显式 kb_index:false、非可检索状态、原始来源(source)。"""
+    if fm.get("kb_action") == "retire":
+        return True
+    if str(fm.get("kb_index", "")).strip().lower() in ("false", "no", "0"):
+        return True
+    if not retrievable_status(fm):
+        return True
+    return is_source_note(fm)
+
+
+# 运行期生成的报告文件（非知识内容）：不入检索 / 不参与补链 / 不再分块
+GENERATED_REPORTS = {
+    "intake_triage.md", "feedback_hits.md", "recall_deck.md",
+    "recall_schedule.md", "link_suggestions.md", "_INDEX.md",
+    "clean_suggestions.md", "_MOC.md",
+}
+
+
+def is_generated_report(rel) -> bool:
+    """rel 是否为运行期生成的报告产物（按文件名判定）。"""
+    return Path(str(rel)).name in GENERATED_REPORTS
+
+
+# ── 归档生命周期：别名重定向 + lineage（合并/去重可回溯，旧链接不失效）──
+def _alias_items(val: str):
+    s = str(val or "").strip().strip("[]")
+    return [t.strip().strip('"\'') for t in re.split(r"[,\s]+", s) if t.strip()]
+
+
+def add_alias_text(text: str, alias: str):
+    """在 frontmatter 的 aliases 中追加 alias（幂等）；无 frontmatter 返回 None。"""
+    m = FM.search(text)
+    if not m:
+        return None
+    end = FM.search(text, m.end())
+    if not end:
+        return None
+    block = text[m.end():end.start()]
+    body = text[end.end():]
+    mm = re.search(r"^aliases:.*$", block, re.M)
+    if mm:
+        items = _alias_items(mm.group(0).split(":", 1)[1])
+        if alias not in items:
+            items.append(alias)
+        block = re.sub(r"^aliases:.*$", "aliases: [" + ", ".join(items) + "]",
+                       block, count=1, flags=re.M)
+    else:
+        block = f"aliases: [{alias}]\n" + block.lstrip("\n")
+    return "---\n" + block + "\n---\n" + body
+
+
+def record_lineage(root, src: str, dst: str, action: str) -> None:
+    """记录合并/去重的血缘（from→to），写入 .kb/state/lineage.jsonl。"""
+    try:
+        p = Path(root) / ".kb" / "state" / "lineage.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
+                                "action": action, "from": src, "to": dst},
+                               ensure_ascii=False) + "\n")
+    except OSError:
+        pass
 
 
 # ── P2: domain 两级解析 + 配置加载（FR-3.3.3 + FR-3.3.4）──────

@@ -19,16 +19,53 @@ class ChunkNote:
     is_parent_index: bool       # 是否父索引页
 
 
+def _split_oversized(para, chunk_size, overlap):
+    """单段超过 chunk_size 时的递归兜底切分。
+
+    1) 先按句边界（。！？!? . 换行）切；
+    2) 句子本身仍超限时，按字符硬切并保留 overlap。
+    保证返回的每片均 <= chunk_size（除非 chunk_size 极小）。
+    """
+    if len(para) <= chunk_size:
+        return [para]
+    sents = [s for s in re.split(r"(?<=[。！？!?\.\n])", para) if s]
+    if len(sents) <= 1:
+        sents = [para]
+    pieces, cur, cur_len = [], [], 0
+    for s in sents:
+        if len(s) > chunk_size:
+            if cur:
+                pieces.append("".join(cur)); cur, cur_len = [], 0
+            step = max(1, chunk_size - overlap)
+            for i in range(0, len(s), step):
+                pieces.append(s[i:i + chunk_size])
+            continue
+        if cur and cur_len + len(s) > chunk_size:
+            pieces.append("".join(cur)); cur, cur_len = [], 0
+        cur.append(s); cur_len += len(s)
+    if cur:
+        pieces.append("".join(cur))
+    return pieces
+
+
 def _sliding_window(body, chunk_size=2000, overlap=500):
     """滑动窗口分块：按段落累积，超 chunk_size 产出一块，回退 overlap 字符。
 
-    确保不拆分段落（在段落边界对齐）。
+    段落边界对齐；单段超限时递归兜底切分（不整段丢弃）。
     """
     # 按空行分段
     paragraphs = re.split(r"\n\s*\n", body)
     paragraphs = [p for p in paragraphs if p.strip()]
     if not paragraphs:
         return []
+    # 递归兜底：展开超长单段
+    expanded = []
+    for para in paragraphs:
+        if len(para) > chunk_size:
+            expanded.extend(_split_oversized(para, chunk_size, overlap))
+        else:
+            expanded.append(para)
+    paragraphs = expanded
 
     chunks = []
     current = []
@@ -200,7 +237,14 @@ def chunk(body, parent_path, chunk_size=2000, overlap=500):
     Returns:
         list[ChunkNote]：分块笔记列表（最后一个是父索引页）
     """
-    chunks_text = _sliding_window_with_boundaries(body, chunk_size, overlap)
+    raw = _sliding_window_with_boundaries(body, chunk_size, overlap)
+    # 兜底：任何仍超限的块再递归切分，保证每块 <= chunk_size
+    chunks_text = []
+    for c in raw:
+        if len(c) > chunk_size:
+            chunks_text.extend(_split_oversized(c, chunk_size, overlap))
+        else:
+            chunks_text.append(c)
     if len(chunks_text) <= 1:
         # 无需分块，返回空列表
         return []

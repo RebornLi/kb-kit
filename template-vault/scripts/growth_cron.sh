@@ -2,7 +2,7 @@
 # ============================================================
 # growth_cron.sh —— 成长引擎定时节拍（成长系统自动维护）
 #   跑: ② feedback ingest(命中计数) → ④ recall deck(回忆) →
-#       ③ 自动补链(每轮取分最高前 N 对,幂等) → dashboard(治理面) →
+#       ③ 补链建议(只读,写 link_suggestions.md) → dashboard(治理面) →
 #       ⑦ 记忆写入侧(agent 记忆落 KB) → ⑥ 记忆同步(memory/ → KB)
 #   每步独立隔离:某引擎带坏只记日志并继续,绝不因单步崩而中断整条流水线。
 #   尤其⑦⑥是 agent 记忆落库的写侧,不能被前序任意单步的报错跳过(否则一周静默断粮)。
@@ -55,8 +55,8 @@ step "feedback ingest" "${PYTHON}" "${PIPE}/feedback_loop.py" ingest --root "${V
 log "④ recall deck（今日回忆 deck，写回 $VAULT/recall_deck.md）"
 step "recall deck" "${PYTHON}" "${PIPE}/recall_schedule.py" deck --root "${VAULT}"
 
-log "③ 自动补链（每轮取分最高前 50 对,幂等,写回缺链笔记建议区块）"
-step "link apply" "${PYTHON}" "${PIPE}/link_engine.py" apply --root "${VAULT}" --limit 50
+log "③ 补链建议（只读；写回由人工 kb link apply，避免无人监管自动改笔记）"
+step "link suggestions" "${PYTHON}" "${PIPE}/link_engine.py" suggestions --root "${VAULT}"
 
 log "⑤③ dashboard（刷新治理面，写回 70-知识治理 Governance/_INDEX.md）"
 step "dashboard" "${PYTHON}" "${PIPE}/dashboard.py" --root "${VAULT}"
@@ -67,7 +67,7 @@ if git -C "${VAULT}" add -- "${IDX}" 2>>"${LOG}"; then
   if git -C "${VAULT}" diff --cached --quiet; then
     log "  仪表盘无变化"
   else
-    git -C "${VAULT}" commit -q -m "chore: cron 刷新仪表盘(含自动补链)" >>"${LOG}" 2>&1 \
+    git -C "${VAULT}" commit -q -m "chore: cron 刷新仪表盘" >>"${LOG}" 2>&1 \
       && log "  ✅ 仪表盘已刷新 committed" \
       || log "  ⚠️ 仪表盘有变更但未提交(疑似 git 身份缺失或权限不足)"
   fi

@@ -85,10 +85,11 @@ kb query "部署" --json --domain 运维              # 只搜运维领域
 kb query "决策" --json --content-type decision    # 只搜决策类
 kb query "Nginx" --json --tags "运维,部署"        # 按标签过滤
 kb query "近况" --json --date-from 2026-09-01     # 按日期范围
+kb query "部署" --json --exclude-stale           # 只搜 active/stable 且未过期
 ```
 
 Available filters: `--domain`, `--content-type`, `--author`, `--min-importance`,
-`--enforce-level`, `--tags`, `--date-from`, `--date-to`.
+`--enforce-level`, `--tags`, `--date-from`, `--date-to`, `--exclude-stale`.
 
 ## Other useful kb commands
 

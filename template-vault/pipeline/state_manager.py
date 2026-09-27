@@ -35,6 +35,25 @@ class StateStore:
     def _path(self, name):
         return self.dir / name
 
+    def _atomic_write(self, p, text):
+        """原子写入：先写同目录临时文件，再 os.replace 覆盖目标。
+
+        必须用 os.replace 而非 Path.rename —— Windows 上 rename 在目标已存在时
+        会抛 FileExistsError，导致第二次起状态写入静默失败（调用方多吞异常）。
+        os.replace 在 POSIX/Windows 均为原子覆盖。
+        失败时清理残留临时文件。
+        """
+        tmp = p.with_name(p.name + ".tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            os.replace(tmp, p)
+        finally:
+            if tmp.exists():
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+
     def _lock(self, path, exclusive=True):
         """获取文件锁。返回 (fd, lock_obj) 或 (None, None)。"""
         if not _HAS_FCNTL:
@@ -73,15 +92,11 @@ class StateStore:
             self._unlock(lock_fd)
 
     def save(self, name, data):
-        """保存状态文件（原子写入：先写临时文件再 rename）。"""
+        """保存状态文件（原子写入：临时文件 → os.replace）。"""
         p = self._path(name)
         lock_fd, _ = self._lock(p, exclusive=True)
         try:
-            # 原子写入：临时文件 → rename
-            tmp = p.with_suffix(p.suffix + ".tmp")
-            tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                          encoding="utf-8")
-            tmp.rename(p)
+            self._atomic_write(p, json.dumps(data, ensure_ascii=False, indent=2))
         finally:
             self._unlock(lock_fd)
 
@@ -106,10 +121,7 @@ class StateStore:
                     data = json.loads(text)
             data = fn(data)
             if data is not None:
-                tmp = p.with_suffix(p.suffix + ".tmp")
-                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                              encoding="utf-8")
-                tmp.rename(p)
+                self._atomic_write(p, json.dumps(data, ensure_ascii=False, indent=2))
         except (json.JSONDecodeError, OSError, UnicodeDecodeError):
             data = default if default is not None else {}
         finally:

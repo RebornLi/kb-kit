@@ -12,6 +12,8 @@ class CleanPlugin(SubprocessPlugin):
         "apply": "apply",
         "report": "report",
         "chunk": "chunk",
+        "refine": "refine",
+        "taxonomy": "taxonomy",
     }
 
     def metadata(self) -> PluginMetadata:
@@ -19,7 +21,7 @@ class CleanPlugin(SubprocessPlugin):
             name="clean",
             version="1.0",
             plugin_type="kb_module",
-            actions=["dry-run", "apply", "report", "chunk"],
+            actions=["dry-run", "apply", "report", "chunk", "refine", "taxonomy"],
             cli_aliases={"clean": "dry-run"},
             description="知识库清洗与分块",
         )

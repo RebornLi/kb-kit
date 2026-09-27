@@ -134,7 +134,7 @@ export function apply(ctx) {
 
       const msg = createUserMessage({
         content: [{ type: 'text', text }],
-        source: { kind: 'plugin', plugin: name, form: 'notice', summary: '知识库命中注入' },
+        source: { kind: `plugin:${name}`, form: 'notice', summary: '知识库命中注入' },
       });
       return { ...decision, messages: [...decision.messages, msg] };
     } catch {

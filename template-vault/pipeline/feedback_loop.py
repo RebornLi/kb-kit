@@ -15,7 +15,7 @@ import argparse, os, re, sys, json, math, datetime
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, load_note, parse_importance as _parse_importance
+from kb_common import ROOT_DEFAULT, load_note, parse_importance as _parse_importance, is_generated_report
 from kb_constants import MIN_HITS, BUMP_CAP, MIN_BUMP
 import kb_rsi  # P1-B: 复用其 load_note/vec（多样性感知所需的候选向量与领域）
 
@@ -33,8 +33,10 @@ IDX_DIR = "vector index"
 EXT_WEIGHT = 1.0        # 外部显式有用反馈权重(主锚)
 INT_WEIGHT = 0.15       # RAG 命中权重(次级人气代理)
 HIT_CAP = 5             # RAG 命中封顶值(超出部分不计，防富者更富)
+HIT_TOPK = 5            # ingest 每源检索取前 N 命中（计入信号）
 DIVERSITY_CAP = 8       # 单轮最多提升篇数(权重扩散)
 DIVERSITY_FLOOR = 0.05  # 冷门但有真实反馈的最低提升(保护冷门有用知识)
+HIT_DECAY = 0.6         # 每轮 ingest 对历史命中做指数衰减，避免计数单调膨胀
 
 # ── P1-B: 多样性感知（防回声室收窄长尾）─────────────────────
 # 偏好附着（rich-get-richer）会让 T2 把权重持续堆到同一少数领域的热门笔记 → 长尾收窄、
@@ -114,6 +116,10 @@ def ingest(root: Union[str, Path]) -> Tuple[Dict[str, int], int]:
     idx = load_index(root)
     state = load_state(root)
     hits = state.setdefault("hits", {})
+    # 历史命中指数衰减：避免每轮累加导致计数单调膨胀、历史长期主导信号
+    if hits:
+        state["hits"] = hits = {h: round(v * HIT_DECAY, 4)
+                                for h, v in hits.items() if v * HIT_DECAY >= 0.1}
     sources = 0
     if rag:
         for p in rag.iter_notes(root):
@@ -130,7 +136,7 @@ def ingest(root: Union[str, Path]) -> Tuple[Dict[str, int], int]:
             q = fm.get("kb_summary") or body.strip().splitlines()[0].strip()[:80]
             if not q:
                 continue
-            for h in hits_for(idx, q, 5):
+            for h in hits_for(idx, q, HIT_TOPK):
                 hits[h] = hits.get(h, 0) + 1
             sources += 1
     state["last_ingest"] = _today()
@@ -312,6 +318,8 @@ def apply_bumps(root: Union[str, Path]) -> int:
     changed = []
     for b in suggested:
         rel = b["rel"]
+        if is_generated_report(rel):
+            continue  # 生成产物（dashboard/report）不是知识笔记，不提升
         p = Path(root) / rel
         if not p.exists():
             continue
@@ -340,7 +348,8 @@ def apply_bumps(root: Union[str, Path]) -> int:
     sp.run(["git", "-C", root, "add", "--", *rels], capture_output=True)
     if sp.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout.strip():
         sp.run(["git", "-C", root, "commit", "-q",
-                "-m", f"kb: 反馈回路 bump {len(rels)} 篇 importance(只升不降,可回滚)"],
+                "-m", f"kb: 反馈回路 bump {len(rels)} 篇 importance(只升不降,可回滚)",
+                "--", *rels],
                capture_output=True)
     for c in changed:
         print(f"✅ {c['rel']}  importance {c['old']:.2f} → {c['new']:.2f} (+{c['delta']})")
@@ -441,15 +450,15 @@ def _accumulate_importance(root, rel, weight, norm_factor=None):
     new_imp = min(1.0, old + delta)
     if new_imp <= old:
         return 0.0
-    # 写前 checkpoint
+    # 写前 checkpoint：只暂存本次目标文件，避免把无关改动混入检查点提交
     import subprocess as sp
-    sp.run(["git", "-C", root, "add", "-u"], capture_output=True)
+    sp.run(["git", "-C", root, "add", "--", rel], capture_output=True)
     if sp.run(["git", "-C", root, "status", "--porcelain"], capture_output=True, text=True).stdout.strip():
-        sp.run(["git", "-C", root, "commit", "-q", "-m", "pre-feedback checkpoint"], capture_output=True)
+        sp.run(["git", "-C", root, "commit", "-q", "-m", "pre-feedback checkpoint", "--", rel], capture_output=True)
     _write_importance(p, round(new_imp, 4))
     sp.run(["git", "-C", root, "add", "--", rel], capture_output=True)
     sp.run(["git", "-C", root, "commit", "-q",
-            "-m", f"kb: feedback hit importance {old:.2f}→{new_imp:.2f}"], capture_output=True)
+            "-m", f"kb: feedback hit importance {old:.2f}→{new_imp:.2f}", "--", rel], capture_output=True)
     return round(delta, 4)
 
 

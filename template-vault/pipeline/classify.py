@@ -222,6 +222,8 @@ def main():
     ap.add_argument("text", nargs="?", help="要分类的文本（缺省从 stdin 读）")
     ap.add_argument("--signals", default=None, help="信号词配置文件路径")
     ap.add_argument("--quality", action="store_true", help="运行质量门禁")
+    # 兼容插件包装器（SubprocessPlugin 总会注入 --root）；本模块不依赖 vault 根
+    ap.add_argument("--root", default=None, help="vault 根（兼容插件注入，未使用）")
     args = ap.parse_args()
     text = args.text if args.text else sys.stdin.read()
     signals_path = args.signals or Path(__file__).resolve().parents[1] / "reference" / "content-type-signals.json"

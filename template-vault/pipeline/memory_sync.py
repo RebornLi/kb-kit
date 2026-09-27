@@ -12,7 +12,7 @@
 #     python3 pipeline/memory_sync.py review  [--root R] [--density D] [--min-chars N]
 #     python3 pipeline/memory_sync.py promote [--root R] [--density D] [--min-chars N] [--semantic]
 # ============================================================
-import argparse, os, re, sys, json, datetime, subprocess
+import argparse, os, re, sys, json, datetime, subprocess, hashlib
 from pathlib import Path
 from collections import Counter
 import rag
@@ -275,6 +275,29 @@ def build_note(root, rel_src, title, body, bucket, meta, dens, review_needed=Fal
     return rel_target, text
 
 
+def _split_body(text):
+    """返回 frontmatter（两个 --- 分隔线）之后的正文部分。"""
+    parts = text.split("---", 2)
+    if len(parts) >= 3:
+        return parts[2].lstrip("\n")
+    return text
+
+
+def ledger_append(root, entry):
+    """晋升审计：append-only 写入 .kb/promotions.jsonl（一条可回溯快照）。
+    失败只 warn stderr 并标注 ledger-write-skipped，不阻塞 promote 主流程。
+    """
+    try:
+        ledger_dir = Path(root) / ".kb"
+        ledger_dir.mkdir(parents=True, exist_ok=True)
+        ledger_path = ledger_dir / "promotions.jsonl"
+        line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
+        with open(ledger_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError as e:
+        sys.stderr.write("⚠️ ledger-write-skipped: %s\n" % e)
+
+
 def do_review(root, density_thr, min_chars, semantic):
     vocab, idf, rel2vec, meta_all = load_index(root)
     state = load_state(root)
@@ -335,6 +358,28 @@ def do_promote(root, density_thr, min_chars, semantic):
         created += 1
         if g["near"]:
             nearc += 1
+        # ── 晋升审计：写前快照，留一条可回溯原文记录（FR-1）─────────────────
+        # 在 commit 之前追加，保证日志与写入原子相邻；source 是待晋升条目
+        # memory/ 下的相对路径，便于定位原文
+        mem_src_rel = rel
+        try:
+            src_body = (Path(root) / rel).read_text(encoding="utf-8")
+        except OSError:
+            src_body = g["body"]
+        orig_sha = hashlib.sha256(src_body.encode("utf-8")).hexdigest()
+        ledger_append(root, {
+            "ts": datetime.datetime.now().astimezone().isoformat(),
+            "agent": "memory_sync",
+            "action": "promote",
+            "memory_source": mem_src_rel,
+            "target_note": rel_target,
+            "bucket": bucket,
+            "summary": g.get("fm", {}).get("kb_summary", ""),
+            "domain": g.get("domain", ""),
+            "original_text": src_body.strip(),
+            "sha256_original": orig_sha,
+            "sha256_written": hashlib.sha256(_split_body(text).encode("utf-8")).hexdigest(),
+        })
     save_state(root, state)
     if staged:
         subprocess.run(["git", "-C", root, "add", "--", *staged], capture_output=True)

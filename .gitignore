@@ -31,7 +31,16 @@ KB3/
 .DS_Store
 Thumbs.db
 
+# 运行时知识库状态（审计日志、状态文件、向量索引；不进公开仓库）
+/**/.kb/
+
 # 虚拟环境
 .venv/
 venv/
 env/
+
+# CodeGraph 本地索引（工具产物，不进仓库）
+.codegraph/
+
+# 本地安装测试环境（安装验证用，不进仓库）
+ceshi/

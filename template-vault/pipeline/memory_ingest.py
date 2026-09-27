@@ -454,11 +454,22 @@ def mirror_core(root, agent_root, agent_name="openclaw"):
         fm.setdefault("kb_source", f"{agent_name}-core")
         fm["memory_source"] = f"{agent_name}/{name}"
         fm["mirror_date"] = datetime.date.today().strftime("%F")
+        # 补全标准 frontmatter 必填字段（核心文件原样镜像，需通过 kb validate）
+        today = fm["mirror_date"]
+        fm.setdefault("tags", ["reference"])
+        fm.setdefault("status", "active")
+        fm.setdefault("domain", "综合")
+        fm.setdefault("created", today)
+        fm.setdefault("updated", today)
+        fm.setdefault("importance", 0.0)
+        fm.setdefault("kb_target", "reference")
+        fm.setdefault("kb_action", "new")
+        fm.setdefault("kb_summary", f"{agent_name} 核心记忆 {name}")
         out = Path(root) / "reference" / f"{agent_name}-{name}"
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(frontmatter_block(fm) + body.lstrip("\n"), encoding="utf-8")
         ch[name] = h
-        touched.append(str(Path("reference") / f"openclaw-{name}"))
+        touched.append(str(Path("reference") / f"{agent_name}-{name}"))
         _audit_log(root, "mirror-core", str(out.relative_to(Path(root).resolve())),
                    f"agent={agent_name} core={name}")
         mirrored += 1

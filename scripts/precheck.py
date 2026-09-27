@@ -260,19 +260,16 @@ AGENT_PLUGINS: dict[str, dict] = {
     "openclaw": {
         "label": "OpenClaw",
         "plugin_dir": None,                    # 暂无内置外部插件
-        "deploy_doc": None,
         "detect_hint": "~/桌面/桌面文件/openclaw1/workspace",
     },
     "codex": {
         "label": "OpenAI Codex",
         "plugin_dir": None,
-        "deploy_doc": None,
         "detect_hint": "~/.codex/*.sqlite",
     },
     "hermes": {
         "label": "Hermes",
         "plugin_dir": None,
-        "deploy_doc": None,
         "detect_hint": "~/.hermes/memories/MEMORY.md",
     },
 }
@@ -416,7 +413,7 @@ def _deploy_agent_plugin(agent_name: str, info: dict) -> bool:
         print(f"      ⚠️ 插件目录不存在: {plugin_path}，跳过")
         return False
 
-    # 显示部署说明
+    # 显示部署说明（存在才显示；文档缺失不报错）
     deploy_doc = plugin_path / (info.get("deploy_doc") or "DEPLOY.md")
     if deploy_doc.exists():
         print(f"      📖 部署说明: {deploy_doc}")

@@ -12,6 +12,79 @@ tags: ["管理"]
 
 ---
 
+## v2.2.0 — 全生命周期优化（分诊→清洗→检索→连接→复习→治理→归档）（2026-09-27）
+
+按「收件→归档」全流程优化，零依赖（纯标准库）、无损、幂等、人工在环。
+
+### 🆕 P0 来源权威 + 新鲜度 + 混合检索
+- `kb_common`：`retrievable_status`（仅 active/stable 可检索）、`freshness`/`is_stale`
+  （`review_after` 到期或 updated 超 180 天）→ `index_excluded` 纳入状态权威。
+- `rag`：**混合检索**（TF-IDF 余弦 + BM25，`HYBRID_ALPHA` 加权）；`kb query --exclude-stale`。
+- `kb healthcheck freshness` 子命令；`dashboard` freshness 告警。
+
+### 🆕 P1 SM-2 式回忆 + 受控词表
+- `recall_schedule`：`interval/ease/reps`（SM-2），`kb recall mark --grade again|hard|good|easy`，
+  单日上限 `DAILY_CAP` 负载均衡；旧状态自动迁移。
+- `reference/taxonomy.json` + `taxonomy.py`：受控 `domain/category/status` + tag 层级 + 别名；
+  `kb clean taxonomy [--apply]` 归一标签（别名→规范、扁平→`group/leaf`，默认 dry-run）。
+
+### 🆕 P2 链接类型/MOC + 墓碑/lineage
+- `link_engine`：建议带 `kind`（cross/concept）；`apply` 分组写入；`kb link moc` 生成 `_MOC.md`。
+- 合并/去重：目标笔记声明别名（旧 `[[名]]` **重定向**）+ 写**墓碑**（`redirect_to`/`merged_from`）
+  + lineage 记入 `.kb/state/lineage.jsonl`；`clean report` 增 TTL 归档建议。
+
+### 🐛 修复
+- `validate` 跳过清单改为统一 `is_generated_report`（修 `_MOC.md` 等产物导致的误报硬错误）。
+- `intake` 插件补 `move/trash` 动作；搬运不覆盖同名（改名避让）；`clean.do_chunk` 幂等且不写 `raw/`；
+  报告产物不入检索/补链/分块；`feedback` 命中计数衰减、跳过生成产物。
+
+### 🧪 测试
+- `tests/` 扩到 66 条（rag 混合/来源、清洗去重/分块、taxonomy、SM-2、P2 墓碑/lineage 等）。
+
+---
+
+## v2.1.0 — 架构加固 · 跨平台修复 · 文档校正（2026-09-27）
+
+一次系统性排障与收口：修复 P0–P3 共 20 类问题，补齐 Python 回归测试，并按当前实现重写文档。
+
+### 🐛 修复（P0 功能性）
+- **全局 `kb` 软链自指**：`kb` 启动器现跟随符号链接解析自身真实目录（此前经 `~/.local/bin/kb`
+  调用会把 vault 解析成 `~/.local/bin`）。
+- **Windows 备份**：新增跨平台 `pipeline/backup.py`（zip + sha256），`kb backup`/`kb.cmd` 不再调用
+  `.sh`；`scripts/backup_now.sh` 改为兼容包装。
+- **OpenClaw 注入插件配置接线**：改为经 `api.pluginConfig` 读取宿主配置，schema 与实现对齐；
+  移除硬编码私人路径。
+- **DSH `config.js` 候选路径**：修正越界一级的 `../../../template-vault`。
+
+### 🐛 修复（P1 数据一致性）
+- **增量索引**：正确清理 `kb_action=retire` 的归档笔记（此前会残留）。
+- **查询缓存**：缓存键纳入 `context`/`answer`；命中缓存仍记录反馈（不再短路 `agent_hits`）。
+- **`StateStore`**：改 `os.replace` 原子覆盖（修复 Windows 第二次写入即失败）。
+- **双 hook 语义统一**：OpenClaw 版补齐 per-session 去重、UTF-8 字节封顶、topN 守卫、闭合围栏。
+
+### 🐛 修复（P2 安装/模板）
+- `verify.py` 仅硬性要求机制文件，示例内容降级为提示；保证 `kb-agent.json` 总被写入。
+- 清理指向已删文档的悬空引用（`DEPLOY.md`/README 等）。
+- 不再把运行时 `vector index/` 复制进新库；自检显示真实文档数。
+- 快捷卡与知识库首页兜底生成且引用自洽。
+
+### 🐛 修复（P3 架构）
+- 接线 `kb_query`（`kb compile`）与 `kb_rsi`（`kb rsi`）；研究层模块显式登记 + 可达性守卫。
+- 插件发现：注册模块内**所有**具体 `PluginBase` 子类；跳过下划线辅助模块，消除噪声告警。
+- `kb`/`kb.cmd` 不再追加 `--root`：目标库优先级 `--root` > `KB_ROOT` > 脚本目录。
+- `kb help` 与路由表对齐守卫。
+
+### 🧪 测试
+- 新增 `tests/`（stdlib unittest，25 条）：rag 增量/缓存、状态原子写、verify、create_vault、
+  插件发现、可达性、help 对齐、`--root` 优先级。
+- 修正 DSH/OpenClaw 插件测试的路径与脆弱断言。
+
+### 📖 文档
+- 按当前实现重写 `README.md`、`quickstart.md`、`📖-知识库管理方案.md`、SOP 等，
+  统一到「插件注册中心 + 已接线成长引擎 + 研究层 internal」的真实架构。
+
+---
+
 ## 未发布 — 多源记忆归一进 vault（2026-09-16）
 
 让所有可接入 Agent / 记忆源最终统一到同一个 vault（Obsidian 一个文件夹即见全部）：

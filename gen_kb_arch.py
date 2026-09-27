@@ -139,7 +139,7 @@ c_ctx = rounded(RX + 20, 568, RW - 40, 88, "#FFF7ED", "#FB923C",
                 "kb-context-dsh（DeepSeek Harness 插件）\n• server-side cordis 钩子 agent/pre-step\n• 回合前自动注入 Top-N 命中（📚 本地知识库命中）\n• 显式 kb_query 工具　·　零 client UI　·　零额外运行依赖")
 
 # ---------- footer note ----------
-cells.append(f'    <mxCell id="note" value="{xu.escape("生成方式：draw.io 原生 mxGraph XML —— 可直接导入 draw.io，或粘贴进 Next AI Draw.io 编辑。架构依据：kb-plugin-architecture/design.md + kb-context-dsh/README.md + 📖-知识库管理方案.md")}" '
+cells.append(f'    <mxCell id="note" value="{xu.escape("生成方式：draw.io 原生 mxGraph XML —— 可直接导入 draw.io，或粘贴进 Next AI Draw.io 编辑。架构依据：kb-context-dsh/README.md + template-vault/📖-知识库管理方案.md + pipeline 插件注册中心源码")}" '
              f'style="text;html=1;align=center;fontSize=10;fontColor=#667;fontFamily=Helvetica;" vertex="1" parent="1"><mxGeometry x="120" y="832" width="1180" height="40" as="geometry" /></mxCell>')
 
 # ---------- assemble ----------

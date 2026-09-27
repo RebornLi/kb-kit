@@ -3,7 +3,7 @@ tags: [template, sop]
 status: active
 domain: 管理
 created: 2026-08-05
-updated: 2026-08-05
+updated: 2026-09-27
 importance: 1
 kb_target: 70-知识治理 Governance
 kb_action: new
@@ -12,9 +12,13 @@ category: meta
 ---
 # 02-SOP：流转归档
 
-- 项目结束 → 可复用经验留 `20-技术`，项目笔记 `kb_action=retire`。
-- 条目过期 → RSI 引擎 T1 自动识别去重/补链/候选退役（`kb_engine --run t1`，主用）；legacy `clean.py --report` 仍可列出 → 人工确认后 `retire`。
+- 项目结束 → 可复用经验留 `20-技术`；项目笔记置 `kb_action: retire`（归档，不再参与检索）。
+- 过期条目 → `kb clean report` 列出候选（含 TTL：过期且 importance<0.4）→ 人工确认后置 `kb_action: retire`。
+- 合并/去重 → 目标笔记声明 `aliases`（旧 `[[名]]` 重定向）、写**墓碑**（`redirect_to`）保留原文，
+  lineage 记入 `.kb/state/lineage.jsonl`（可回溯）。
 - 归档进 `90-归档 Archive/`，保留可回滚历史（git）。
+
+> `retire` 的笔记会被增量索引正确移除（不参与 `kb query`），无需手动重建索引。
 
 ---
 <!-- RSI补链 -->

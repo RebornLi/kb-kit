@@ -341,7 +341,7 @@ SAMPLE_DATASET = {
             "id": "chunk-long",
             "question": "超长笔记怎么处理？",
             "reference_note": "70-知识治理 Governance/04-质量与指标.md",
-            "reference_answer": "按 ## 标题用 kb clean --chunk 分块。",
+            "reference_answer": "按 ## 标题用 kb clean chunk 分块。",
             "key_terms": ["kb clean", "chunk", "分块", "标题"]
         },
         {

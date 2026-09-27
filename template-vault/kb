@@ -3,8 +3,9 @@
 # kb —— 知识库每日使用启动器（Linux / macOS）
 #   Windows 用户用同目录的 kb.cmd（双击，或 PowerShell 里 kb xxx）。
 #
-# 作用：把 pipeline/ 下各工具封装成语义命令，自动注入 --root（=本脚本所在目录=
-# vault 根），所以你不用记得 --root，也记不动一堆子命令。
+# 作用：把 pipeline/ 下各工具封装成语义命令，默认以本脚本所在目录为 vault
+# （经 KB_ROOT 传入），所以你不用记得 --root。需要操作其它库时用 `--root <路径>`
+# 覆盖，或用环境变量 KB_ROOT。
 #
 # 插件化版本：所有命令统一通过 kb_launcher.py 路由到插件注册中心。
 #
@@ -29,7 +30,16 @@
 # ============================================================
 set -euo pipefail
 
-SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+# 解析脚本自身的真实目录（跟随符号链接）。
+# 全局 kb 是 ~/.local/bin/kb → <vault>/kb 的软链；若直接用 dirname "$0"，
+# 会得到链接所在目录（~/.local/bin），把 VAULT 解析错导致命令全废。
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  LINK_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$LINK_DIR/$SOURCE"
+done
+SELF_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
 VAULT="$SELF_DIR"
 
 PY=""
@@ -41,10 +51,10 @@ if [ -z "$PY" ]; then
   echo "❌ 未找到 Python，请先安装 Python 3.8+ 并加进 PATH。" >&2; exit 3
 fi
 
-# backup 仍走 bash 脚本（不插件化）
-if [ "${1:-}" = "backup" ]; then
-  exec bash "$SELF_DIR/scripts/backup_now.sh" "$VAULT" "${2:-daily}"
-fi
-
-# 所有其他命令统一走 kb_launcher.py（插件注册中心动态路由）
-exec "$PY" "$VAULT/pipeline/kb_launcher.py" "$@" --root "$VAULT"
+# 所有命令（含 backup）统一走 kb_launcher.py（插件注册中心动态路由）。
+# backup 现由 pipeline/backup.py 跨平台实现，Windows 亦可用。
+#
+# 目标库优先级：命令行 --root > 环境变量 KB_ROOT > 本脚本所在目录。
+# 这里只设 KB_ROOT 默认值（不追加 --root），用户显式 --root 才能覆盖。
+export KB_ROOT="${KB_ROOT:-$VAULT}"
+exec "$PY" "$VAULT/pipeline/kb_launcher.py" "$@"

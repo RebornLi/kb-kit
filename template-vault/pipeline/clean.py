@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-# ⚠️ DEPRECATED — 本模块已由 RSI 引擎替代
-# 替代方案: kb clean → kb_engine.py / kb_rsi.py (RSI CLI)
-# 保留原因: 向后兼容旧 CLI 调用和 sync.py 内部 import
-# 迁移指引: 使用 `kb engine t1` 命令（通过 kb_launcher.py 路由到 RSI 引擎）
+# 注意：精确去重/结构化归一已部分由 RSI 引擎（kb_rsi/kb_engine，内部研究层）接管；
+#   但 chunk（分块）与清洗仍是 `kb clean` 的正式入口，文档将其列为治理命令。
+#   本模块部分函数（aggregate_bucket/fmt_value）仍被 memory_sync/memory_ingest 复用。
 # ============================================================
 # clean.py —— 知识库清洗（方案 v4.0 §3 + §5 最佳实践落地）
 #   dry-run : 输出拟改动清单，不写
@@ -25,7 +24,7 @@
 #   python3 pipeline/clean.py --chunk [--threshold N]
 #   python3 pipeline/clean.py --report
 # ============================================================
-import argparse, os, re, sys, json, subprocess, datetime, hashlib
+import argparse, os, re, sys, json, subprocess, datetime, hashlib, unicodedata
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -33,7 +32,9 @@ from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, iter_notes,
                        aggregate_bucket, fmt_value, infer_domain, infer_tags,
                        list_of, infer_status, infer_summary, base_fm,
                        FOLDER_DOMAIN, DOMAIN_MAP, KEYWORD_DOMAIN,
-                       AGGREGATE_DIR, AGGREGATE_LIMIT, AGGREGATE_IMPORTANCE)
+                       AGGREGATE_DIR, AGGREGATE_LIMIT, AGGREGATE_IMPORTANCE,
+                       is_generated_report, content_fingerprint, is_source_note, FM,
+                       add_alias_text, record_lineage)
 from kb_common import parse_date_str as parse_date
 from kb_common import load_note_full as load
 
@@ -42,6 +43,53 @@ ARCHIVE_DAYS = 90  # SOP-02 流转归档：updated 超过此天数且非 archive
 STATUS = {"draft", "active", "stable", "legacy", "archived"}
 REQUIRED = ["tags", "status", "domain", "created", "updated",
             "importance", "kb_target", "kb_action", "kb_summary"]
+
+
+def _norm_body(body: str) -> str:
+    """正文归一（NFKC + 压缩空白）用于去重指纹，不改原文件。"""
+    return re.sub(r"[ \t\r\f\v]+", " ", unicodedata.normalize("NFKC", body or "")).strip()
+
+
+def _rewrite_tags(text: str, tags: List[str]) -> Optional[str]:
+    """仅替换/插入 frontmatter 的 tags 行，保留其余内容。无 frontmatter 返回 None。"""
+    m = FM.search(text)
+    if not m:
+        return None
+    end = FM.search(text, m.end())
+    if not end:
+        return None
+    block = text[m.end():end.start()]
+    body = text[end.end():]
+    tagline = "tags: [" + ", ".join(f'"{t}"' for t in tags) + "]"
+    if re.search(r"^tags:.*$", block, re.M):
+        block = re.sub(r"^tags:.*$", tagline, block, count=1, flags=re.M)
+    else:
+        block = tagline + "\n" + block.lstrip("\n")
+    return "---\n" + block + "\n---\n" + body
+
+
+def do_taxonomy(root: Union[str, Path], dry: bool) -> Tuple[List, List[str]]:
+    """按受控词表归一 tags（别名→规范、扁平→层级、去重）。返回 (changes, touched)。"""
+    import taxonomy
+    tax = taxonomy.load_taxonomy(root)
+    changed, touched = [], []
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel) or _is_raw_rel(rel):
+            continue
+        fm, _text, _block, _body = load(p)
+        if is_source_note(fm):
+            continue
+        old = taxonomy.parse_tags(fm.get("tags"))
+        new = taxonomy.normalize_tags(old, tax)
+        if new != old:
+            changed.append((rel, old, new))
+            if not dry:
+                nt = _rewrite_tags(p.read_text(encoding="utf-8"), new)
+                if nt:
+                    p.write_text(nt, encoding="utf-8")
+                    touched.append(rel)
+    return changed, touched
 
 
 def route_chunk_strategy(body: str) -> str:
@@ -100,6 +148,21 @@ def checkpoint(root: Union[str, Path]) -> str:
     return git(["rev-parse", "HEAD"], root).stdout.strip()
 
 
+def _stage_paths(root: Union[str, Path], paths: List[str]) -> List[str]:
+    """暂存变更，容忍已删除且未跟踪的路径（如归档掉的重复文件）。
+    返回存在的路径列表，供 `git commit -- <paths>` 使用。"""
+    existing = [p for p in paths if (Path(root) / p).exists()]
+    if existing:
+        git(["add", "-A", "--", *existing], root)
+    for p in paths:
+        if (Path(root) / p).exists():
+            continue
+        r = git(["ls-files", "--error-unmatch", "--", p], root)
+        if r.returncode == 0:
+            git(["add", "-A", "--", p], root)
+    return existing
+
+
 # iter_notes 已迁移至 kb_common.iter_notes（单一权威源）
 # aggregate_bucket / fmt_value / infer_domain / infer_tags / list_of /
 # infer_status / infer_summary / base_fm / parse_date / load 已迁移至
@@ -154,19 +217,38 @@ def do_clean(root: Union[str, Path], dry: bool) -> Tuple[List[str], int, Counter
             touched.append(rel)
             if not dry:
                 p.write_text(new, encoding="utf-8")
-    # 精确去重：正文（含 frontmatter）完全一致 → 保留最新，旧者归档
+    # 精确去重：正文指纹（NFKC 归一，忽略 frontmatter 差异）一致 → 保留最新，旧者归档 _trash/
     idx = {}
     for p in iter_notes(root):
-        idx.setdefault(hashlib.sha256(p.read_text(encoding="utf-8").encode("utf-8")).hexdigest(), []).append(p)
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel) or _is_raw_rel(rel):
+            continue  # 报告产物 / raw 不可变层不参与去重
+        fm, _text, _block, body = load(p)
+        if is_source_note(fm):
+            continue
+        idx.setdefault(content_fingerprint(_norm_body(body)), []).append(p)
+    trash_dir = Path(root) / "90-归档 Archive" / "_trash"
     for group in idx.values():
         if len(group) > 1:
             group.sort(key=lambda pp: pp.stat().st_mtime)
             keep, *dups = group
             for dp in dups:
-                target = Path(root) / "90-归档 Archive" / "trash" / f"{dp.stem}-dup-{datetime.date.today()}.md"
-                target.parent.mkdir(parents=True, exist_ok=True)
-                header = f"# 重复归档：{dp.name}\n\n> 由 clean.py 去重归档，正文已并入 {keep.name}。\n"
+                trash_dir.mkdir(parents=True, exist_ok=True)
+                target = trash_dir / f"{dp.stem}-dup-{datetime.date.today()}.md"
+                i = 1
+                while target.exists():  # 不覆盖既有归档
+                    target = trash_dir / f"{dp.stem}-dup-{datetime.date.today()}-{i}.md"
+                    i += 1
+                header = (f"# 重复归档：{dp.name}\n\n"
+                          f"> 由 clean.py 去重归档（正文指纹一致），保留 {keep.name}。\n")
                 target.write_text(header + "\n" + dp.read_text(encoding="utf-8"), encoding="utf-8")
+                # 旧链接重定向：保留笔记声明被归档项 stem 别名 + lineage
+                aliased = add_alias_text(keep.read_text(encoding="utf-8"), dp.stem)
+                if aliased:
+                    keep.write_text(aliased, encoding="utf-8")
+                    touched.append(str(keep.relative_to(root)))
+                record_lineage(root, str(dp.relative_to(root)),
+                               str(keep.relative_to(root)), "dedup")
                 dp.unlink()
                 dup_archived += 1
                 touched.append(str(target.relative_to(root)))
@@ -208,14 +290,67 @@ def report(root: Union[str, Path]) -> int:
     print(f"📋 过期(>{ARCHIVE_DAYS}天未更新且非 archived/legacy) {len(stale)} 条，建议 retire（前10）：")
     for age, rel in stale[:10]:
         print(f"   - {age}天  {rel}")
+    # TTL 归档候选：过期且低 importance
+    ttl = []
+    for age, rel in stale:
+        fm, _t, _b, _body = load(Path(root) / rel)
+        if _parse_importance(fm.get("importance")) < 0.4:
+            ttl.append((age, rel))
+    print(f"📋 建议归档(TTL：过期且 importance<0.4) {len(ttl)} 条（前10）：")
+    for age, rel in ttl[:10]:
+        print(f"   - {age}天  {rel}")
+    # 近重复候选（MinHash+LSH，仅提示不删；确认后 kb ingest merge）
+    import dedup
+    docs = {}
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel) or _is_raw_rel(rel):
+            continue
+        fm, _text, _block, body = load(p)
+        if is_source_note(fm):
+            continue
+        if len(body.strip()) >= 200:
+            docs[rel] = body
+    ndp = dedup.near_duplicate_pairs(docs, threshold=0.7)
+    print(f"📋 近重复候选(相似度≥0.7) {len(ndp)} 对（仅提示，确认后 kb ingest move 无损合并，前10）：")
+    for sim, a, b in ndp[:10]:
+        print(f"   - {sim}  {a}  ↔  {b}")
+    if ndp:
+        lines = ["# 🔁 近重复候选（MinHash+LSH）", "",
+                 "> 仅提示、不自动删除；确认后 `kb ingest move`（merge）无损合并。", ""]
+        lines += [f"- {sim}  `{a}` ↔ `{b}`" for sim, a, b in ndp[:50]]
+        (Path(root) / "clean_suggestions.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     return 0
+
+
+def _is_raw_rel(rel: str) -> bool:
+    """rel 是否在 raw/ 不可变层内（分块产物绝不写入 raw/）。"""
+    try:
+        return "raw" in [str(x).lower() for x in Path(rel).parts[:-1]]
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
     handled, created = 0, 0
     touched = []  # 所有被改/新建的文件 rel，用于精确 git add
     for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue  # 运行期报告产物不分块
+        if _is_raw_rel(rel):
+            continue  # raw/ 不可变层，绝不写入分块产物
         fm, text, block, body = load(p)
+        # 幂等：分块产物 / 父索引页不再分块（防重复运行产生级联膨胀）
+        if fm.get("chunk_of") or fm.get("chunk") or fm.get("is_chunk_index"):
+            continue
+        if re.search(r"-(p\d+|c\d+|index)\.md$", rel):
+            continue
+        if "§3.3 颗粒度分块为" in text:
+            continue
+        # 语义分块不改写父文档：同级已存在 <stem>-index.md 视为已分块
+        if (p.parent / f"{p.stem}-index.md").exists():
+            continue
         if len(body.replace("\n", "")) <= limit:
             continue
         handled += 1
@@ -247,26 +382,29 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
             p.write_text(parent, encoding="utf-8")
             touched.append(str(p.relative_to(root)))
         else:
-            # 新增：无 ## 标题 → 语义分块（滑动窗口 + 父索引）
+            # 无 ## 标题 → 语义分块（滑窗 + 递归兜底 + 父索引）
             import semantic_chunk
             rel = str(p.relative_to(root))
-            chunk_notes = semantic_chunk.chunk(body, rel, chunk_size=2000, overlap=500)
+            chunk_notes = semantic_chunk.chunk(body, rel, chunk_size=limit,
+                                               overlap=max(50, limit // 4))
             if not chunk_notes:
                 continue  # 无需分块
-            # 继承父文档 content_type
+            parent_title = fm.get("title") or p.stem
             parent_content_type = fm.get("content_type")
             for cn in chunk_notes:
-                cf = p.parent / cn.filename
-                # 合并父 frontmatter + 分块 frontmatter
                 fm2c = base_fm(rel, fm, {"tags": list_of(fm, "chunk")})
                 fm2c.update(cn.frontmatter)
                 if parent_content_type and "content_type" not in fm2c:
                     fm2c["content_type"] = parent_content_type
+                head = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n"
                 if cn.is_parent_index:
-                    chunk_text = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n" + cn.body
-                else:
-                    chunk_text = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n" + cn.body
-                cf.write_text(chunk_text, encoding="utf-8")
+                    # 父文档就地改写为索引页（消除「父原文 + 块」重复入库）
+                    p.write_text(head + cn.body, encoding="utf-8")
+                    touched.append(rel)
+                    continue
+                # 子块：contextual header（父标题）便于检索与追溯
+                cf = p.parent / cn.filename
+                cf.write_text(head + f"《{parent_title}》\n\n{cn.body}", encoding="utf-8")
                 created += 1
                 touched.append(str(cf.relative_to(root)))
     print(f"✅ 分块完成  处理 {handled} 条笔记，新建 {created} 个分块文件")
@@ -281,6 +419,10 @@ def main() -> int:
     c = sub.add_parser("chunk"); c.add_argument("--root", default=ROOT_DEFAULT)
     c.add_argument("--threshold", type=int, default=BODY_LIMIT)
     r = sub.add_parser("report"); r.add_argument("--root", default=ROOT_DEFAULT)
+    tx = sub.add_parser("taxonomy"); tx.add_argument("--root", default=ROOT_DEFAULT)
+    tx.add_argument("--apply", action="store_true", help="应用标签归一（默认 dry-run）")
+    rf = sub.add_parser("refine"); rf.add_argument("--root", default=ROOT_DEFAULT)
+    rf.add_argument("--threshold", type=int, default=BODY_LIMIT)
     args = ap.parse_args()
     if args.cmd == "dry-run":
         print("🔍 dry-run 将执行：给每条笔记补全 frontmatter + 归一 域/状态/标签 + 精确去重归档。")
@@ -288,22 +430,59 @@ def main() -> int:
         return 0
     if args.cmd == "report":
         return report(args.root)
+    if args.cmd == "taxonomy":
+        changed, touched = do_taxonomy(args.root, dry=not args.apply)
+        for rel, old, new in changed[:30]:
+            print(f"   {rel}: {old} → {new}")
+        print(f"{'✅ 已应用' if args.apply else '🔍 dry-run'}："
+              f"{'归一' if args.apply else '拟归一'} {len(changed)} 条标签")
+        if args.apply and touched:
+            staged = _stage_paths(args.root, touched)
+            git(["commit", "-q", "-m", f"kb: taxonomy 归一标签 {len(touched)} 条",
+                 "--", *staged], args.root)
+        return 0
+    if args.cmd == "refine":
+        # 编排：checkpoint → 结构化+去重 → 分块 → 重建索引 → 校验
+        print("⛳ refine：checkpoint → 结构化+去重 → 分块 → 重建索引 → 校验")
+        checkpoint(args.root)
+        changed, dup, _stats, touched = do_clean(args.root, dry=False)
+        if touched:
+            staged = _stage_paths(args.root, touched)
+            git(["commit", "-q", "-m",
+                 f"kb: refine 结构化 {len(changed)} + 归档重复 {dup}", "--", *staged], args.root)
+        created, ctouched = do_chunk(args.root, args.threshold)
+        if ctouched:
+            cstaged = _stage_paths(args.root, ctouched)
+            git(["commit", "-q", "-m", f"kb: refine 分块 {created}", "--", *cstaged], args.root)
+        subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "rag.py"),
+                        "index", "--root", args.root], capture_output=True)
+        vp = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "validate.py"),
+                             "--root", args.root, "--json"], capture_output=True, text=True)
+        try:
+            hard = json.loads(vp.stdout or "{}").get("hard_issues", 0)
+        except json.JSONDecodeError:
+            hard = "?"
+        print(f"✅ refine 完成  结构化改动 {len(changed)}  去重归档 {dup}  分块新建 {created}"
+              f"  索引已重建  validate 硬错误={hard}")
+        return 0
     if args.cmd == "chunk":
         print("⛳ 写前 checkpoint")
         checkpoint(args.root)
         created, touched = do_chunk(args.root, args.threshold)
         # 精确 add 本次改/新建的笔记，不 sweep Obsidian 运行时态
         if touched:
-            git(["add", "--", *touched], args.root)
-        git(["commit", "-q", "-m", f"kb: 颗粒度分块 新建 {created} 个分块文件"], args.root)
+            staged = _stage_paths(args.root, touched)
+            git(["commit", "-q", "-m", f"kb: 颗粒度分块 新建 {created} 个分块文件",
+                 "--", *staged], args.root)
         return 0
     print("⛳ 写前 checkpoint")
     checkpoint(args.root)
     changed, dup_archived, stats, touched = do_clean(args.root, dry=False)
     # 精确 add 本次改/新建/删除的笔记，不 sweep Obsidian 运行时态
     if touched:
-        git(["add", "--", *touched], args.root)
-    git(["commit", "-q", "-m", f"kb: 清洗笔记 {len(changed)} 条 + 归档重复 {dup_archived} 条"], args.root)
+        staged = _stage_paths(args.root, touched)
+        git(["commit", "-q", "-m", f"kb: 清洗笔记 {len(changed)} 条 + 归档重复 {dup_archived} 条",
+             "--", *staged], args.root)
     print(f"✅ 清洗完成  改动 {len(changed)} 条  归档重复 {dup_archived} 条")
     for k, v in sorted(stats.items()):
         print(f"   {k}: {v}")

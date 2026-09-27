@@ -79,6 +79,24 @@ def check_healthcheck(root):
                 alerts.append(f"📏 {line.strip()}")
     return alerts
 
+def check_freshness(root):
+    """新鲜度统计：陈旧数 + 非可检索状态数（生命周期治理）。"""
+    from kb_common import iter_notes, load_meta, freshness, retrievable_status, is_source_note, is_generated_report
+    stale = blocked = 0
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue
+        fm, _body = load_meta(p)
+        if is_source_note(fm):
+            continue
+        if freshness(fm)["stale"]:
+            stale += 1
+        if not retrievable_status(fm):
+            blocked += 1
+    return {"stale": stale, "blocked": blocked}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=ROOT_DEFAULT)
@@ -113,6 +131,11 @@ def main():
         for a in growth.get("alerts", []):
             alerts.append(f"🌱 成长性：{a}")
     alerts.extend(hc_alerts)  # 巡检告警（死链/超长未分块）
+    fresh = check_freshness(root)
+    if fresh["stale"]:
+        alerts.append(f"🕒 {fresh['stale']} 条陈旧（review_after 到期 / updated 超龄）")
+    if fresh["blocked"]:
+        alerts.append(f"🔒 {fresh['blocked']} 条非可检索状态（draft/archived/legacy）")
     if not alerts: alerts.append("✅ 知识库运行正常")
 
     # 状态分布条
@@ -162,7 +185,8 @@ def main():
     dashboard = f"""# 📊 知识库管理仪表盘
 
 > 生成时间 {datetime.datetime.now():%F %T} · 数据源: `pipeline/validate.py` + 备份校验 + git 审计
-> 本文件由 `pipeline/dashboard.py` 生成，每周 cron 刷新一次。
+> ⚠️ 示例文件：本文件由 `pipeline/dashboard.py` 自动生成、随库内容变化会被覆盖；模板中仅作示例。
+> 每周 cron（`growth_cron.sh`）刷新一次。
 
 ## ⚠️ 运行告警
 
