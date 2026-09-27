@@ -204,7 +204,17 @@ def moc(root: Union[str, Path]) -> int:
     bydom = defaultdict(list)
     for rel, n in notes.items():
         bydom[n["domain"]].append(rel)
-    lines = ["# 🗺️ MOC · 知识地图（自动生成）", "",
+    lines = ["---",
+             "tags: [moc]",
+             "status: active",
+             "domain: 综合",
+             "importance: 0.0",
+             "kb_target: 70-知识治理 Governance/_MOC.md",
+             "kb_action: new",
+             "kb_summary: 知识地图（自动生成）",
+             "aliases: [🔧-技术索引, 📋-项目索引, MOC]",
+             "---",
+             "# 🗺️ MOC · 知识地图（自动生成）", "",
              "> 按 domain 汇总笔记 + 跨域洞察弱连接；由 `kb link moc` 生成（请勿手改）。", ""]
     for dom in sorted(bydom):
         lines.append(f"## {dom}（{len(bydom[dom])}）")
