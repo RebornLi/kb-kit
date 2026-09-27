@@ -2,7 +2,7 @@
 # ============================================================
 # agent_registry.py —— 多 agent 记忆摄取注册表（通用、跨 agent）
 #
-# 用途：kb-kit 现在支持 OpenClaw / Hermes / DSH / Codex / project-context 五种 agent。
+# 用途：kb-kit 现在支持 OpenClaw / Hermes / DSH / Codex / OpenCode / project-context 六种 agent。
 # 安装时探测本机存在的 agent，让用户选择后写入注册表（kb-agent.json），
 # 之后 `kb ingest-agent` 按注册表调度各自的 adapter 把记忆灌进 KB。
 #
@@ -24,12 +24,13 @@ from pathlib import Path
 
 STATE_FILE = "kb-agent.json"
 
-# 五种 agent 的形态:
+# 六种 agent 的形态:
 #   md                 : 记忆是 .md 文件（OpenClaw 有日报 + 核心文件；Hermes 仅有核心文件）
 #   json               : 记忆是纯 JSON（DSH 的 agent-memory + evolve 结晶）
 #   project-context    : 事件记忆在 <项目>/.agents/memory/*.md（project-context 生成）
-#   sqlite             : 记忆是 SQLite 数据库（Codex）
-AGENT_TYPES = ("md", "json", "project-context", "sqlite")
+#   sqlite             : 记忆是 SQLite 数据库（Codex 的 thread_items）
+#   opencode           : 记忆是 SQLite 数据库（OpenCode 的 session/message/part）
+AGENT_TYPES = ("md", "json", "project-context", "sqlite", "opencode")
 
 
 # ------------------------------------------------------------
@@ -119,6 +120,19 @@ def detect_codex():
     return res
 
 
+def detect_opencode():
+    res = {"name": "opencode", "type": "opencode", "label": "OpenCode",
+           "found": False, "sources": {}, "notes": []}
+    db = env_override("KB_OPENCODE_DB") or (
+        home() / ".local" / "share" / "opencode" / "opencode.db")
+    if Path(db).exists():
+        res["found"] = True
+        res["sources"] = {"db": str(db)}
+    else:
+        res["notes"].append(f"{db} 不存在")
+    return res
+
+
 def detect_agents():
     """探测本机存在的 agent。"""
     import shutil
@@ -127,6 +141,7 @@ def detect_agents():
         detect_hermes(),
         detect_dsh(),
         detect_codex(),
+        detect_opencode(),
     ]
 
 
@@ -247,6 +262,8 @@ def cmd_ingest(root, name, dry_run, out):
             done.append(_ingest_project_context(root, aname, srcs, dry_run, out))
         elif atype == "sqlite":
             done.append(_ingest_sqlite(root, aname, srcs, dry_run, out))
+        elif atype == "opencode":
+            done.append(_ingest_opencode(root, aname, srcs, dry_run, out))
         else:
             out.append(f"⚠️ 未知 agent 类型 {atype}，跳过 {aname}")
     return 0
@@ -352,6 +369,21 @@ def _ingest_sqlite(root, aname, srcs, dry_run, out):
     return f"{aname}: sqlite done"
 
 
+def _ingest_opencode(root, aname, srcs, dry_run, out):
+    try:
+        from memory_ingest_opencode import ingest as ingest_opencode
+    except (ImportError, ModuleNotFoundError):
+        out.append(f"  ⚠️ memory_ingest_opencode 缺省，跳过 {aname}")
+        return f"{aname}: skip(no opencode adapter)"
+    db = srcs.get("db") or os.environ.get("KB_OPENCODE_DB")
+    if not db:
+        out.append(f"  ⚠️ 缺 opencode.db 路径，跳过 {aname}")
+        return f"{aname}: skip(no db)"
+    n = ingest_opencode(root, Path(db), dry_run)
+    out.append(f"→ {aname}: 摄取 {n} 条")
+    return f"{aname}: opencode done"
+
+
 def main():
     ap = argparse.ArgumentParser(description="多 agent 记忆摄取注册表")
     sub = ap.add_parser("sub") if False else ap
@@ -366,6 +398,7 @@ def main():
     P["add"].add_argument("--json", dest="json_path")
     P["add"].add_argument("--evolve-json", dest="evolve_json_path")
     P["add"].add_argument("--project-context-root", dest="project_context_root", nargs="+")
+    P["add"].add_argument("--opencode-db", dest="opencode_db")
     P["add"].add_argument("--daily-src")
     P["add"].add_argument("--root-src")
     P["enable"].add_argument("--name", required=True)
@@ -389,6 +422,7 @@ def main():
         if args.json_path: fields["sources"] = {"json": args.json_path}
         if args.evolve_json_path: fields.setdefault("sources", {})["evolve_json"] = args.evolve_json_path
         if args.project_context_root: fields.setdefault("sources", {})["roots"] = list(args.project_context_root)
+        if args.opencode_db: fields.setdefault("sources", {})["db"] = args.opencode_db
         if args.daily_src: fields.setdefault("sources", {})["daily_src"] = args.daily_src
         if args.root_src: fields.setdefault("sources", {})["root"] = args.root_src
         r = cmd_add(args.root, args.name, args.type, out, **fields); print("\n".join(out)); return r

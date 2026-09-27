@@ -17,7 +17,7 @@ tags: ["管理"]
 - **零依赖**：引擎只用 Python 标准库，**不需要 pip install**（Python 3.8+）
 - **跨平台**：`install.sh`（Linux/macOS）、`install.ps1` / `install.bat`（Windows）
 - **插件化架构**：功能模块与 Agent 适配器统一为插件，放进 `pipeline/plugins/` 即被发现，无需改核心
-- **多 Agent**：自动探测并摄取 OpenClaw / Hermes / DSH / Codex 的记忆进知识库
+- **多 Agent**：自动探测并摄取 OpenClaw / Hermes / DSH / Codex / OpenCode 的记忆进知识库
 - **本地优先**：检索、索引、回忆调度全部本地完成，数据不出机器
 
 ---
@@ -224,12 +224,13 @@ kb-kit/
 ## 七、多 Agent 记忆摄取
 
 `kb-agent.json`（运行时状态，gitignore）记录要摄取哪些 Agent。安装时自动探测本机存在的
-OpenClaw / Hermes / DSH / Codex 并注册；可手动增删：
+OpenClaw / Hermes / DSH / Codex / OpenCode 并注册；可手动增删：
 
 ```bash
 kb agent detect                 # 探测本机 Agent
 kb agent list                   # 列出已注册
 kb agent add --name dsh --type json --json ~/.dsh/storages/memory.json
+kb agent add --name opencode --type opencode --opencode-db ~/.local/share/opencode/opencode.db
 kb agent enable --name dsh --enable false
 kb ingest agent --dry-run       # 预览摄取（只读）
 kb ingest agent                 # 实际摄取

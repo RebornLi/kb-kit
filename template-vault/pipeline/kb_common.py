@@ -26,7 +26,7 @@ ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents
 
 # ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
 EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
-           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash"}
+           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer"}
 
 # ── domain 白名单（frontmatter domain 字段合法取值，clean/validate 共用）──
 DOMAIN_WHITELIST = {"运维", "开发", "安全", "产品", "数据", "管理", "综合"}
@@ -169,7 +169,7 @@ def is_source_note(fm) -> bool:
 
 
 # ── 来源权威 + 新鲜度（生命周期治理）────────────────────────
-RETRIEVABLE_STATUSES = {"active", "stable"}  # 仅这些状态参与检索
+RETRIEVABLE_STATUSES = {"active", "stable", "legacy"}  # 可检索状态（draft/archived 除外）
 DEFAULT_STALE_DAYS = 180                      # updated/created 超过此天数视为陈旧
 
 

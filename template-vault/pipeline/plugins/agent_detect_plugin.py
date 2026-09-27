@@ -58,6 +58,13 @@ class AgentDetectPlugin(PluginBase):
                 fields.setdefault("sources", {})["daily_src"] = params["daily_src"]
             if params.get("root_src"):
                 fields.setdefault("sources", {})["root"] = params["root_src"]
+            if params.get("evolve_json"):
+                fields.setdefault("sources", {})["evolve_json"] = params["evolve_json"]
+            if params.get("opencode_db"):
+                fields.setdefault("sources", {})["db"] = params["opencode_db"]
+            if params.get("project_context_root"):
+                roots = params["project_context_root"]
+                fields.setdefault("sources", {})["roots"] = roots if isinstance(roots, list) else [roots]
             r = ar.cmd_add(root, name, agent_type, out, **fields)
         elif action == "enable":
             name = params.get("name")

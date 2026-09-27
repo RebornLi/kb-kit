@@ -123,7 +123,13 @@ def validate_file(path: Union[str, Path]) -> Tuple[List[str], List[str], Dict[st
     # 原始来源笔记（raw 抓取物等）不做颗粒度告警：它们本就不入检索
     is_src = (str(g("is_source") or "").strip().lower() in ("true", "yes", "1")
               or str(g("kind") or "").strip().lower() == "source")
-    if len(body.replace("\n", "")) > BODY_LIMIT and not is_src:
+    rel = str(path)
+    is_chunk = bool(fm.get("chunk_of") or fm.get("chunk")) or bool(
+        re.search(r"-(p\d+|c\d+|index)\.md$", rel))
+    is_scoped_out = ("raw/" in rel or "/90-归档" in rel or rel.startswith("90-归档")
+                     or is_generated_report(rel))
+    if (len(body.replace("\n", "")) > BODY_LIMIT and not is_src
+            and not is_chunk and not is_scoped_out):
         warn.append(f"正文过长: {len(body.replace(chr(10),''))} 字（建议 500-2000，§3.3 颗粒度）")
     tg = g("tags")
     if isinstance(tg, list):

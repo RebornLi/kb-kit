@@ -24,7 +24,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # 默认 vault 根：脚本位于 pipeline/，parents[1] 即 vault 根（可用 KB_ROOT 覆盖）
-from kb_common import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter, is_source_note, freshness, retrievable_status
+from kb_common import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter, is_source_note, freshness, retrievable_status, is_generated_report
 # kb-healthcheck 用 Path 对象
 ROOT_DEFAULT = Path(_ROOT_DEFAULT_STR)
 # 全名分区（与脚手架目录名一致）
@@ -184,8 +184,10 @@ def check_deadlinks(root):
     NOISE_LINKS = ("reply_to:", "双向链接", "双链", "双链接", "wikilink", "…", "...", "$# -gt", "[[#", "[[...")
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if "50-模板" in rel or "/kb-kit/" in rel:        # 模板是蓝本，占位符链接不参与死链统计
-            continue
+        if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
+                or rel.startswith("raw/") or rel.startswith("90-归档")
+                or "/kb-kit/" in rel or is_generated_report(rel)):
+            continue  # 模板/嵌套仓/raw 来源/归档/生成产物：不参与死链统计
         content = fp.read_text(encoding="utf-8", errors="replace")
         for m in re.finditer(r"\[\[([^]]+)\]\]", content):
             raw = m.group(1)
@@ -356,12 +358,20 @@ def check_overlong(root):
     over = []
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板"):
-            continue
+        if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
+                or rel.startswith("raw/") or rel.startswith("90-归档")
+                or is_generated_report(rel)):
+            continue  # 模板/raw 来源/归档/生成产物：不参与颗粒度巡检
         text = fp.read_text(encoding="utf-8", errors="replace")
         fm, body = parse_frontmatter(text)
         if is_source_note(fm):
             continue  # 原始来源笔记不入检索，也不计颗粒度告警
+        if fm.get("chunk_of") or fm.get("chunk"):
+            continue  # 已分块产物不再计颗粒度超长
+        if re.search(r"-(p\d+|c\d+|index)\.md$", rel):
+            continue  # 按命名识别的分块/父索引产物
+        if (fp.parent / (fp.stem + "-index.md")).exists():
+            continue  # 已有 -index 的聚合页视为已分块
         n = len(body.replace("\n", ""))
         if n > BODY_LIMIT:
             over.append((n, rel))
@@ -378,8 +388,10 @@ def check_freshness(root):
     stale, blocked = [], []
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if any(h in rel for h in SYSTEM_HINTS):
-            continue
+        if (any(h in rel for h in SYSTEM_HINTS)
+                or rel.startswith("raw/") or rel.startswith("90-归档")
+                or is_generated_report(rel)):
+            continue  # 来源/归档/产物：不做新鲜度巡检
         fm, _ = parse_frontmatter(fp.read_text(encoding="utf-8", errors="replace"))
         if is_source_note(fm):
             continue

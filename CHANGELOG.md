@@ -12,6 +12,25 @@ tags: ["管理"]
 
 ---
 
+## v2.3.0 — OpenCode 记忆源 + 治理巡检作用域收敛（2026-09-28）
+
+### 🆕 OpenCode 记忆源（第 6 种 agent）
+- 新增 `pipeline/memory_ingest_opencode.py`：读取 `~/.local/share/opencode/opencode.db`
+  的 `session`/`message`/`part` 表，按会话聚合 user/assistant 交互，产出带
+  `kb_source: opencode` 的交互记录。
+- `agent_registry`：新增 `opencode` 类型（`detect_opencode` 探测、`--opencode-db` 注册、
+  `_ingest_opencode` 摄取分发）；`reference/opencode.md` 锚点页承接 `[[opencode]]` 双链。
+- 修复 SQLite/OpenCode adapter 的 `--dry-run` 会落盘的问题（现只计数、不写文件/状态）。
+
+### 🧹 治理巡检作用域收敛（消除噪声告警）
+- `raw/`（不可变来源）、`90-归档`（已退役）、`/kb-kit/`（嵌套仓）、生成产物
+  不再计入 死链 / 超长 / 新鲜度 巡检；`legacy` 状态视为可检索（保留知识）。
+- `kb_common.EXCLUDE` 增 `.codeartsdoer`；`check_overlong` 跳过已分块产物与已有
+  `-index.md` 的聚合页。
+- 效果：死链 397→≈0、超长未分块 124→7、非可检索 61→2、`kb validate` 硬错误 0。
+
+---
+
 ## v2.2.0 — 全生命周期优化（分诊→清洗→检索→连接→复习→治理→归档）（2026-09-27）
 
 按「收件→归档」全流程优化，零依赖（纯标准库）、无损、幂等、人工在环。

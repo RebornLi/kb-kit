@@ -161,6 +161,10 @@ def ingest(root, data_dir, dry_run=False):
             if kb_path is None:
                 print(f"  ⚠️ 跳过越界 kb_target '{kb_target}'（不在 vault 内或为绝对路径）")
                 continue
+            if dry_run:
+                seen.append(summary)
+                written += 1
+                continue
             if kb_path.exists():
                 text = kb_path.read_text(encoding="utf-8")
                 if f"## {title}" in text:
@@ -178,8 +182,9 @@ def ingest(root, data_dir, dry_run=False):
             seen.append(summary)
             written += 1
 
-    state["codex_seen"] = seen
-    _save_state(root, state)
+    if not dry_run:
+        state["codex_seen"] = seen
+        _save_state(root, state)
 
     if touched and not dry_run:
         subprocess.run(["git", "-C", root, "add", "--", *touched],

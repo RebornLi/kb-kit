@@ -85,7 +85,8 @@ def check_freshness(root):
     stale = blocked = 0
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
-        if is_generated_report(rel):
+        if (is_generated_report(rel) or rel.startswith("raw/")
+                or rel.startswith("90-归档")):
             continue
         fm, _body = load_meta(p)
         if is_source_note(fm):

@@ -346,8 +346,8 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
             continue
         if re.search(r"-(p\d+|c\d+|index)\.md$", rel):
             continue
-        if "§3.3 颗粒度分块为" in text:
-            continue
+        if "§3.3 颗粒度分块为" in text and len(body.replace("\n", "")) <= limit:
+            continue  # 已分块且未再膨胀；若被追加重又超限则允许再分块
         # 语义分块不改写父文档：同级已存在 <stem>-index.md 视为已分块
         if (p.parent / f"{p.stem}-index.md").exists():
             continue
