@@ -26,7 +26,7 @@ ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents
 
 # ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
 EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
-           ".obsidian", "__pycache__", ".pytest_cache"}
+           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash"}
 
 # ── domain 白名单（frontmatter domain 字段合法取值，clean/validate 共用）──
 DOMAIN_WHITELIST = {"运维", "开发", "安全", "产品", "数据", "管理", "综合"}
@@ -219,7 +219,7 @@ def index_excluded(fm) -> bool:
 GENERATED_REPORTS = {
     "intake_triage.md", "feedback_hits.md", "recall_deck.md",
     "recall_schedule.md", "link_suggestions.md", "_INDEX.md",
-    "clean_suggestions.md", "_MOC.md",
+    "clean_suggestions.md", "_MOC.md", "_graph.md", "_graph_kg.md",
 }
 
 
