@@ -1,3 +1,16 @@
+---
+tags: [sop, curate, 知识治理]
+status: active
+domain: 管理
+category: sop
+created: 2026-09-29
+updated: 2026-09-29
+importance: 0.8
+kb_target: docs
+kb_action: new
+kb_summary: 知识结晶层操作手册：三层结构、kb curate/kb raw 命令、三重质量关、空闲调度闸门、Agent 接口与验收指标。
+---
+
 # 知识结晶层 · 操作手册（kb curate / kb raw）
 
 > 适用：`/home/mushan/kb-kit-pure`（真·KB 库）。源码同构于 `kb-kit-pure/template-vault/`。
