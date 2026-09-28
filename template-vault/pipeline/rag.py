@@ -13,10 +13,10 @@ import argparse, os, re, sys, json, math, time, datetime, hashlib, uuid
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status
+from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status, kb_layer_of, layer_multiplier, is_index_stub, LAYER_MULTIPLIER
 
 IDX_DIR = "vector index"
-IDX_VERSION = 2  # df_idf.json schema 版本；v2 新增 doc_hashes/doc_mtimes/inverted_index
+IDX_VERSION = 3  # df_idf.json schema 版本；v2 新增 doc_hashes/doc_mtimes/inverted_index；v3 meta 增加 layer/chunk_of（分层降级 + 根文档归并）
 
 
 def load_index(idx_path: Path) -> Tuple[Optional[Dict[str, Any]], int]:
@@ -47,6 +47,8 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("index"); d.add_argument("--root", default=ROOT_DEFAULT)
+    d.add_argument("--full", action="store_true",
+                   help="强制全量重建（默认增量；改过索引字段/分层标记后用）")
     q = sub.add_parser("query"); q.add_argument("q"); q.add_argument("--top", type=int, default=3)
     q.add_argument("--root", default=ROOT_DEFAULT); q.add_argument("--answer", action="store_true")
     # JSON API + 过滤器 + 上下文预算 + 命中记录
@@ -65,10 +67,14 @@ def main() -> int:
     q.add_argument("--date-to", default=None, dest="date_to")
     q.add_argument("--exclude-stale", action="store_true", dest="exclude_stale",
                    help="排除非 active/stable 或陈旧的笔记（freshness 过滤）")
+    q.add_argument("--include-raw", action="store_true", dest="include_raw",
+                   help="不降级 raw/ 证据层（默认降级排序，仍可召回）")
+    q.add_argument("--include-stubs", action="store_true", dest="include_stubs",
+                   help="不降级分块索引页/空壳页（默认降级排序）")
     args = ap.parse_args()
 
     if args.cmd == "index":
-        return cmd_index(args.root)
+        return cmd_index(args.root, incremental=not args.full)
     if args.cmd == "query":
         return cmd_query(args.root, args.q, args.top, args.answer,
                          as_json=args.as_json, context=args.context,
@@ -77,7 +83,8 @@ def main() -> int:
                          author=args.author, min_importance=args.min_importance,
                          enforce_level=args.enforce_level, tags=args.tags,
                          date_from=args.date_from, date_to=args.date_to,
-                         exclude_stale=args.exclude_stale)
+                         exclude_stale=args.exclude_stale,
+                         include_raw=args.include_raw, include_stubs=args.include_stubs)
     return 1
 
 def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
@@ -114,7 +121,9 @@ def _full_rebuild(root, idx):
         for t in c: df[t] += 1
         tf_all[rel] = c
         meta_all[rel] = {"title": fm.get("title", p.stem),
-                         "domain": fm.get("domain", "-"), "tags": fm.get("tags", "")}
+                         "domain": fm.get("domain", "-"), "tags": fm.get("tags", ""),
+                         "layer": kb_layer_of(fm, rel),
+                         "chunk_of": str(fm.get("chunk_of", "") or "")}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
     N = len(docs)
@@ -179,7 +188,9 @@ def _incremental_update(root, idx, old):
             continue
         tf_all[rel] = Counter(toks)
         meta_all[rel] = {"title": fm.get("title", p.stem),
-                         "domain": fm.get("domain", "-"), "tags": fm.get("tags", "")}
+                         "domain": fm.get("domain", "-"), "tags": fm.get("tags", ""),
+                         "layer": kb_layer_of(fm, rel),
+                         "chunk_of": str(fm.get("chunk_of", "") or "")}
     for rel in deleted:
         tf_all.pop(rel, None)
         meta_all.pop(rel, None)
@@ -273,15 +284,60 @@ def _inverted_lookup(query_tokens, inverted_index):
     return hits
 
 
-# ── 检索结果去重（FR-3.1.8）──────────────────────────────────
-def _dedup_chunks(scored, top):
-    """同一笔记多 chunk 命中时只保留最高分，并标注 chunk_siblings。"""
-    seen = {}  # rel -> (score, count)
-    for rel, sc in scored:
-        if rel in seen:
-            seen[rel] = (max(seen[rel][0], sc), seen[rel][1] + 1)
+# ── 检索结果去重（FR-3.1.8 + P0：按根文档归并）─────────────────
+CHUNK_FAMILY_MAX = 2   # 同一根文档最多保留几个命中（防"整篇碎片墙"顶掉其它主题）
+
+
+def _root_of(rel, meta_all):
+    """沿 chunk_of 链回溯到根文档（防 -p2-p2 级联）。meta 未知时返回 rel 自身。"""
+    cur = rel
+    seen = set()
+    for _ in range(8):  # 链深上限，防环
+        if cur in seen:
+            break
+        seen.add(cur)
+        parent = str(meta_all.get(cur, {}).get("chunk_of", "") or "").strip()
+        if not parent:
+            break
+        cand = str(Path(cur).parent / f"{parent}.md") if Path(cur).parent != Path(".") else f"{parent}.md"
+        if cand not in meta_all:
+            cand = parent if parent in meta_all else cand
+        if cand in meta_all and cand != cur:
+            cur = cand
+        elif parent in meta_all and parent != cur:
+            cur = parent
         else:
-            seen[rel] = (sc, 1)
+            break
+    return cur
+
+
+def _dedup_chunks(scored, top, meta_all=None):
+    """同一笔记多 chunk 命中时只保留最高分，并标注 chunk_siblings。
+
+    P0：同一**根文档**的兄弟碎片合并计数（含 -p2-p2 级联），且同一根家族最多出
+    CHUNK_FAMILY_MAX 条 —— 否则一篇长日志的上百个碎片会整体顶掉其它主题。
+    """
+    meta_all = meta_all or {}
+    # 先按根文档归并计数
+    fam = {}  # root -> {"count": n, "hits": [(rel, sc), ...]}
+    for rel, sc in scored:
+        r = _root_of(rel, meta_all)
+        f = fam.setdefault(r, {"count": 0, "hits": []})
+        f["count"] += 1
+        f["hits"].append((rel, sc))
+    # 每个根文档最多保留 CHUNK_FAMILY_MAX 条最高分
+    kept = []
+    for r, f in fam.items():
+        f["hits"].sort(key=lambda x: x[1], reverse=True)
+        for rel, sc in f["hits"][:CHUNK_FAMILY_MAX]:
+            kept.append((rel, sc, f["count"]))
+    # 同一文件多 chunk 再归并一次（保留原有语义）
+    seen = {}
+    for rel, sc, cnt in kept:
+        if rel in seen:
+            seen[rel] = (max(seen[rel][0], sc), seen[rel][1] + cnt)
+        else:
+            seen[rel] = (sc, cnt)
     result = []
     for rel, (sc, count) in seen.items():
         item = [rel, sc]
@@ -463,7 +519,8 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
               min_importance: Optional[float] = None, enforce_level: Optional[str] = None,
               tags: Optional[str] = None,
               date_from: Optional[str] = None, date_to: Optional[str] = None,
-              exclude_stale: bool = False) -> int:
+              exclude_stale: bool = False,
+              include_raw: bool = False, include_stubs: bool = False) -> int:
     t0 = time.time()
     # 捕获打通：无 session 时自动生成，确保每次查询都写 per-query 事件（供 kb_usage 量再问率）
     if not session:
@@ -477,6 +534,7 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         # context（片段长度）与 answer（是否调 LLM 作答）都会改变输出，必须入键
         "context": context, "answer": bool(answer),
         "exclude_stale": bool(exclude_stale),
+        "include_raw": bool(include_raw), "include_stubs": bool(include_stubs),
     }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     try:
         from state_manager import StateStore
@@ -558,8 +616,23 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
                 kept.append((r, s))
         scored = kept
 
+    # P0: 知识分层降级/提升 —— 正典(canon)提升、raw 证据层与空壳降级，
+    #   让「有用内容」排在「原始记录/目录页」之前。raw 仍可被 --include-raw 正常召回。
+    if not include_raw or not include_stubs:
+        adjusted = []
+        for r, s in scored:
+            layer = str(meta_all.get(r, {}).get("layer", "") or "").lower()
+            if layer == "raw" and not include_raw:
+                s = s * LAYER_MULTIPLIER.get("raw", 0.72)
+            elif layer in ("index", "noise") and not include_stubs:
+                s = s * LAYER_MULTIPLIER.get(layer, 0.60)
+            elif layer == "canon":
+                s = s * LAYER_MULTIPLIER.get("canon", 1.25)
+            adjusted.append((r, s))
+        scored = sorted(adjusted, key=lambda x: x[1], reverse=True)
+
     # 检索结果去重（FR-3.1.8）
-    deduped = _dedup_chunks(scored, top)
+    deduped = _dedup_chunks(scored, top, meta_all)
     hits = [(item[0], item[1]) for item in deduped]
     chunk_siblings_map = {item[0]: item[2] for item in deduped if len(item) > 2}
 

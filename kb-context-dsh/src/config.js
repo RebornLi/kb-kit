@@ -64,6 +64,8 @@ export function loadConfig(env = process.env) {
   return {
     kbRoot,
     rag,
+    // kb raw（原记忆/证据层）后端：必要时按 ID 取原文
+    raw: env.KB_RAW || `${kbRoot}/pipeline/kb_raw.py`,
     topN: Number.isInteger(topNRaw) ? topNRaw : 3,
     minScore,
     // Hard byte cap on the injected block (byte length, not chars) so a runaway
@@ -71,6 +73,8 @@ export function loadConfig(env = process.env) {
     maxBytes: Math.max(64, Math.floor(num(env.KB_MAX_BYTES, 700))),
     // Per-hit snippet truncation (chars) shown inline in the reference block.
     snippetMax: Math.max(8, Math.floor(num(env.KB_SNIPPET_MAX, 40))),
+    // Ceiling for on-demand full-note / original-memory reads (chars).
+    contentMax: Math.max(200, Math.floor(num(env.KB_CONTENT_MAX, 6000))),
     queryTimeoutMs: Math.max(1000, Math.floor(num(env.KB_TIMEOUT_MS, 12000))),
     excludeRe: env.KB_EXCLUDE_RE
       ? safeRegExp(env.KB_EXCLUDE_RE)

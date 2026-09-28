@@ -34,7 +34,8 @@ from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, iter_notes,
                        FOLDER_DOMAIN, DOMAIN_MAP, KEYWORD_DOMAIN,
                        AGGREGATE_DIR, AGGREGATE_LIMIT, AGGREGATE_IMPORTANCE,
                        is_generated_report, content_fingerprint, is_source_note, FM,
-                       add_alias_text, record_lineage)
+                       add_alias_text, record_lineage,
+                       is_index_stub, is_pointer_page, is_raw_path)
 from kb_common import parse_date_str as parse_date
 from kb_common import load_note_full as load
 
@@ -199,6 +200,13 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
         "kb_action": "retire" if is_archive else "new",
         "kb_summary": infer_summary(body),
     }
+    # P0：分块索引页显式打标（无正文、只指向子块）→ RAG 不入索引，防"空壳顶替真内容"
+    if is_index_stub(fm):
+        fm2["kb_layer"] = "index"
+        fm2["is_chunk_index"] = True
+    # P0：历史分块 bug 残留的字面占位符摘要（`{name} · 块{i}`）就地纠正
+    if "{name}" in str(fm2["kb_summary"]) or "{i}" in str(fm2["kb_summary"]):
+        fm2["kb_summary"] = f"{title}（分块 {len(body.replace(chr(10), ''))} 字）"
     for k, v in extras.items():
         if k not in REQUIRED and k not in fm2 and v is not None:
             fm2[k] = v
@@ -325,10 +333,66 @@ def report(root: Union[str, Path]) -> int:
 
 def _is_raw_rel(rel: str) -> bool:
     """rel 是否在 raw/ 不可变层内（分块产物绝不写入 raw/）。"""
-    try:
-        return "raw" in [str(x).lower() for x in Path(rel).parts[:-1]]
-    except (TypeError, ValueError, AttributeError):
-        return False
+    return is_raw_path(rel)
+
+
+# ── P0 修复：历史分块 bug 的字面占位符残留 ──────────────────────
+PLACEHOLDER_RE = re.compile(r"\{name\}\s*·\s*块\{i\}")
+
+
+def do_repair(root: Union[str, Path], dry: bool = True) -> Tuple[int, int, List[str]]:
+    """修历史分块 bug 残留：
+
+      1. 正文里未插值的 `## {name} · 块{i}` → `## <父页名> · 块<N>`（从文件名/`chunk_of` 推断）
+      2. frontmatter 里同一占位符的 `kb_summary` → 具体标题
+      3. 分块索引页（`chunk_of` 或文件名 `-index.md`）补 `is_chunk_index: true` + `kb_layer: index`
+         → 让 RAG 不再索引空壳目录页
+
+    默认 dry-run（只报数）。返回 (占位符修复数, 索引页打标数, 改动文件列表)。
+    """
+    fixed_ph, marked, touched = 0, 0, []
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue
+        if _is_raw_rel(rel):
+            continue  # raw/ 不可变证据层：绝不改写（占位符残留也不动，保持原文保真）
+        fm, text, block, body = load(p)
+        new = text
+        hit_ph = bool(PLACEHOLDER_RE.search(new))
+        if hit_ph:
+            # 父页名：优先 chunk_of / 文件名去掉 -pN 后缀
+            base = str(fm.get("chunk_of") or "").strip()
+            if not base:
+                base = re.sub(r"-(p|c)\d+(-\w+)?$", "", p.stem)
+            idx = str(fm.get("chunk") or "").strip()
+            if not idx:
+                m = re.search(r"-p(\d+)", p.stem)
+                idx = m.group(1) if m else "1"
+            label = f"## {base} · 块{idx}"
+            new = PLACEHOLDER_RE.sub(label, new)
+            if "{name}" in str(fm.get("kb_summary", "")) or "{i}" in str(fm.get("kb_summary", "")):
+                new = re.sub(r"^kb_summary:.*$", f"kb_summary: {base}（块{idx}）",
+                             new, count=1, flags=re.M)
+            fixed_ph += 1
+        need_mark = (is_index_stub(fm)
+                     and str(fm.get("is_chunk_index", "")).strip().lower() not in ("true", "yes", "1")
+                     and str(fm.get("kb_layer", "")).strip().lower() != "index")
+        if need_mark and new.startswith("---"):
+            adds = []
+            if not re.search(r"^is_chunk_index:", new, re.M):
+                adds.append("is_chunk_index: true")
+            if not re.search(r"^kb_layer:", new, re.M):
+                adds.append("kb_layer: index")
+            if adds:
+                # 只插到开头那个 '---' 之后（count=1）
+                new = re.sub(r"^---\s*$", "---\n" + "\n".join(adds), new, count=1, flags=re.M)
+            marked += 1
+        if new != text:
+            touched.append(rel)
+            if not dry:
+                p.write_text(new, encoding="utf-8")
+    return fixed_ph, marked, touched
 
 
 def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
@@ -344,6 +408,8 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
         # 幂等：分块产物 / 父索引页不再分块（防重复运行产生级联膨胀）
         if fm.get("chunk_of") or fm.get("chunk") or fm.get("is_chunk_index"):
             continue
+        if is_index_stub(fm) or str(fm.get("kb_layer", "")).strip().lower() == "index":
+            continue  # P0：目录页/索引页绝不二次分块（-p2-p2 级联的来源）
         if re.search(r"-(p\d+|c\d+|index)\.md$", rel):
             continue
         if "§3.3 颗粒度分块为" in text and len(body.replace("\n", "")) <= limit:
@@ -352,6 +418,9 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
         if (p.parent / f"{p.stem}-index.md").exists():
             continue
         if len(body.replace("\n", "")) <= limit:
+            continue
+        # P0：正文本身是空壳/纯指针页（无知识可承载）→ 不分块，只提示交给 kb curate 判定
+        if is_pointer_page(body, rel):
             continue
         handled += 1
         # 检测是否有 ## 标题
@@ -368,13 +437,14 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
             if cur:
                 chunks.append(cur)
             name = p.stem
-            fm2 = base_fm(str(p.relative_to(root)), fm, {"tags": list_of(fm, "toc")})
+            fm2 = base_fm(str(p.relative_to(root)), fm, {"tags": list_of(fm, "toc"),
+                                                         "is_chunk_index": True, "kb_layer": "index"})
             parent = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2.items()) + "\n---\n\n"
             parent += f"# {name}\n\n> 已按 §3.3 颗粒度分块为 {len(chunks)} 块，正文见下：\n\n"
             for i, ck in enumerate(chunks, 1):
                 cf = p.with_name(f"{name}-p{i}.md")
                 fm2c = base_fm(str(p.relative_to(root)), fm, {"tags": list_of(fm, "chunk"), "chunk": i, "chunk_of": name})
-                chunk_text = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n## {name} · 块{i}\n\n" + "\n".join(ck)
+                chunk_text = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n" + f"## {name} · 块{i}\n\n" + "\n".join(ck)
                 cf.write_text(chunk_text, encoding="utf-8")
                 created += 1
                 touched.append(str(cf.relative_to(root)))
@@ -399,6 +469,9 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
                 head = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n"
                 if cn.is_parent_index:
                     # 父文档就地改写为索引页（消除「父原文 + 块」重复入库）
+                    fm2c["is_chunk_index"] = True
+                    fm2c["kb_layer"] = "index"
+                    head = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n"
                     p.write_text(head + cn.body, encoding="utf-8")
                     touched.append(rel)
                     continue
@@ -423,7 +496,25 @@ def main() -> int:
     tx.add_argument("--apply", action="store_true", help="应用标签归一（默认 dry-run）")
     rf = sub.add_parser("refine"); rf.add_argument("--root", default=ROOT_DEFAULT)
     rf.add_argument("--threshold", type=int, default=BODY_LIMIT)
+    rp = sub.add_parser("repair"); rp.add_argument("--root", default=ROOT_DEFAULT)
+    rp.add_argument("--apply", action="store_true", help="应用修复（默认 dry-run 只报数）")
     args = ap.parse_args()
+    if args.cmd == "repair":
+        fixed, marked, touched = do_repair(args.root, dry=not args.apply)
+        mode = "✅ 已修复" if args.apply else "🔍 dry-run（未写入）"
+        print(f"{mode}：占位符残留 {fixed} 条、分块索引页补打标 {marked} 条、涉及文件 {len(touched)} 个")
+        if fixed or marked:
+            print("   影响面示例：")
+            for r in touched[:10]:
+                print(f"   - {r}")
+            if not args.apply:
+                print("   应用：kb clean repair --apply   然后：kb rag index（重建索引使降级生效）")
+            else:
+                staged = _stage_paths(args.root, touched)
+                git(["commit", "-q", "-m", f"kb: clean repair 占位符 {fixed} + 索引页打标 {marked}",
+                     "--", *staged], args.root)
+                print("   下一步：kb rag index（重建索引）")
+        return 0
     if args.cmd == "dry-run":
         print("🔍 dry-run 将执行：给每条笔记补全 frontmatter + 归一 域/状态/标签 + 精确去重归档。")
         print("   建议先 `--report` 查看范围，再 `--apply`，最后可视情况 `--chunk`。")

@@ -14,14 +14,15 @@ class CleanPlugin(SubprocessPlugin):
         "chunk": "chunk",
         "refine": "refine",
         "taxonomy": "taxonomy",
+        "repair": "repair",
     }
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="clean",
-            version="1.0",
+            version="1.1",
             plugin_type="kb_module",
-            actions=["dry-run", "apply", "report", "chunk", "refine", "taxonomy"],
+            actions=["dry-run", "apply", "report", "chunk", "refine", "taxonomy", "repair"],
             cli_aliases={"clean": "dry-run"},
-            description="知识库清洗与分块",
+            description="知识库清洗、分块与历史残留修复",
         )

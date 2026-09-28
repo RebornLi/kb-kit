@@ -171,10 +171,12 @@ def main() -> int:
         for fn in fns:
             if not fn.endswith(".md"):
                 continue
-            if fn in REPORTS or is_generated_report(fn):  # 引擎自生成的报表/产物，不参与校验
-                continue
             full = os.path.join(dp, fn)
             rel = os.path.relpath(full, root)
+            # 引擎自生成的报表/产物（含 _curate/ 结晶提案）：不参与校验
+            # 注意传 rel 而非 fn：产物判定依赖路径（如 _curate/ 目录）
+            if fn in REPORTS or is_generated_report(rel):
+                continue
             hard, warn, info = validate_file(full)
             files.append(rel)
             if hard or warn:

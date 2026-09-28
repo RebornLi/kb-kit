@@ -26,7 +26,8 @@ ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents
 
 # ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
 EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
-           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer"}
+           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer",
+           "_curate"}
 
 # ── domain 白名单（frontmatter domain 字段合法取值，clean/validate 共用）──
 DOMAIN_WHITELIST = {"运维", "开发", "安全", "产品", "数据", "管理", "综合"}
@@ -109,7 +110,13 @@ def load_note(path):
 
 
 def iter_notes(root):
-    """遍历 root 下所有 .md 文件（排除 EXCLUDE 目录、嵌套 git 仓库）。"""
+    """遍历 root 下所有 .md 文件（排除 EXCLUDE 目录、嵌套 git 仓库）。
+
+    注意：root 统一转成字符串再交给 os.walk —— 在部分受限执行环境中，
+    传 Path 对象时 os.walk 的第一个元组可能回传 str 形式的 dp，
+    使 `dp != root` 判定为真、误触发"嵌套 git 仓库"剪枝，整库遍历静默返回 0。
+    """
+    root = os.fspath(root)
     for dp, dn, fn in os.walk(root):
         dn[:] = [d for d in dn if d not in EXCLUDE]
         if dp != root and os.path.exists(os.path.join(dp, ".git")):
@@ -205,14 +212,118 @@ def is_stale(fm, today=None) -> bool:
 
 
 def index_excluded(fm) -> bool:
-    """是否应从 RAG 索引排除：归档(retire)、显式 kb_index:false、非可检索状态、原始来源(source)。"""
+    """是否应从 RAG 索引排除：归档(retire)、显式 kb_index:false、非可检索状态、
+    原始来源(source)、分块索引页/指针空壳（防空壳顶替真内容）。"""
     if fm.get("kb_action") == "retire":
         return True
     if str(fm.get("kb_index", "")).strip().lower() in ("false", "no", "0"):
         return True
     if not retrievable_status(fm):
         return True
-    return is_source_note(fm)
+    if is_source_note(fm):
+        return True
+    # P0：分块索引页（父页被改写成"指向子块的目录"）不入索引——
+    #   它们与子块文本高度同构、TF-IDF 分数几乎相同，会把真内容顶下去。
+    return is_index_stub(fm)
+
+
+# ── 空壳/指针页识别（P0：检索降噪 + 防二次分块）─────────────────
+STUB_MARKERS = ("{name} · 块{i}", "已按 §3.3 颗粒度分块为")
+# 指标题/表头/链接行：说明这一行只是"指向别处"，不承载知识
+_POINTER_LINE = re.compile(
+    r"^\s*(?:"
+    r"#{1,6}\s*\S{0,80}"                       # 孤单标题
+    r"|[-*>]\s*\[\[[^\]]+\]\]"                 # 列表 + wikilink
+    r"|[-*>]\s*\S{0,80}→\s*\S+"                # 列表 + 箭头指针
+    r"|\[\[[^\]]+\]\]"                         # 纯 wikilink
+    r"|\S{0,80}→\s*\S+\.md"                    # A → B.md
+    r"|\|.*\|"                                 # 表格行
+    r"|---+"                                   # 表格分隔
+    r")\s*$"
+)
+
+
+def is_index_stub(fm) -> bool:
+    """是否「分块索引页 / 目录页」（无正文、只指向子块）：
+    显式 `is_chunk_index: true`，或 `chunk_of` 存在但无 `chunk: N`（=父页被改写成目录）。
+
+    注意：子块（`chunk: 1..N`）**不是** stub，它们携带正文。
+    """
+    v = fm.get("is_chunk_index")
+    if v is True or str(v).strip().lower() in ("true", "yes", "1"):
+        return True
+    if fm.get("chunk_of") and not fm.get("chunk"):
+        return True
+    if str(fm.get("kb_layer", "")).strip().lower() == "index":
+        return True
+    return False
+
+
+def is_pointer_page(body: str, rel: str = "", min_lines: int = 3) -> bool:
+    """正文是否为「空壳/指针页」：几乎全是链接/标题/表格行，或带分块模板残留。
+
+    判据（启发式，供 kb clean / kb curate 提示用，不做物理删除）：
+      · 正文含分块模板残留标记（如未插值的 `## {name} · 块{i}`）
+      · 去空行后行数 < min_lines，且每行都是指针型
+      · 指针型行占比 >= 0.6
+    文件名以 `-index.md` 结尾的直接视为指针页。
+    """
+    if Path(str(rel)).name.endswith("-index.md"):
+        return True
+    lines = [l.strip() for l in str(body or "").splitlines() if l.strip()]
+    if not lines:
+        return True
+    for mk in STUB_MARKERS:
+        if mk in "\n".join(lines[:6]):  # 只在开头附近命中，避免正文引用该句式时误判
+            return True
+    ptr = sum(1 for l in lines if _POINTER_LINE.match(l))
+    if len(lines) < min_lines:
+        return ptr == len(lines)
+    return ptr / len(lines) >= 0.6
+
+
+# ── 知识分层（kb_layer）：排序权重 + 检索降级 ─────────────────
+#   canon  正典层（agent 结晶后的干净知识）        → 排序提升
+#   index  分块索引页/目录页                       → 不入索引
+#   raw    原记忆/网页抓取等证据层                 → 保留可调用，默认排序降级
+STUB_WORDS = ("未过滤", "原始记录")
+LAYER_MULTIPLIER = {
+    "canon": 1.25,
+    "": 1.00,
+    "page": 1.00,
+    "raw": 0.72,
+    "index": 0.60,
+    "noise": 0.60,
+}
+DEFAULT_LAYER = "page"
+
+
+def kb_layer_of(fm, rel: str = "") -> str:
+    """笔记所属知识层：显式 `kb_layer` 优先，否则按 is_source / index stub 推断。"""
+    v = str(fm.get("kb_layer", "") or "").strip().lower()
+    if v:
+        return v
+    if is_source_note(fm):
+        return "raw"
+    if is_index_stub(fm):
+        return "index"
+    if rel and is_raw_path(rel):
+        return "raw"
+    return DEFAULT_LAYER
+
+
+def layer_multiplier(fm, rel: str = "") -> float:
+    """按知识层返回排序权重乘数（canon 提升 / raw、空壳降级）。"""
+    return float(LAYER_MULTIPLIER.get(kb_layer_of(fm, rel), 1.0))
+
+
+def is_raw_path(rel) -> bool:
+    """rel 是否位于 raw/ 证据层内（只看顶层目录，避免 `a/raw/b` 误判）。"""
+    try:
+        parts = [str(x).lower() for x in Path(str(rel)).parts]
+        return bool(parts) and parts[0] == "raw"
+    except (TypeError, ValueError, AttributeError):
+        return False
 
 
 # 运行期生成的报告文件（非知识内容）：不入检索 / 不参与补链 / 不再分块
@@ -224,8 +335,11 @@ GENERATED_REPORTS = {
 
 
 def is_generated_report(rel) -> bool:
-    """rel 是否为运行期生成的报告产物（按文件名判定）。"""
-    return Path(str(rel)).name in GENERATED_REPORTS
+    """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（结晶提案目录）。"""
+    if Path(str(rel)).name in GENERATED_REPORTS:
+        return True
+    # 结晶提案（70-知识治理 Governance/_curate/b*.md 等）：人读产物，不是知识笔记
+    return "_curate" in [str(x) for x in Path(str(rel)).parts[:-1]]
 
 
 # ── 归档生命周期：别名重定向 + lineage（合并/去重可回溯，旧链接不失效）──

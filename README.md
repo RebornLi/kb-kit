@@ -115,9 +115,23 @@ kb query "怎么备份知识库"
 - `kb healthcheck [all | summary | deadlinks | skeletons | tags | empty | frontmatter | discipline | overlong | orphans | freshness]`
 - `kb validate [--strict]`
 - `kb dashboard`
-- `kb clean [dry-run | apply | chunk | report | refine | taxonomy]`
+- `kb clean [dry-run | apply | chunk | report | refine | taxonomy | repair]`
   - `refine` = 结构化+去重→分块→重建索引→校验　·　`taxonomy [--apply]` = 标签归一（受控词表/层级）
+  - `repair [--apply]` = 修历史分块残留（未插值占位符 → 实际标题；分块索引页打 `kb_layer: index` 标）
 - `kb user [add | list | remove | check-perm]`
+
+**知识结晶（空闲本地 Agent 把日志炼成可调用正典）**
+- `kb curate plan`　只读：选出最该结晶的笔记 + 本地模型可用性
+- `kb curate run [--apply] [--limit N] [--max-seconds S] [--model M]`　跑结晶（默认只出提案）
+- `kb curate verify [--batch ID]`　离线重校验提案（接地/守恒/引用三关，不调模型）
+- `kb curate report [--json]`　结晶进度与质量指标（正典覆盖率、压缩比、接地率）
+- `kb curate review [--limit N]`　列出待人工裁决的低置信提案
+
+**原记忆（证据层，按需调用）**
+- `kb raw list [--json]`　证据层清单（`raw/` 网页抓取 + `memory/` Agent 日志，同内容副本合并）
+- `kb raw show <ID> [--full] [--json]`　取**原文真实内容**（不是索引摘要）
+- `kb raw find "关键词" [--limit N]`　在证据层**原文全文**里搜索（不是索引检索）
+- `kb raw path <ID>`　只解析原文件路径（供脚本/Agent 管道消费）
 
 **同步**
 - `kb sync [dry-run | apply | rollback | history | ingest-any]`
@@ -152,11 +166,26 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
 - **检索**：`pipeline/rag.py`（**混合检索**：TF-IDF 余弦 + BM25，中文 unigram+bigram 兜底，免 jieba）。
   支持增量索引、查询缓存、同义词扩展、倒排索引加成、rerank、8 种过滤器、`--json`、
   `--exclude-stale`；**来源权威**：仅 `status∈{active,stable}` 入索引（draft/archived/legacy 不检索）。
-- **清洗与去重**：`pipeline/clean.py`（结构化归一 / **正文指纹去重** / **MinHash+LSH 近重复候选** / 递归分块+父索引+contextual header / `refine` 编排 / `taxonomy` 标签归一）。
+- **知识分层与降级**（`kb_layer`，`kb_common`/`rag.py`）：笔记按可信度分层并影响排序 ——
+  `canon`（Agent 结晶后的正典）**提升 1.25×**；`raw`（原记忆/网页抓取证据层）**降级 0.72×**；
+  `index`（分块索引页/目录页）**不入索引**。同一根文档的碎片按 `chunk_of` 链归并，
+  每个根家族最多出 2 条命中（防「整篇碎片墙」顶掉其它主题）。`--include-raw` / `--include-stubs`
+  可临时取消降级做排查。
+- **知识结晶**：`pipeline/curate.py`（**空闲本地 Agent** 把日志/碎片炼成结论优先的正典）。
+  Agent 输出结构化 JSON（`verdict/title/sections/facts/sources/confidence`），代码守三关：
+  **接地关**（`facts` 逐条回原文核对，未接地一律丢弃）、**信息守恒关**（正典/原文长度比落在
+  `[4%,65%]`，12% 以下只警告）、**引用关**（`sources` 必须可达）。写回 = 原位替换为正典，
+  原文按 ID **保号移入 `raw/_curated/<原路径>`**，并写 `source_ref` 与 lineage；
+  低置信（<`CONF_MIN`）不自动写回，进人工裁决队列。`kb raw show "<source_ref>"` 一键回原文。
+- **原记忆可达性**：`pipeline/kb_raw.py`（证据层 `raw/` + `memory/` 的 `list/show/find/path`）。
+  这是「必要时调用原记忆文件」的落地：知识层只放结晶内容，但每条内容都能一键回到一手原文。
+- **清洗与去重**：`pipeline/clean.py`（结构化归一 / **正文指纹去重** / **MinHash+LSH 近重复候选** / 递归分块+父索引+contextual header / `refine` 编排 / `taxonomy` 标签归一 / `repair` 修历史残留）。
+  分块护栏：分块索引页、空壳指针页、`raw/` 证据层**绝不二次分块**（杜绝 `-p2-p2` 级联）。
 - **生命周期**：`kb_common` 提供 `freshness`/`review_after`/`is_stale`；合并/去重写**墓碑（redirect_to）+ 别名重定向 + lineage**（`.kb/state/lineage.jsonl`）。
 - **回忆**：`pipeline/recall_schedule.py`（SM-2 式 `interval/ease/reps` + 单日上限负载均衡）。
 - **Agent 注入插件**（独立包，不在 pipeline 内）：
-  - `kb-context-dsh/`（DSH）：`agent/pre-step` 钩子自动注入检索命中 + 显式 `kb_query` 工具
+  - `kb-context-dsh/`（DSH）：`agent/pre-step` 钩子自动注入检索命中 + 显式 `kb_query`（可 `full=true`
+    取整篇正典）与 `kb_raw`（按 `source_ref` 取一手原文）两个模型工具
   - `kb-context-hook/`（OpenClaw）：`before_prompt_build` 钩子自动注入
   两者都：只对用户回合跑、失败静默跳过、fenced 边界包裹、字节封顶、同会话命中集去重。
 - **安装引擎**：`create_vault.py`（复制模板 → 接线 Agent → demo 建索引 → git → 全局 `kb`

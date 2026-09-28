@@ -81,6 +81,22 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("clean", "chunk"):    ("clean", "chunk"),
     ("clean", "refine"):   ("clean", "refine"),
     ("clean", "taxonomy"): ("clean", "taxonomy"),
+    ("clean", "repair"):   ("clean", "repair"),
+
+    # 原记忆可达性（证据层按需调用）
+    ("raw", None):         ("raw", "list"),
+    ("raw", "list"):       ("raw", "list"),
+    ("raw", "show"):       ("raw", "show"),
+    ("raw", "find"):       ("raw", "find"),
+    ("raw", "path"):       ("raw", "path"),
+
+    # 知识结晶（本地 Agent 把日志炼成正典）
+    ("curate", None):      ("curate", "plan"),
+    ("curate", "plan"):    ("curate", "plan"),
+    ("curate", "run"):     ("curate", "run"),
+    ("curate", "verify"):  ("curate", "verify"),
+    ("curate", "report"):  ("curate", "report"),
+    ("curate", "review"):  ("curate", "review"),
 
     # 校验
     ("validate", None):    ("validate", "validate"),
@@ -323,7 +339,21 @@ class KBLauncher:
         print("  kb clean --apply          清洗/分块（写操作）")
         print("  kb clean refine           一键：结构化+去重→分块→重建索引→校验")
         print("  kb clean taxonomy [--apply] 标签归一（受控词表：别名/层级）")
+        print("  kb clean repair [--apply] 修历史分块残留（占位符/索引页打标）")
         print("  kb validate               frontmatter 校验")
+        print("")
+        print("原记忆（证据层，按需调用）:")
+        print("  kb raw list               列出证据层清单（raw/ + memory/）")
+        print("  kb raw show <ID>          取原记忆真实内容（--full 看全部）")
+        print("  kb raw find \"关键词\"      在证据层原文里全文搜索")
+        print("  kb raw path <ID>          只解析原文件路径")
+        print("")
+        print("知识结晶（空闲本地 Agent 把日志炼成可调用正典）:")
+        print("  kb curate plan            只读：选出最该结晶的笔记 + 模型可用性")
+        print("  kb curate run [--apply]   跑结晶（默认只出提案；--apply 写回正典）")
+        print("  kb curate verify          离线重校验提案（接地/守恒/引用三关）")
+        print("  kb curate report          结晶进度与质量指标")
+        print("  kb curate review          列出待人工裁决的低置信提案")
         print("")
         print("同步:")
         print("  kb sync dry-run           知识同步预览")

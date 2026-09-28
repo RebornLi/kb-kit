@@ -20,13 +20,20 @@ const execFileAsync = promisify(execFile);
  * @param {string} queryText          — the user's turn text to search
  * @returns {Promise<Array<object>>}   — normalized hit objects, highest score first
  */
-export async function queryKB(cfg, queryText) {
+export async function queryKB(cfg, queryText, opts = {}) {
+  const topN = Number.isInteger(opts.topN) && opts.topN > 0 ? opts.topN : cfg.topN;
+  // `--context` widens the snippet the vault returns; "full note" reads ask for a
+  // big window (bounded by KB_CONTENT_MAX when normalizing).
+  const contextChars = Number.isInteger(opts.contextChars) && opts.contextChars > 0
+    ? opts.contextChars
+    : cfg.snippetMax;
   const args = [
     cfg.rag,
     'query',
     queryText,
-    '--top', String(cfg.topN),
+    '--top', String(topN),
     '--root', cfg.kbRoot,
+    '--context', String(contextChars),
     '--json',
   ];
 
@@ -48,7 +55,56 @@ export async function queryKB(cfg, queryText) {
     return []; // non-JSON stdout (warnings + text) → empty
   }
 
-  return selectHits(Array.isArray(data?.hits) ? data.hits : [], cfg);
+  return selectHits(Array.isArray(data?.hits) ? data.hits : [], cfg, contextChars);
+}
+
+/**
+ * Fetch the ORIGINAL memory text behind a note (kb-kit `kb raw show`).
+ * This is the "必要时调用原记忆文件" path: curated canon is compact, and when the
+ * agent genuinely needs the primary source it can pull it verbatim.
+ * @param {Record<string, any>} cfg
+ * @param {string} rawId  — a `memory_source` ID or a vault-relative path
+ * @param {{maxChars?: number, lines?: number}} [opts]
+ * @returns {Promise<{ok: boolean, id: string, content: string, truncated?: boolean, note?: string}>}
+ */
+export async function showRawKB(cfg, rawId, opts = {}) {
+  const id = String(rawId ?? '').trim();
+  if (!id) return { ok: false, id: '', content: '', note: 'empty id' };
+  const maxChars = Number.isInteger(opts.maxChars) && opts.maxChars > 0
+    ? opts.maxChars : (cfg.contentMax ?? 6000);
+  const script = cfg.raw || `${cfg.kbRoot}/pipeline/kb_raw.py`;
+  const args = [script, 'show', id, '--root', cfg.kbRoot, '--full', '--json'];
+
+  let stdout;
+  try {
+    ({ stdout } = await execFileAsync('python3', args, {
+      cwd: cfg.kbRoot,
+      timeout: cfg.queryTimeoutMs,
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
+    }));
+  } catch (e) {
+    return { ok: false, id, content: '', note: String(e?.message || e).slice(0, 200) };
+  }
+  let data;
+  try {
+    data = JSON.parse(stdout || 'null');
+  } catch {
+    return { ok: false, id, content: '', note: 'non-JSON output from kb_raw.py' };
+  }
+  if (!data || data.ok !== true) {
+    return { ok: false, id, content: '', note: 'not found',
+             candidates: Array.isArray(data?.candidates) ? data.candidates.slice(0, 10) : undefined };
+  }
+  const text = String(data.content || '');
+  return {
+    ok: text.length > 0,
+    id,
+    path: data.path,
+    chars: data.chars,
+    copies: Array.isArray(data.copies) && data.copies.length ? data.copies : undefined,
+    content: text.slice(0, maxChars),
+    truncated: text.length > maxChars,
+  };
 }
 
 /**
@@ -59,8 +115,10 @@ export async function queryKB(cfg, queryText) {
  * @param {Record<string, any>} cfg
  * @returns {Array<object>}
  */
-export function selectHits(raw, cfg) {
-  const snippetMax = cfg.snippetMax ?? 40;
+export function selectHits(raw, cfg, snippetMaxOverride) {
+  const snippetMax = Number.isInteger(snippetMaxOverride) && snippetMaxOverride > 0
+    ? snippetMaxOverride
+    : (cfg.snippetMax ?? 40);
   return raw
     .filter((h) => typeof h?.score === 'number')
     .filter((h) => h.score >= cfg.minScore)

@@ -96,6 +96,22 @@ console.log('# selectHits (score filter + session-dump exclusion + cap + snippet
   const longRaw = [{ path: 'x/x.md', title: 'X', domain: 'd', score: 0.9, importance: 1, snippet: 'a'.repeat(120) }];
   const out80 = selectHits(longRaw, cfg80);
   ok(out80[0].snippet.length === 80, `snippetMax=80 truncates to 80 (got ${out80[0].snippet.length})`);
+
+  // per-call window override (full-note reads pass contentMax)
+  const out2000 = selectHits(longRaw, cfg, 2000);
+  ok(out2000[0].snippet.length === 120, 'per-call window keeps the whole short body');
+  ok(cfg.contentMax >= 200, `contentMax knob present (${cfg.contentMax})`);
+  ok(cfg.raw === `${cfg.kbRoot}/pipeline/kb_raw.py`, 'default raw backend points at pipeline/kb_raw.py');
+}
+
+console.log('# kb_raw backend (evidence layer, on-demand)');
+{
+  const cfg = loadConfig({});
+  const { showRawKB } = await import('../src/kb.js');
+  const empty = await showRawKB(cfg, '   ');
+  ok(empty.ok === false && empty.content === '', 'blank id → ok:false, no content (no throw)');
+  const missing = await showRawKB({ ...cfg, raw: '/nonexistent/kb_raw.py' }, 'anything');
+  ok(missing.ok === false && typeof missing.note === 'string', 'missing backend → ok:false with note (no throw)');
 }
 
 console.log('# live queryKB against a real vault');

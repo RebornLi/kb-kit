@@ -17,7 +17,7 @@
 import { createUserMessage } from '@deepseek-ai/dsh-llm';
 import { defineTool } from '@deepseek-ai/dsh-tools';
 import { loadConfig } from './config.js';
-import { queryKB } from './kb.js';
+import { queryKB, showRawKB } from './kb.js';
 import { buildInjectedText, hitsKey } from './inject.js';
 
 export const name = 'kb-context-dsh';
@@ -56,10 +56,11 @@ export function apply(ctx) {
     name: 'kb_query',
     description:
       'Search the local kb-kit knowledge base (an Obsidian-style PARA vault) and return ' +
-      'structured relevance hits with snippets. Use when the user asks about anything ' +
-      'stored in the local knowledge base that you have not already been shown. Read-only: ' +
-      'does not modify the vault. ' +
-      `Each hit's snippet is truncated to ${cfg.snippetMax} chars.`,
+      'structured relevance hits. Curated notes (kb_layer=canon) are clean, conclusion-first ' +
+      'knowledge; raw logs are ranked lower. Use when the user asks about anything stored in ' +
+      'the local knowledge base. Read-only: does not modify the vault. ' +
+      `Snippets are capped at ${cfg.snippetMax} chars; pass full=true for whole notes ` +
+      `(capped at ${cfg.contentMax} chars each).`,
     parameters: {
       query: {
         type: 'string',
@@ -70,27 +71,74 @@ export function apply(ctx) {
         type: 'number',
         description: `Max hits to return (default ${cfg.topN}).`,
       },
+      full: {
+        type: 'boolean',
+        description:
+          'Return the FULL note body of each hit instead of a short snippet. Use when you ' +
+          'need the actual content, not just to locate it.',
+      },
     },
     async execute(args /* , exec */) {
       const query = String(args?.query ?? '').trim();
       if (!query) return { root: cfg.kbRoot, count: 0, hits: [] };
       const topN = Number.isInteger(args?.topN) && args.topN > 0 ? args.topN : cfg.topN;
-      const hits = await queryKB({ ...cfg, topN }, query);
+      const full = args?.full === true;
+      const hits = await queryKB({ ...cfg, topN }, query,
+        full ? { contextChars: cfg.contentMax } : {});
       return {
         root: cfg.kbRoot,
         count: hits.length,
-        hits: hits.map((h) => ({
-          path: h.path,
-          title: h.title,
-          domain: h.domain,
-          score: Number(h.score.toFixed(4)),
-          importance: h.importance,
-          snippet: h.snippet,
-        })),
+        mode: full ? 'full-note' : 'snippet',
+        hits: hits.map((h) => {
+          const out = {
+            path: h.path,
+            title: h.title,
+            domain: h.domain,
+            score: Number(h.score.toFixed(4)),
+            importance: h.importance,
+          };
+          out[full ? 'content' : 'snippet'] = h.snippet;
+          return out;
+        }),
       };
     },
     // dsh-tools v4 (cordis 4.x) requires output.render; supply a value
     // schema so defineTool accepts it (mirrors dsh-evolve's jsonOutput()).
+    output: {
+      schema: { type: 'json' },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    },
+  }));
+
+  // --- explicit kb_raw tool (原记忆/证据层按需调用) --------------------
+  // 知识库检索给的是「结晶后的正典」；当确实需要一手原始记录时用它取原文。
+  ctx.tools.register(defineTool({
+    name: 'kb_raw',
+    description:
+      'Fetch the ORIGINAL source memory text from the local kb-kit vault (the evidence layer: ' +
+      'raw/ web captures and memory/ agent logs). Curated notes carry a `source_ref` id; pass ' +
+      'that id here to read the primary source verbatim. Also accepts a vault-relative path, ' +
+      'or a substring of an id. Read-only. ' +
+      `Content is capped at ~${cfg.contentMax} chars.`,
+    parameters: {
+      id: {
+        type: 'string',
+        required: true,
+        description: 'A source id (e.g. "openclaw/MEMORY.md::<section>"), a vault-relative ' +
+          'path (e.g. "raw/安全/cwe-...-c1.md"), or a unique substring of one.',
+      },
+      maxChars: {
+        type: 'number',
+        description: `Cap on returned characters (default ${cfg.contentMax}).`,
+      },
+    },
+    async execute(args /* , exec */) {
+      const id = String(args?.id ?? '').trim();
+      if (!id) return { ok: false, id: '', content: '', note: 'id is required' };
+      const maxChars = Number.isInteger(args?.maxChars) && args.maxChars > 0
+        ? Math.min(args.maxChars, 100000) : cfg.contentMax;
+      return await showRawKB(cfg, id, { maxChars });
+    },
     output: {
       schema: { type: 'json' },
       render: (_args, value) => [{ type: 'text', text: JSON.stringify(value, null, 2) }],
