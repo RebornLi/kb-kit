@@ -108,6 +108,32 @@ fi
 log "⑥ 记忆同步（memory/ → 知识库）"
 step "memory promote" "${PYTHON}" "${PIPE}/memory_sync.py" promote --root "${VAULT}"
 
+# ⑧ 知识结晶：空闲时才跑，用本地 Agent 把「日志/碎片」炼成「可调用正典」。
+#   三重闸门（任一不满足即跳过，绝不抢资源、绝不阻塞流水线）：
+#     1) 开关：CURATE_ENABLE=1（默认关；确认效果后再开）
+#     2) 密钥：ORNITH_API_KEY 存在（curate 内部仍会探端点，不可达则降级只出 plan）
+#     3) 空闲：1 分钟负载 < CURATE_MAX_LOAD（默认 4.0），忙时让路
+#   单轮有界：CURATE_SECONDS（默认 1800s）+ CURATE_LIMIT（默认 8 篇），
+#   到时停止，剩余留给下一轮 —— 空闲预算被切成小片，永远不抢推理资源。
+CURATE_ENABLE="${CURATE_ENABLE:-0}"
+CURATE_LIMIT="${CURATE_LIMIT:-8}"
+CURATE_SECONDS="${CURATE_SECONDS:-1800}"
+CURATE_MAX_LOAD="${CURATE_MAX_LOAD:-4.0}"
+LOAD1="$(cut -d' ' -f1 /proc/loadavg 2>/dev/null || echo 0)"
+if [ "${CURATE_ENABLE}" != "1" ]; then
+  log "⑧ 知识结晶跳过（CURATE_ENABLE != 1）"
+elif [ -z "${ORNITH_API_KEY:-}" ]; then
+  log "⑧ 知识结晶跳过（未设 ORNITH_API_KEY，本地模型不可用）"
+elif ! awk -v a="${LOAD1}" -v b="${CURATE_MAX_LOAD}" 'BEGIN{exit !(a < b)}'; then
+  log "⑧ 知识结晶跳过（负载 ${LOAD1} ≥ ${CURATE_MAX_LOAD}，让路）"
+else
+  log "⑧ 知识结晶（负载 ${LOAD1}；上限 ${CURATE_LIMIT} 篇 / ${CURATE_SECONDS}s）"
+  step "curate run" "${PYTHON}" "${PIPE}/curate.py" run --root "${VAULT}" \
+       --apply --limit "${CURATE_LIMIT}" --max-seconds "${CURATE_SECONDS}"
+  # 结晶改写了正文 → 重建索引，让新的正典立即可检索
+  step "rag index (post-curate)" "${PYTHON}" "${PIPE}/rag.py" index --root "${VAULT}"
+fi
+
 # 日志 Retention:清理 30 天前的 logs(已 gitignore,仅占盘)
 log "日志 Retention（清理 30 天前 logs）"
 find "$LOGDIR" -name '*.log' -type f -mtime +30 -delete 2>/dev/null || true

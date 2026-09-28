@@ -70,6 +70,7 @@ _L0_LEDGER = "pipeline/.kb_retriage_applied.json"    # {applied:{rel:_}}
 _L1_LEDGER = "pipeline/.kb_retrieval_adjust.json"    # {adjustments:[{action,note,...}]}
 _L2_LEDGER = "pipeline/.kb_selfweight_applied.json"  # {applied:{rel:_}}
 _L3_LEDGER = "pipeline/.kb_meta_config.json"         # {knovals:{knob:_}}
+_LC_REVIEW  = ".kb/curate_review.jsonl"              # 知识结晶低置信提案（kb curate）
 
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
@@ -215,7 +216,29 @@ def _docket_l3(root: Union[str, Path]) -> List[Dict[str, Any]]:
         return []
 
 
-_DOCKET_READERS = {"l0": _docket_l0, "l1": _docket_l1, "l2": _docket_l2, "l3": _docket_l3}
+def _docket_lc(root: Union[str, Path]) -> List[Dict[str, Any]]:
+    """知识结晶（kb curate）的低置信提案：逐条交真人裁决「该结晶对不对」。
+
+    与 l0/l2 同构：key = 笔记相对路径。correct = 认可；wrong = 否决。
+    连续判错达阈值 → 冻结 lc（kb curate 停止自动写回，退化为只出提案）。
+    """
+    try:
+        p = Path(root) / _LC_REVIEW
+        items = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
+    except (OSError, json.JSONDecodeError):
+        return []
+    out = []
+    for r in items:
+        rel = str(r.get("rel") or "").strip()
+        if not rel:
+            continue
+        out.append({"rung": "lc", "key": rel, "kind": "crystallize", "rel": rel,
+                    "confidence": r.get("confidence"), "title": r.get("title")})
+    return out
+
+
+_DOCKET_READERS = {"l0": _docket_l0, "l1": _docket_l1, "l2": _docket_l2, "l3": _docket_l3,
+                   "lc": _docket_lc}
 
 
 def docket(root: Union[str, Path]) -> Dict[str, Any]:
@@ -244,7 +267,7 @@ def build_key(rung: str, rel: Optional[str] = None,
     """l0/l2 用 rel；l3 用 knob；l1 用 action::rel。缺必需字段 → None。"""
     if rung == "l0":
         return rel
-    if rung == "l2":
+    if rung in ("l2", "lc"):
         return rel
     if rung == "l3":
         return knob

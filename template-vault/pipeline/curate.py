@@ -515,9 +515,9 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
     rec["verdict"] = verdict
     rec["proposal"] = prop
     if verdict in ("noise", "raw-only"):
-        # 不生成正典；只记录判定（P2 可用于索引降级/归档）
+        # 不生成正典；把判定写回 frontmatter，让索引降级真正生效
         rec["ok"] = True
-        rec["action"] = f"skip:{verdict}"
+        rec["action"] = mark_evidence_verdict(root, rel, verdict, rec)
         return rec
     verified = verify_note(body, prop, root, sid)
     verified["checks"]["orig_chars"] = len(body)
@@ -546,6 +546,70 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
     if apply and rec["ok"]:
         rec["action"] = apply_canon(root, rel, fm, prop, sid, verified, llm.model)
     return rec
+
+
+def l4_frozen(root: Path) -> bool:
+    """L4 宪法是否冻结了知识结晶（rung=lc）。
+
+    冻结 = 真人连续判错达阈值 → 停止**自动写回**，退化为只出提案（人工在环）。
+    读不到配置/损坏 → 不冻结（best-effort，绝不因此卡住流水线）。
+    """
+    for name in (".kb_l4_config.json", ".kb/state/l4_config.json"):
+        try:
+            d = json.loads((root / name).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        frz = (d.get("frozen") or {})
+        if isinstance(frz, dict):
+            return bool(frz.get("lc"))
+    return False
+
+
+def _upsert_frontmatter(text: str, updates: Dict[str, Any]) -> Optional[str]:
+    """就地更新/插入 frontmatter 键（无 frontmatter 则返回 None，不动文件）。"""
+    if not text.startswith("---"):
+        return None
+    m = re.search(r"^---\s*$", text, re.M)
+    if not m:
+        return None
+    end = re.search(r"^---\s*$", text[m.end():], re.M)
+    if not end:
+        return None
+    head = text[m.end():m.end() + end.start()]
+    body = text[m.end() + end.end():]
+    lines = head.strip("\n").splitlines()
+    keys_done = set()
+    for i, ln in enumerate(lines):
+        for k, v in updates.items():
+            if re.match(rf"^{re.escape(k)}\s*:", ln):
+                lines[i] = f"{k}: {fmt_value(v)}"
+                keys_done.add(k)
+    for k, v in updates.items():
+        if k not in keys_done:
+            lines.append(f"{k}: {fmt_value(v)}")
+    return "---\n" + "\n".join(lines) + "\n---\n" + body
+
+
+def mark_evidence_verdict(root: Path, rel: str, verdict: str, rec: Dict[str, Any]) -> str:
+    """把 raw-only / noise 判定写回 frontmatter，让索引降级真正生效。
+
+      · raw-only（只有过程价值、无结论）→ `kb_layer: raw`（排序降级，仍可检索可调用）
+      · noise（寒暄/重复/纯指针/空壳）  → `kb_layer: noise` + `kb_index: false`（不入主检索）
+    两者都记录判定来源与时间，便于审计与回滚（重新结晶或人工改回即可）。
+    """
+    p = root / rel
+    text = _read(p)
+    if verdict == "noise":
+        updates = {"kb_layer": "noise", "kb_index": "false"}
+    else:
+        updates = {"kb_layer": "raw"}
+    updates.update({"curate_verdict": verdict, "curated_by": rec.get("model", ""),
+                    "curated_at": _now()})
+    new = _upsert_frontmatter(text, updates)
+    if new is None:
+        return f"skip:{verdict}(no-frontmatter)"
+    p.write_text(new, encoding="utf-8")
+    return f"skip:{verdict}"
 
 
 def _review_append(root: Path, entry: Dict[str, Any]) -> None:
@@ -631,6 +695,10 @@ def cmd_run(root: Path, domain: Optional[str], limit: int, apply: bool,
     st = _load_state(root)
     recs = []
     t_start = time.time()
+    if apply and l4_frozen(root):
+        print("  ⚖️ L4 宪法已冻结 lc（知识结晶）→ 本轮只出提案，不自动写回；"
+              "人工解冻：python3 pipeline/kb_l4.py unfreeze --root . --rung lc")
+        apply = False
     if apply:
         checkpoint(root)
     for i, c in enumerate(cand, 1):

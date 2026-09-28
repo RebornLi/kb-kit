@@ -150,3 +150,51 @@ P0 前的实测痛点是：`kb query "vLLM 部署 坑"` Top-10 **9 条是只指�
 | 想重跑某篇 | 从 `.kb/curate_state.json` 的 `done` 里删掉该 rel（键即相对路径） |
 | 想调整准入 | `CONF_MIN`（置信闸门）、`HUGE_BODY`（超大跳过）、`SKIP_DIRS`（豁免目录） |
 | 索引被改坏了 | `rm "vector index/df_idf.json" && ./kb rag index`（纯可重建产物） |
+
+---
+
+## 八、空闲调度（已接线到 OpenClaw 自动化）
+
+本机的 KB 定时任务已统一到 OpenClaw 自动化（crontab 已不再承担 KB 调度）。结晶层占两个作业：
+
+| 作业 | 时间 | 做什么 |
+|---|---|---|
+| `kb-kit daily supervise` | 02:00 | 维护（growth_cron）+ 巡检 + 可用性自检，简报投递微信 |
+| **`kb-curate-nightly`** | **02:30** | **知识结晶**：12 篇 / 3600s 上限，跑完自动重建索引，简报投递微信 |
+
+```bash
+# 查看 / 手动调试跑一轮
+openclaw automations list | grep curate
+openclaw automations run de8172ee-eef1-4cef-aa60-d647f2cc3c40   # debug 立即执行
+openclaw automations runs de8172ee-eef1-4cef-aa60-d647f2cc3c40  # 历史
+```
+
+脚本 `scripts/kb-curate.sh` 自带三重闸门（开关 / 密钥 / 负载<4.0）与单轮上限，
+**退出码始终为 0**（确保简报一定送达；问题在正文以 ❌/⚠️ 标注）。
+
+> 也可以用 crontab 直接跑（不依赖 OpenClaw）：
+> ```bash
+> 30 2 * * *  CURATE_ENABLE=1 CURATE_LIMIT=12 CURATE_SECONDS=3600 \
+>             ORNITH_API_KEY=sk-... /path/to/vault/scripts/kb-curate.sh /path/to/vault
+> ```
+
+## 九、L4 人工闸门（rung = `lc`）
+
+知识结晶接入了既有的反馈阶梯**宪法层**：
+
+```bash
+# 看低置信提案（真人待裁）
+python3 pipeline/kb_l4.py docket --root .
+kb curate review
+
+# 裁决：correct = 认可这次结晶；wrong = 否决
+python3 pipeline/kb_l4.py judge --root . --rung lc --rel "<笔记相对路径>" --verb correct --judge 木杉
+
+# 连续判错（≥3 且样本 ≥5）→ 冻结 lc
+python3 pipeline/kb_l4.py freeze --root .
+# 冻结后 kb curate run --apply 自动退化为「只出提案」，直到人工解冻：
+python3 pipeline/kb_l4.py unfreeze --root . --rung lc
+```
+
+**闭环**：低置信 → 提案进 `.kb/curate_review.jsonl` → L4 docket 逐条待裁 → 真人裁决 →
+连续判错冻结写回。这就是「人工在环」的落地，且复用既有的接地阀与信任度机制。
