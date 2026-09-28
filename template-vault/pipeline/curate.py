@@ -171,19 +171,29 @@ class LLM:
             return None, f"{type(e).__name__}: {e}"
 
     def ask_json(self, messages: List[Dict[str, str]], max_tokens: int = 2048) -> Tuple[Optional[dict], str]:
-        """要一份 JSON 对象；容忍 ```json 包裹与前后废话。返回 (对象, 说明)。"""
+        """要一份 JSON 对象；容忍 ```json 包裹、前后废话、以及被截断的尾部。
+        返回 (对象, 说明)。说明会显式区分「截断」与「格式不对」，便于上层决定是否重试。
+        """
         text, note = self.chat(messages, max_tokens=max_tokens)
         if text is None:
             return None, note
+        truncated = str(note).startswith("truncated")
         obj = _extract_json(text)
         if obj is None:
             tail = text.strip()[-160:].replace("\n", " ")
-            why = "输出被 max_tokens 截断" if note.startswith("truncated") else "未返回合法 JSON"
-            return None, f"{why}（{note}；尾部：…{tail}）"
+            why = "输出被 max_tokens 截断且无法修复" if truncated else "未返回合法 JSON"
+            return None, f"{why}（finish={note}；尾部：…{tail}）"
+        if truncated:
+            note = "truncated-repaired"   # 补齐括号抢救成功，但仍提示上层可紧凑重试
         return obj, note
 
 
 def _extract_json(text: str) -> Optional[dict]:
+    """从模型输出里取 JSON 对象：容忍 ```json 包裹、前后废话、以及**被截断**的尾部。
+
+    截断修复：逐步回退到最后一个完整元素边界并补齐括号。理由：「输出被 max_tokens
+    截断」时前面 90% 的内容通常完全可用，直接丢弃等于浪费一整次推理。
+    """
     s = str(text or "").strip()
     m = re.search(r"```(?:json)?\s*(.+?)```", s, re.S)
     if m:
@@ -193,20 +203,39 @@ def _extract_json(text: str) -> Optional[dict]:
         return obj if isinstance(obj, dict) else None
     except json.JSONDecodeError:
         pass
-    start, depth = None, 0
-    for i, ch in enumerate(s):
+    start = s.find("{")
+    if start < 0:
+        return None
+    frag = s[start:]
+    # 1) 截取到最后一个平衡的 '}' 再试
+    depth = 0
+    for i, ch in enumerate(frag):
         if ch == "{":
-            if depth == 0:
-                start = i
             depth += 1
         elif ch == "}":
             depth -= 1
-            if depth == 0 and start is not None:
+            if depth == 0:
                 try:
-                    obj = json.loads(s[start:i + 1])
+                    obj = json.loads(frag[:i + 1])
                     return obj if isinstance(obj, dict) else None
                 except json.JSONDecodeError:
-                    start = None
+                    break
+    # 2) 截断修复：只在「元素边界」回退（逗号/数组尾/对象尾），最多试 400 个候选
+    cuts = [m.start() for m in re.finditer(r'[,}\]]', frag)]
+    for idx in reversed(cuts[-400:]):
+        head = frag[:idx + 1].rstrip()
+        head = re.sub(r",$", "", head).rstrip()
+        opens = head.count("{") - head.count("}")
+        arrs = head.count("[") - head.count("]")
+        if opens < 0 or arrs < 0:
+            continue
+        candidate = head + ("]" * arrs) + ("}" * opens)
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict) and ("verdict" in obj or "sections" in obj):
+                return obj
+        except json.JSONDecodeError:
+            continue
     return None
 
 
@@ -304,6 +333,12 @@ SYSTEM = """你是知识库的「结晶器」。你的唯一职责：把原始�
 7. 如果原文只是空壳/目录/纯指针（没有实质内容），verdict 为 "noise"。
 8. 如果原文与提供的「已有正典」讲的是同一件事，verdict 为 "merge"，并给出 merge_into。
 
+长度纪律（硬约束，输出一旦超长就会被截断而整篇作废）：
+- sections 每节最多 3 条；每条 ≤ 40 字，只写要点，不复述原文、不写解释性从句。
+- facts 最多 8 条，每条只填标识符本身（命令/路径/版本/端口/时长/报错串），不带句子。
+- dropped 只写 1 条（一句话概括删了什么）。
+- 全文 JSON 控制在 1200 字以内。
+
 只输出一个 JSON 对象，不要任何解释文字。"""
 
 USER_TMPL = """【原文】ID: {sid}
@@ -333,7 +368,8 @@ USER_TMPL = """【原文】ID: {sid}
   "confidence": 0.0,
   "merge_into": null
 }}
-sections 里没有内容的小节请省略；每条要点独立成一行，避免长句堆叠。"""
+sections 里没有内容的小节请省略。长度纪律：每节最多 3 条、每条 ≤40 字；facts ≤8 条
+（只填标识符本身）；dropped 只 1 条；整个 JSON ≤1200 字 —— 超长会被截断而整篇作废。"""
 
 
 def _existing_canon(root: Path, body: str, topk: int = 3) -> List[Dict[str, str]]:
@@ -458,7 +494,18 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
                          for c in cands) or "（无）"
     payload = USER_TMPL.format(sid=sid, rel=rel, body=body[:12000], cands=cand_txt)
     prop, note = llm.ask_json([{"role": "system", "content": SYSTEM},
-                               {"role": "user", "content": payload}], max_tokens=6144)
+                               {"role": "user", "content": payload}], max_tokens=4096)
+    # 被 max_tokens 截断（且括号补齐也没救回来）→ 就地重试一次，明确要求更紧凑
+    if prop is None and "截断" in str(note):
+        retry = (payload + "\n\n【重要】上次输出超长被截断而作废。本次必须极紧凑："
+                 "sections 每节最多 2 条、每条不超过 30 字；facts 最多 6 条（只填标识符本身）；"
+                 "dropped 只 1 条；整个 JSON 不超过 800 字。")
+        prop2, note2 = llm.ask_json([{"role": "system", "content": SYSTEM},
+                                     {"role": "user", "content": retry}], max_tokens=4096)
+        if prop2 is not None:
+            prop, note = prop2, note2
+        else:
+            note = f"{note}（紧凑重试仍失败：{str(note2)[:120]}）"
     rec: Dict[str, Any] = {"rel": rel, "sid": sid, "model": llm.model, "ts": _now(),
                            "body_chars": len(body), "ok": False, "note": note}
     if prop is None:
