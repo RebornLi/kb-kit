@@ -226,10 +226,22 @@ def resolve(raw_id: str, root: Path) -> Tuple[Optional[Path], List[str]]:
     raw_id = str(raw_id or "").strip()
     if not raw_id:
         return None, []
+    # 0) `vault:<rel>` 别名：正典的 source_ref 对没有 memory_source 的笔记会退化用它。
+    #    先解析原位置；原位置已被结晶改写时，回落到保号副本 raw/_curated/<rel>。
+    if raw_id.startswith("vault:"):
+        rel = raw_id[len("vault:"):].strip()
+        for cand_rel in (rel, str(Path("raw") / "_curated" / rel)):
+            c = root / cand_rel
+            if c.is_file():
+                return c, []
     # 1) vault 相对路径
     cand = root / raw_id
     if cand.is_file() and _is_evidence(str(Path(raw_id))):
         return cand, []
+    # 1b) raw/_curated/ 保号副本（结晶前的原文）：即使 ID 不是证据层路径也能取回
+    cur = root / "raw" / "_curated" / raw_id
+    if cur.is_file():
+        return cur, []
     # 2) ID 映射（memory_source 等）—— 可能一 ID 多副本
     id_map = _build_id_map(root)
     if raw_id in id_map:
