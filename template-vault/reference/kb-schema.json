@@ -1,0 +1,317 @@
+{
+  "_meta": {
+    "version": 1,
+    "description": "kb-kit 知识契约（schema）：页型 → 字段 → 枚举 → 生命周期。作为提示词、校验器、导出器的单一事实源。",
+    "usage": "python3 pipeline/kb_schema.py check --root R [--json]   # 只读对照；不修改任何笔记",
+    "designed_for": "P1 提示词层将从本文件注入页型与必填节；P5 维护检查将按本文件判漂移",
+    "check_policy": "enfigned = 越界即报；aspirational = 仅当字段出现且取值明显非法时才报"
+  },
+  "layers": {
+    "canon": "正典层：结晶后的结论优先知识（检索优先命中的唯一目标）",
+    "page": "普通笔记层：未结晶但仍是知识正文",
+    "raw": "证据层：原文保真（raw/ 抓取物、memory/ 日报、raw/_curated/ 保号副本）",
+    "index": "分块索引页/目录页：不入检索",
+    "noise": "判定为噪声：kb_index=false，不入检索"
+  },
+  "page_types": {
+    "canon-decision": {
+      "when": "内容是一个选择/拍板（决定了什么、为什么、代价是什么）",
+      "required_sections": [
+        "决定",
+        "理由"
+      ],
+      "optional_sections": [
+        "备选",
+        "代价",
+        "后续"
+      ]
+    },
+    "canon-sop": {
+      "when": "内容是可复现的操作流程",
+      "required_sections": [
+        "步骤"
+      ],
+      "optional_sections": [
+        "前置",
+        "校验",
+        "回滚"
+      ]
+    },
+    "canon-lesson": {
+      "when": "内容是一次踩坑/复盘的经验",
+      "required_sections": [
+        "现象",
+        "根因",
+        "对策"
+      ],
+      "optional_sections": [
+        "边界",
+        "预防"
+      ]
+    },
+    "canon-reference": {
+      "when": "内容是速查/参数/清单",
+      "required_sections": [
+        "要点"
+      ],
+      "optional_sections": [
+        "示例",
+        "出处"
+      ]
+    },
+    "canon-generic": {
+      "when": "以上都不贴切时的兜底",
+      "required_sections": [
+        "结论"
+      ],
+      "optional_sections": [
+        "依据",
+        "操作",
+        "坑与边界"
+      ]
+    }
+  },
+  "fields": {
+    "tags": {
+      "type": "list",
+      "required": true,
+      "note": "受控词表见 reference/tag-taxonomy.json"
+    },
+    "status": {
+      "type": "enum",
+      "required": true,
+      "values": [
+        "draft",
+        "active",
+        "stable",
+        "legacy",
+        "archived"
+      ],
+      "_maturity": "enforced"
+    },
+    "domain": {
+      "type": "enum",
+      "required": true,
+      "values": [
+        "运维",
+        "开发",
+        "安全",
+        "产品",
+        "数据",
+        "管理",
+        "综合"
+      ],
+      "_maturity": "enforced"
+    },
+    "category": {
+      "type": "enum",
+      "required": false,
+      "_maturity": "aspirational"
+    },
+    "created": {
+      "type": "date",
+      "required": true
+    },
+    "updated": {
+      "type": "date",
+      "required": true
+    },
+    "importance": {
+      "type": "number",
+      "required": true,
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    "kb_target": {
+      "type": "string",
+      "required": false
+    },
+    "kb_action": {
+      "type": "enum",
+      "required": false,
+      "values": [
+        "new",
+        "append",
+        "update",
+        "retire"
+      ]
+    },
+    "kb_summary": {
+      "type": "string",
+      "required": false,
+      "max_len": 200
+    },
+    "kb_layer": {
+      "type": "enum",
+      "required": false,
+      "values": [
+        "canon",
+        "page",
+        "raw",
+        "index",
+        "noise"
+      ],
+      "_maturity": "enforced"
+    },
+    "kb_index": {
+      "type": "bool",
+      "required": false
+    },
+    "source_ref": {
+      "type": "list",
+      "required": false,
+      "note": "canon 必填：可回溯的原记忆 ID 列表"
+    },
+    "archived_original": {
+      "type": "string",
+      "required": false,
+      "note": "canon 必填：保号原文的 vault 相对路径"
+    },
+    "source_chars": {
+      "type": "number",
+      "required": false
+    },
+    "canon_ratio": {
+      "type": "number",
+      "required": false
+    },
+    "grounded_facts": {
+      "type": "list",
+      "required": false,
+      "note": "回原文核对通过的事实串"
+    },
+    "curate_confidence": {
+      "type": "number",
+      "required": false,
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    "curate_verdict": {
+      "type": "enum",
+      "required": false,
+      "values": [
+        "canon",
+        "raw-only",
+        "noise",
+        "merge"
+      ],
+      "_maturity": "enforced"
+    },
+    "curated_by": {
+      "type": "string",
+      "required": false
+    },
+    "curated_at": {
+      "type": "datetime",
+      "required": false
+    },
+    "event_at": {
+      "type": "date",
+      "required": false,
+      "note": "P3 双时态：该事实何时为真"
+    },
+    "derived_at": {
+      "type": "datetime",
+      "required": false,
+      "note": "P3 双时态：该条何时被学到"
+    },
+    "confidence": {
+      "type": "number",
+      "required": false,
+      "range": [
+        0.0,
+        1.0
+      ],
+      "note": "P3 复合置信分"
+    },
+    "conflicts_with": {
+      "type": "list",
+      "required": false,
+      "note": "P3 矛盾在环"
+    },
+    "superseded_by": {
+      "type": "string",
+      "required": false,
+      "note": "P3 被替代指向"
+    },
+    "lifecycle": {
+      "type": "enum",
+      "required": false,
+      "values": [
+        "draft",
+        "reviewed",
+        "verified",
+        "disputed",
+        "archived"
+      ],
+      "_maturity": "aspirational",
+      "_note": "P3 才启用；现在缺失不算偏差"
+    },
+    "aliases": {
+      "type": "list",
+      "required": false
+    },
+    "redirect_to": {
+      "type": "string",
+      "required": false
+    },
+    "chunk": {
+      "type": "number",
+      "required": false
+    },
+    "chunk_of": {
+      "type": "string",
+      "required": false
+    },
+    "is_source": {
+      "type": "bool",
+      "required": false
+    }
+  },
+  "canon_required": [
+    "source_ref",
+    "archived_original",
+    "kb_layer",
+    "kb_summary"
+  ],
+  "noise_must_have": {
+    "kb_index": false,
+    "kb_layer": "noise"
+  },
+  "raw_forbidden": [
+    "kb_layer"
+  ],
+  "confidence_rubric": {
+    "_note": "P3 将按此计算复合置信分；现在仅声明，不改行为",
+    "extraction": {
+      "weight": 0.5,
+      "verbatim": 1.0,
+      "extracted": 0.9,
+      "inferred": 0.6
+    },
+    "corroboration": {
+      "weight": 0.25,
+      "note": "支持该结论的原记忆条数归一"
+    },
+    "recency": {
+      "weight": 0.15,
+      "note": "最近一次确认距今"
+    },
+    "verification": {
+      "weight": 0.1,
+      "note": "格式/接地校验通过项占比"
+    },
+    "publish_floor": 0.55,
+    "evidence_only_floor": 0.35
+  },
+  "stale_policy": {
+    "_note": "陈旧度是**计算值**，从不存储（对照 wiki-lint 约定）",
+    "stale_after_days": 90,
+    "verified_stale_after_days": 180,
+    "archive_after_days": 90
+  }
+}

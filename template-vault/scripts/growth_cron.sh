@@ -106,7 +106,7 @@ fi
 # ⑥ 记忆同步：memory/*.md 过「五问」的沉淀灌进知识库(只加新建笔记、幂等、
 #   状态记 .memory_sync_state.json 不入库；无源时静默 0 晋升)
 log "⑥ 记忆同步（memory/ → 知识库）"
-step "memory promote" "${PYTHON}" "${PIPE}/memory_sync.py" promote --root "${VAULT}"
+step "memory promote" "${PYTHON}" "${PIPE}/memory_sync.py" promote --root "${VAULT}" --apply
 
 # ⑧ 知识结晶：空闲时才跑，用本地 Agent 把「日志/碎片」炼成「可调用正典」。
 #   三重闸门（任一不满足即跳过，绝不抢资源、绝不阻塞流水线）：

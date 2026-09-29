@@ -82,6 +82,12 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("clean", "refine"):   ("clean", "refine"),
     ("clean", "taxonomy"): ("clean", "taxonomy"),
     ("clean", "repair"):   ("clean", "repair"),
+    ("clean", "repair-headings"): ("clean", "repair-headings"),
+
+    # 知识契约（schema）
+    ("schema", None):      ("schema", "check"),
+    ("schema", "check"):   ("schema", "check"),
+    ("schema", "fields"):  ("schema", "fields"),
 
     # 原记忆可达性（证据层按需调用）
     ("raw", None):         ("raw", "list"),
@@ -340,7 +346,10 @@ class KBLauncher:
         print("  kb clean refine           一键：结构化+去重→分块→重建索引→校验")
         print("  kb clean taxonomy [--apply] 标签归一（受控词表：别名/层级）")
         print("  kb clean repair [--apply] 修历史分块残留（占位符/索引页打标）")
+        print("  kb clean repair-headings [--apply] 修「## ## 」重复标题（--include-evidence 连证据层）")
         print("  kb validate               frontmatter 校验")
+        print("  kb schema check           对照知识契约（reference/kb-schema.json）查偏差")
+        print("  kb schema fields          字段使用率（看契约实际覆盖）")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")

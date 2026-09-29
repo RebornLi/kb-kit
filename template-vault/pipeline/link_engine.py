@@ -139,11 +139,13 @@ def build_report(rels: List[str], notes: Dict[str, Dict[str, Any]], recs: List[D
     return "\n".join(lines) + "\n"
 
 
-def apply_links(root: Union[str, Path], threshold: float, limit: int) -> int:
+def apply_links(root: Union[str, Path], threshold: float, limit: int,
+                dry_run: bool = False) -> int:
     """写前 checkpoint，往缺链笔记追加独立建议区块（可回滚）。
     幂等：已含「🔗 智能建议链接」区块的笔记跳过，避免每次跑重复堆积。
     --limit：每轮只取分最高的前 N 对（外科手术式，别一次灌满）。
-    只 add 被改的笔记，绝不 git add -A（不 sweep Obsidian 运行时态）。"""
+    只 add 被改的笔记，绝不 git add -A（不 sweep Obsidian 运行时态）。
+    dry_run=True：只列出「将在哪些笔记追加哪些链接」，不写盘、不 commit。"""
     import subprocess
     rels, notes, recs, cross = suggestions(root, threshold)
     recs = recs[:limit] if limit else recs
@@ -180,6 +182,12 @@ def apply_links(root: Union[str, Path], threshold: float, limit: int) -> int:
             parts.append("\n### 🧩 同域（概念关联）\n")
             parts += [f"- [[{t}]]\n" for t in concept_want]
         block = "".join(parts)
+        if dry_run:
+            total = len(cross_want) + len(concept_want)
+            print(f"   · 将给 {a} 追加 {total} 条链接"
+                  f"（跨域 {len(cross_want)} / 同域 {len(concept_want)}）")
+            inserted += 1
+            continue
         new_text = text + ("\n" if not text.endswith("\n") else "") + block
         p.write_text(new_text, encoding="utf-8")
         inserted += 1
@@ -193,6 +201,10 @@ def apply_links(root: Union[str, Path], threshold: float, limit: int) -> int:
                             "-m", f"kb: 连接引擎补链 {inserted} 条笔记（建议区块，可人工移除）",
                             "--", *staged],
                            capture_output=True)
+    if dry_run:
+        print(f"\n🔍 dry-run：拟给 {inserted} 条笔记追加建议区块（共 {len(recs)} 条建议）")
+        print("   应用：kb link apply")
+        return 0
     print(f"✅ 已写入建议区块 {inserted} 条笔记（共 {len(recs)} 条建议）")
     return 0
 
@@ -243,6 +255,8 @@ def main() -> int:
     a = sub.add_parser("apply"); a.add_argument("--root", default=ROOT_DEFAULT)
     a.add_argument("--threshold", type=float, default=0.75)
     a.add_argument("--limit", type=int, default=50)
+    a.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="只预览将追加到哪些笔记，不写盘")
     mo = sub.add_parser("moc"); mo.add_argument("--root", default=ROOT_DEFAULT)
     args = ap.parse_args()
     if args.cmd == "suggestions":
@@ -253,7 +267,8 @@ def main() -> int:
         return 0
     if args.cmd == "moc":
         return moc(args.root)
-    return apply_links(args.root, args.threshold, args.limit)
+    return apply_links(args.root, args.threshold, args.limit,
+                       dry_run=getattr(args, "dry_run", False))
 
 
 if __name__ == "__main__":

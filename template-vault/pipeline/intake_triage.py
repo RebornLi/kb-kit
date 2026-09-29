@@ -276,11 +276,13 @@ def _tombstone(rel: str, tgt_rel: str, fm_src: Dict[str, Any], body: str) -> str
 
 
 def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
-                move: bool, trash: bool) -> int:
+                move: bool, trash: bool, dry_run: bool = False) -> int:
     import subprocess
     moved, trashed, reviewed, merged, dups = 0, 0, 0, 0, 0
     touched = []  # 收集被改动的笔记路径，用于精确 git add
     REVIEW_DIR = "70-知识治理 Governance/_review"
+    if dry_run:
+        print("🔍 dry-run（只预览将路由/合并/归档/待审的笔记，不移动、不写盘、不 commit）")
     for r in results:
         rel = r["rel"]
         src = Path(root) / rel
@@ -288,6 +290,10 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
             src_top = rel.split(os.sep)[0]
             if r["route_to"] == src_top:
                 continue  # 已在目标区,跳过
+            if dry_run:
+                print(f"   · 路由 {rel} → {r['route_to']}/")
+                moved += 1
+                continue
             dest_dir = Path(root) / r["route_to"]
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest, kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
@@ -303,6 +309,10 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
             if not (tgt and tgt.exists() and not _is_raw_rel(tgt_rel)
                     and not is_generated_report(tgt_rel)):
                 continue  # 目标不可用：保留原件，下次再处理
+            if dry_run:
+                print(f"   · 合并 {rel} → {tgt_rel}（写入墓碑 + lineage）")
+                merged += 1
+                continue
             fm_src, _text, body = load_note(src)
             marker = f"<!-- merged:{rel} -->"
             tgt_text = tgt.read_text(encoding="utf-8")
@@ -330,6 +340,10 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
             record_lineage(root, rel, tgt_rel, "merge")
             merged += 1
         elif trash and r["action"] == "trash":
+            if dry_run:
+                print(f"   · 归档 {rel} → {TRASH}/")
+                trashed += 1
+                continue
             dest_dir = Path(root) / TRASH
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest, kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
@@ -340,6 +354,10 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
                 dups += 1
         elif move and r["action"] == "refine":
             # 待审队列：移入 _review/（原件离开收件箱，避免每轮重复 triage）
+            if dry_run:
+                print(f"   · 待审 {rel} → {REVIEW_DIR}/")
+                reviewed += 1
+                continue
             dest_dir = Path(root) / REVIEW_DIR
             dest_dir.mkdir(parents=True, exist_ok=True)
             dest, _kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
@@ -355,6 +373,10 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
                         "--", *staged_paths],
                        capture_output=True)
     dup_msg = f" | 判重跳过 {dups} 篇" if dups else ""
+    if dry_run:
+        print(f"\n🔍 dry-run 汇总：拟路由 {moved} | 拟合并 {merged} | 拟归档 {trashed} | 拟待审 {reviewed}{dup_msg}")
+        print("   应用：kb ingest move（或 kb ingest trash）")
+        return 0
     print(f"✅ 路由 {moved} 篇 | 合并 {merged} 篇 | 归档 {trashed} 篇 | 待审 {reviewed} 篇{dup_msg}"
           f"(均在目标区/_trash/_review 可回滚；同名不同内容已改名避让，绝不覆盖)")
     return 0
@@ -368,6 +390,8 @@ def main() -> int:
     a = sub.add_parser("apply")
     a.add_argument("--root", default=ROOT_DEFAULT); a.add_argument("--thr", type=float, default=0.85)
     a.add_argument("--move", action="store_true"); a.add_argument("--trash", action="store_true")
+    a.add_argument("--dry-run", action="store_true", dest="dry_run",
+                   help="只预览将路由/合并/归档的笔记，不移动")
     args = ap.parse_args()
     results = triage(args.root, args.thr)
     if args.cmd == "review":
@@ -381,7 +405,8 @@ def main() -> int:
     if not (args.move or args.trash):
         print("提示: 需指定 --move(路由) 和/或 --trash(归档),默认只 review")
         return 0
-    return apply_moves(args.root, results, args.move, args.trash)
+    return apply_moves(args.root, results, args.move, args.trash,
+                       dry_run=getattr(args, "dry_run", False))
 
 
 # ── 按内容类型分桶（FR-3.3.13）──────────────────────────────

@@ -338,6 +338,49 @@ def _is_raw_rel(rel: str) -> bool:
 
 # ── P0 修复：历史分块 bug 的字面占位符残留 ──────────────────────
 PLACEHOLDER_RE = re.compile(r"\{name\}\s*·\s*块\{i\}")
+# 「## ## 标题」重复：分块时把 `## 父名 · 块i` 叠加在原文已有标题之前
+
+
+def strip_duplicate_heading(text: str) -> Tuple[str, int]:
+    """消除「## ## 标题」重复标题（逐行判定，比正则可靠）。
+
+    只看**行首 token**：若一行以两个 Markdown 标题标记开头（`## ## …`/`### ### …`），
+    去掉第二个及其后的空白；标题文字与正文一字不动。返回 (新文本, 修复处数)。
+    """
+    out, fixed = [], 0
+    for line in text.split("\n"):
+        m = re.match(r"^(#{1,6})[ \t]+(#{1,6})[ \t]+(\S.*)$", line)
+        if m:
+            out.append(f"{m.group(1)} {m.group(3)}")
+            fixed += 1
+        else:
+            out.append(line)
+    return "\n".join(out), fixed
+
+
+def do_repair_headings(root: Union[str, Path], dry: bool = True,
+                       include_evidence: bool = False) -> Tuple[int, List[str]]:
+    """消除「## ## 」重复标题（分块时代残留）。
+
+    成因：分块时把 `## {父名} · 块{i}` 叠加在原文已有的 `## 标题` 之前。
+    安全性：只删掉**多余的那一个 `#` 前缀**，标题文字与正文一字不动。
+    默认只修知识层；`include_evidence=True` 才动 raw/ —— 证据层默认保持原样（保真优先）。
+    """
+    fixed, touched = 0, []
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue
+        if _is_raw_rel(rel) and not include_evidence:
+            continue
+        text = p.read_text(encoding="utf-8")
+        new, n = strip_duplicate_heading(text)
+        if n:
+            fixed += n
+            touched.append(rel)
+            if not dry:
+                p.write_text(new, encoding="utf-8")
+    return fixed, touched
 
 
 def do_repair(root: Union[str, Path], dry: bool = True) -> Tuple[int, int, List[str]]:
@@ -444,7 +487,14 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
             for i, ck in enumerate(chunks, 1):
                 cf = p.with_name(f"{name}-p{i}.md")
                 fm2c = base_fm(str(p.relative_to(root)), fm, {"tags": list_of(fm, "chunk"), "chunk": i, "chunk_of": name})
-                chunk_text = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items()) + "\n---\n\n" + f"## {name} · 块{i}\n\n" + "\n".join(ck)
+                ck_body = "\n".join(ck).lstrip()
+                m_h = re.match(r"^(#{1,6}[ \t]+[^\n]*\n?)(.*)$", ck_body, re.S)
+                if m_h:   # 块自带标题：保留原标题，不叠加（避免 "## ## "）
+                    chunk_text = ("---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items())
+                                  + "\n---\n\n" + m_h.group(1) + m_h.group(2))
+                else:
+                    chunk_text = ("---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2c.items())
+                                  + "\n---\n\n" + f"## {name} · 块{i}\n\n" + ck_body)
                 cf.write_text(chunk_text, encoding="utf-8")
                 created += 1
                 touched.append(str(cf.relative_to(root)))
@@ -477,7 +527,14 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
                     continue
                 # 子块：contextual header（父标题）便于检索与追溯
                 cf = p.parent / cn.filename
-                cf.write_text(head + f"《{parent_title}》\n\n{cn.body}", encoding="utf-8")
+                cn_body = str(cn.body).lstrip()
+                # 若块正文自带标题行：标题在前、contextual header 紧随其后（避免 "## ## " 叠标题）
+                m_head = re.match(r"^(#{1,6}[ \t]+[^\n]*\n?)(.*)$", cn_body, re.S)
+                if m_head:
+                    chunk_text2 = head + m_head.group(1) + f"《{parent_title}》\n\n" + m_head.group(2)
+                else:
+                    chunk_text2 = head + f"《{parent_title}》\n\n" + cn_body
+                cf.write_text(chunk_text2, encoding="utf-8")
                 created += 1
                 touched.append(str(cf.relative_to(root)))
     print(f"✅ 分块完成  处理 {handled} 条笔记，新建 {created} 个分块文件")
@@ -498,7 +555,26 @@ def main() -> int:
     rf.add_argument("--threshold", type=int, default=BODY_LIMIT)
     rp = sub.add_parser("repair"); rp.add_argument("--root", default=ROOT_DEFAULT)
     rp.add_argument("--apply", action="store_true", help="应用修复（默认 dry-run 只报数）")
+    rh = sub.add_parser("repair-headings"); rh.add_argument("--root", default=ROOT_DEFAULT)
+    rh.add_argument("--apply", action="store_true", help="应用修复（默认 dry-run）")
+    rh.add_argument("--include-evidence", action="store_true", dest="include_evidence",
+                    help="连 raw/ 证据层一起修（默认只修知识层，保留证据层原样）")
     args = ap.parse_args()
+    if args.cmd == "repair-headings":
+        fixed, touched = do_repair_headings(args.root, dry=not args.apply,
+                                           include_evidence=args.include_evidence)
+        mode = "✅ 已修复" if args.apply else "🔍 dry-run（未写入）"
+        scope = "知识层+证据层" if args.include_evidence else "仅知识层"
+        print(f"{mode}：重复标题 {fixed} 处 · 涉及文件 {len(touched)} 个（范围：{scope}）")
+        for r in touched[:8]:
+            print(f"   - {r}")
+        if not args.apply and touched:
+            print("   应用：kb clean repair-headings --apply   然后：kb rag index")
+        elif args.apply and touched:
+            staged = _stage_paths(args.root, touched)
+            git(["commit", "-q", "-m", f"kb: clean repair-headings 修重复标题 {fixed} 处",
+                 "--", *staged], args.root)
+        return 0
     if args.cmd == "repair":
         fixed, marked, touched = do_repair(args.root, dry=not args.apply)
         mode = "✅ 已修复" if args.apply else "🔍 dry-run（未写入）"

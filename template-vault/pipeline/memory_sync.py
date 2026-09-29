@@ -165,7 +165,7 @@ def memory_files(root):
     return out
 
 
-def grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic):
+def grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic, root=None):
     dens = signal_density(body)
     matches = best_match(vocab, idf, rel2vec, meta_all, body, topk=2)
     best = matches[0] if matches else None
@@ -204,8 +204,8 @@ def grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, 
         try:
             ans = semantic_ask(root, body, matches)
             semantic_ok = (ans is not None) and ("不晋升" not in ans)
-        except (OSError, ValueError, KeyError, TypeError):
-            semantic_ok = True
+        except (OSError, ValueError, KeyError, TypeError, NameError):
+            semantic_ok = True   # best-effort：语义判断失败不阻断晋升
     # 硬门：④⑤ + 长度 + 不重复 + 语义
     verdict = q5 and len_ok and (not is_dup) and q4 and semantic_ok
     # 软门：①②③ 不通过 → review_needed 标记
@@ -312,7 +312,7 @@ def do_review(root, density_thr, min_chars, semantic):
             print(f"\n[📌 已晋升] {rel}")
             print(f"   → {rec['note']}  (密度 {rec['density']} · {rec['date']})")
             continue
-        g = grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic)
+        g = grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic, root)
         flag = "✅ 待晋升" if g["pass"] else "⏸ 留档"
         print(f"\n[{flag}] {rel}")
         print(f"   密度 {g['density']} · 顶命中 {g['best_sim']} ← {g['best_rel'] or '—'} · 域 {g['domain']}")
@@ -323,12 +323,15 @@ def do_review(root, density_thr, min_chars, semantic):
     return 0
 
 
-def do_promote(root, density_thr, min_chars, semantic):
+def do_promote(root, density_thr, min_chars, semantic, dry_run=False):
     rel2vec_v = load_index(root)
     vocab, idf, rel2vec, meta_all = rel2vec_v
     state = load_state(root)
     promoted = state.setdefault("promoted", {})
-    print("⛳ 写前 checkpoint（快照 HEAD，仅记录不 sweep）")
+    if dry_run:
+        print("🔍 dry-run（只预览将晋升的笔记与目标路径，不写盘、不 commit）")
+    else:
+        print("⛳ 写前 checkpoint（快照 HEAD，仅记录不 sweep）")
     baseline = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                                   capture_output=True, text=True).stdout.strip()
     created, skipped, skipped_old, nearc = 0, 0, 0, 0
@@ -337,7 +340,7 @@ def do_promote(root, density_thr, min_chars, semantic):
         if rel in promoted:
             skipped_old += 1          # 幂等：已晋升过，跳过
             continue
-        g = grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic)
+        g = grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic, root)
         if not g["pass"]:
             skipped += 1
             continue
@@ -346,11 +349,17 @@ def do_promote(root, density_thr, min_chars, semantic):
                                        review_needed=g.get("review_needed", False),
                                        soft_fail_reasons=g.get("soft_fail_reasons", []))
         target = Path(root) / rel_target
-        target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             rel_target = "%s/%s-d%s.md" % (bucket, slug(g["stem"]),
                                            datetime.date.today().strftime("%m%d"))
             target = Path(root) / rel_target
+        if dry_run:
+            print(f"   · 将新建 {rel_target}  （密度 {g['density']} · 域 {g['domain']} · 源 {rel}）")
+            created += 1
+            if g["near"]:
+                nearc += 1
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
         staged.append(rel_target)
         promoted[rel] = {"note": rel_target, "bucket": bucket,
@@ -380,7 +389,12 @@ def do_promote(root, density_thr, min_chars, semantic):
             "sha256_original": orig_sha,
             "sha256_written": hashlib.sha256(_split_body(text).encode("utf-8")).hexdigest(),
         })
-    save_state(root, state)
+    if not dry_run:
+        save_state(root, state)
+    if dry_run:
+        print(f"\n🔍 dry-run 汇总：拟晋升 {created} 条 · 已晋升跳过 {skipped_old} 条 · 留档 {skipped} 条")
+        print("   应用：kb memory-sync promote --apply")
+        return 0
     if staged:
         subprocess.run(["git", "-C", root, "add", "--", *staged], capture_output=True)
         if subprocess.run(["git", "-C", root, "status", "--porcelain"],
@@ -410,10 +424,13 @@ def main():
     pr.add_argument("--density", type=float, default=DEFAULT_DENSITY)
     pr.add_argument("--min-chars", type=int, default=MIN_CHARS_DEFAULT)
     pr.add_argument("--semantic", action="store_true")
+    pr.add_argument("--apply", action="store_true",
+                    help="真正写盘（默认 dry-run：只预览将晋升的笔记）")
     args = ap.parse_args()
     if args.cmd == "review":
         return do_review(args.root, args.density, args.min_chars, args.semantic)
-    return do_promote(args.root, args.density, args.min_chars, args.semantic)
+    return do_promote(args.root, args.density, args.min_chars, args.semantic,
+                      dry_run=not getattr(args, "apply", False))
 
 
 if __name__ == "__main__":
