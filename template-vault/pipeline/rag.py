@@ -754,27 +754,66 @@ CONCLUSION_WORDS = {"因此", "所以", "结论", "综上", "总之", "可见", 
                     "关键", "本质", "原理是", "机制是", "规则是"}
 
 
+def _snippet_candidate(line: str) -> bool:
+    """这一行是否值得作为检索片段：过滤溯源页脚/纯指针行，避免片段全是"见某某文件"。"""
+    t = line.strip()
+    if not t:
+        return False
+    if t.startswith((">", "|", "```", "---")):
+        return False
+    if t.startswith("原记忆") or "原记忆（原文保真）" in t:
+        return False
+    if re.match(r"^[-*]\s*\[\[", t):            # 纯 wikilink 列表项
+        return False
+    if re.match(r"^[-*]\s*\S{0,80}→\s*\S+$", t):  # 纯箭头指针
+        return False
+    return True
+
+
 def best_sentence(body: str, q: str) -> str:
+    """取与查询最相关的**连续片段**（1–3 句，≤320 字）。
+
+    比"单句最相关"更实用：Agent 拿到的是自洽的一小段知识，而不是被截断的半句话；
+    同时过滤溯源页脚与纯指针行（否则命中片段常常是"见 xxx.md"）。
+    """
     qs = Counter(tokenize(q))
-    if not qs: return body.strip()[:240]
-    sents = re.split(r"[。！？\n]", body)
-    sents = [s.strip() for s in sents if s.strip()]
-    def score(s):
+    lines = [l for l in str(body or "").splitlines() if _snippet_candidate(l)]
+    if not lines:
+        return str(body or "").strip()[:240]
+    body2 = "\n".join(lines)
+    sents = [s.strip() for s in re.split(r"[。！？\n]", body2) if s.strip()]
+    if not sents:
+        return ""
+    if not qs:
+        return body2.strip()[:240]
+
+    def s_score(s: str) -> float:
         st = Counter(tokenize(s))
-        kw_score = sum(st[t] * qs.get(t, 0) for t in st) or 0
-        # 结论词加成
-        concl_bonus = 0.5 if any(w in s for w in CONCLUSION_WORDS) else 0
-        # 长度偏好：30-120 字最佳
+        kw = sum(st[t] * qs.get(t, 0) for t in st)
+        concl = 0.5 if any(w in s for w in CONCLUSION_WORDS) else 0
         L = len(s)
-        if 30 <= L <= 120:
-            len_bonus = 0.3
-        elif L > 120:
-            len_bonus = 0.1
-        else:
-            len_bonus = 0
-        return kw_score + concl_bonus + len_bonus
-    best = max(sents, key=score) if sents else ""
-    return (best[:240] + "…" if len(best) > 240 else best)
+        len_bonus = 0.3 if 30 <= L <= 120 else (0.1 if L > 120 else 0)
+        return kw + concl + len_bonus
+
+    base = [s_score(x) for x in sents]
+    best_i, best_val = 0, -1.0
+    for i in range(len(sents)):
+        window, total = [], 0.0
+        for j in range(i, min(i + 3, len(sents))):
+            window.append(sents[j])
+            total += base[j]
+            if sum(len(x) for x in window) > 320:
+                break
+            val = total * (1.0 + 0.15 * (len(window) - 1))   # 连贯性加成，但不过度贪多
+            if val > best_val:
+                best_val, best_i = val, i
+    out, n = [], 0
+    for j in range(best_i, min(best_i + 3, len(sents))):
+        if n + len(sents[j]) > 320 and out:
+            break
+        out.append(sents[j]); n += len(sents[j])
+    txt = "。".join(out) if len(out) > 1 else out[0]
+    return txt
 
 def llm_answer(root: Union[str, Path], q: str, hits: List[Tuple[str, float]]) -> Tuple[Optional[str], str]:
     """返回 (答案文本或 None, 提示或空串)：

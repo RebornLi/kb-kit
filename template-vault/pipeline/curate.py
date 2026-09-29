@@ -38,6 +38,7 @@ PROPOSAL_DIR = Path("70-知识治理 Governance") / "_curate"
 LEDGER = Path(".kb") / "curate_ledger.jsonl"
 STATE = Path(".kb") / "curate_state.json"
 REVIEW = Path(".kb") / "curate_review.jsonl"
+PROPS = Path(".kb") / "curate_proposals.jsonl"   # 完整提案（含 canon 草稿），供 recheck/人工复核
 
 # 信息守恒：正典 / 原文 长度比允许区间
 MIN_RATIO, MAX_RATIO = 0.12, 0.65
@@ -108,6 +109,16 @@ def _ledger_append(root: Path, entry: Dict[str, Any]) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _props_append(root: Path, rec: Dict[str, Any]) -> None:
+    """把完整提案（含 canon 草稿）写入旁路 jsonl：账本保持精简，复核/重审读这里。"""
+    p = root / PROPS
+    p.parent.mkdir(parents=True, exist_ok=True)
+    keep = {k: rec.get(k) for k in ("rel", "sid", "ts", "batch", "verdict", "action", "model", "confidence")}
+    keep["proposal"] = rec.get("proposal")
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(keep, ensure_ascii=False) + "\n")
 
 
 def git(root: Path, args: List[str]) -> subprocess.CompletedProcess:
@@ -413,10 +424,20 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
     ratio = (len(canon) / len(body)) if body else 0.0
     checks["ratio"] = round(ratio, 3)
     checks["canon_chars"] = len(canon)
-    # 分级：硬失败（明显丢内容/没压缩） vs 软警告（大原文天然压缩比高）
-    if ratio < HARD_MIN_RATIO or len(canon) < HARD_MIN_CHARS:
-        issues.append(f"过度压缩：正典/原文 = {ratio:.1%}（< {HARD_MIN_RATIO:.0%}）或正典仅 "
-                      f"{len(canon)} 字（< {HARD_MIN_CHARS}）→ 疑丢关键内容")
+    # 尺寸感知的守恒判据：短原文（碎片）的正典天然短，不能套用长原文的绝对字数门槛。
+    #   否则「原文 300 字 → 正典 150 字」会被误判为"过度压缩"，实测 92 条提案里大半如此。
+    n_src = len(body)
+    if n_src <= 600:
+        min_ratio, min_chars = 0.03, max(60, int(n_src * 0.10))
+    elif n_src <= 3000:
+        min_ratio, min_chars = HARD_MIN_RATIO, min(300, int(n_src * 0.10))
+    else:
+        min_ratio, min_chars = HARD_MIN_RATIO, HARD_MIN_CHARS
+    checks["min_ratio"] = min_ratio
+    checks["min_chars"] = min_chars
+    if ratio < min_ratio or len(canon) < min_chars:
+        issues.append(f"过度压缩：原文 {n_src} 字 → 正典 {len(canon)} 字 = {ratio:.1%}"
+                      f"（低于阈值 {min_ratio:.0%} 或正典不足 {min_chars} 字）→ 疑丢关键内容")
     elif ratio < MIN_RATIO:
         issues.append(f"⚠️压缩偏狠：{ratio:.1%}（目标 ≥{MIN_RATIO:.0%}；原文超长时属正常，请抽检事实完整性）")
     elif ratio > MAX_RATIO:
@@ -730,6 +751,8 @@ def cmd_run(root: Path, domain: Optional[str], limit: int, apply: bool,
                                               "ok": rec.get("ok"), "action": rec.get("action")}
         recs.append(rec)
         _ledger_append(root, {k: v for k, v in rec.items() if k != "proposal"})
+        if rec.get("proposal"):
+            _props_append(root, rec)
         mark = "✅" if rec.get("ok") else "⚠️"
         why = ""
         if not rec.get("ok"):
@@ -874,10 +897,93 @@ def cmd_report(root: Path, as_json: bool) -> int:
     return 0
 
 
+def cmd_recheck(root: Path, apply_pass: bool, export: bool) -> int:
+    """用**当前**校验规则重审历史提案（离线，不调模型）。
+
+    用途：校验规则变严/变松后，把「当时没过、现在达标」的提案补写回；
+    把仍未达标的导成 `_curate/REVIEW-NEEDED.md` 人工清单（附模型草稿与未过原因）。
+    只对最终动作是 propose / review 的笔记动手（canon-written / skip:* 不动）。
+    """
+    src = root / PROPS
+    if not src.exists():
+        # 兼容：早期只有账本（proposal 已被剥离）；提示用 _curate/*.md 人工复核
+        print("（无完整提案旁路 .kb/curate_proposals.jsonl；历史提案请看 "
+              "70-知识治理 Governance/_curate/b*.md，本次运行起会自动记录）")
+        return 3
+    led = src
+    final: Dict[str, Dict[str, Any]] = {}
+    for line in led.read_text(encoding="utf-8").splitlines():
+        try:
+            r = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        rel = r.get("rel")
+        if not rel or not r.get("proposal"):
+            continue
+        prev = final.get(rel)
+        if prev is None or str(r.get("ts", "")) >= str(prev.get("ts", "")):
+            final[rel] = r
+
+    pass_now, still, applied = [], [], 0
+    for rel, r in final.items():
+        if (r.get("action") or "") not in ("propose", "review:low-confidence"):
+            continue
+        p = root / rel
+        if not p.exists():
+            continue
+        fm, _t, _b, body = load(p)
+        v = verify_note(body, r["proposal"], root, r.get("sid", ""))
+        # 低置信原样保留人工裁决（不因改规则就绕过置信闸门）
+        if (r.get("action") or "") == "review:low-confidence":
+            still.append((rel, "低置信（人工裁决闸门）", r))
+            continue
+        if v["ok"]:
+            pass_now.append((rel, v))
+        else:
+            still.append((rel, "；".join(v["issues"][:2]) or "未过校验", r))
+
+    print(f"🔁 重审历史提案：达标 {len(pass_now)} 篇 · 仍未达标 {len(still)} 篇")
+    if apply_pass and pass_now:
+        checkpoint(root)
+        for rel, v in pass_now:
+            fm, _t, _b, body = load(root / rel)
+            sid = str(fm.get("memory_source") or f"vault:{rel}")
+            v["checks"]["orig_chars"] = len(body)
+            act = apply_canon(root, rel, fm, final[rel]["proposal"], sid, v, "recheck")
+            applied += 1
+            print(f"   ✅ {act}  {rel[:64]}")
+        st = _load_state(root)
+        for rel, _v in pass_now:
+            st.setdefault("done", {})[rel] = {
+                "fp": content_fingerprint(_read(root / rel)), "ts": _now(),
+                "batch": "recheck", "ok": True, "action": "canon-written"}
+        _save_state(root, st)
+        print(f"   已写回 {applied} 篇；建议随后 kb rag index")
+
+    if export:
+        out = root / PROPOSAL_DIR / "REVIEW-NEEDED.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"# 🧑⚖️ 待人工复核的结晶提案（{len(still)} 篇）", "",
+                 f"> 生成 {_now()}　·　这些提案**未写回知识层**，仍在原处等待判断。",
+                 "> 认可某篇：`kb curate judge` 或直接手工把下方草稿合进原笔记；",
+                 "> 不认可：不必处理（下次不会再被自动重跑，见 MAX_ATTEMPTS）。", ""]
+        for rel, why, r in still:
+            prop = r.get("proposal") or {}
+            lines += [f"## {rel}", "",
+                      f"- 未过原因：{why}",
+                      f"- 模型标题：{prop.get('title', '-')}",
+                      f"- 摘要：{prop.get('summary', '-')}",
+                      f"- 取原文：`kb raw show \"{r.get('sid', '')}\"`", "",
+                      "```markdown", render_canon(prop).strip(), "```", ""]
+        out.write_text("\n".join(lines), encoding="utf-8")
+        print(f"   人工清单：{out.relative_to(root)}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name in ("plan", "run", "verify", "report", "review"):
+    for name in ("plan", "run", "verify", "report", "review", "recheck"):
         s = sub.add_parser(name)
         s.add_argument("--root", default=ROOT_DEFAULT)
         if name in ("plan", "run"):
@@ -893,6 +999,10 @@ def main() -> int:
             s.add_argument("--pending", action="store_true")
         if name == "review":
             s.add_argument("--limit", type=int, default=50)
+        if name == "recheck":
+            s.add_argument("--apply-pass", action="store_true", dest="apply_pass",
+                           help="把「按新规则已达标」的提案补写回")
+            s.add_argument("--export", action="store_true", help="导出 REVIEW-NEEDED.md 人工清单")
         s.add_argument("--json", action="store_true", dest="as_json")
     args = ap.parse_args()
     root = Path(args.root)
@@ -907,6 +1017,8 @@ def main() -> int:
         return cmd_report(root, args.as_json)
     if args.cmd == "review":
         return cmd_review(root, getattr(args, "limit", 50), args.as_json)
+    if args.cmd == "recheck":
+        return cmd_recheck(root, getattr(args, "apply_pass", False), getattr(args, "export", False))
     return 1
 
 
