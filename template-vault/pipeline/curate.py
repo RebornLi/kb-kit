@@ -248,6 +248,9 @@ def _already_done(st: Dict[str, Any], rel: str, body: str) -> bool:
     return rec.get("fp") == content_fingerprint(body)
 
 
+MAX_ATTEMPTS = 2      # 一篇最多尝试几次（propose 未过校验允许重试 1 次；error 不无限重跑）
+
+
 def select_batch(root: Path, domain: Optional[str], limit: int,
                  include_done: bool = False) -> List[Dict[str, Any]]:
     """选一批最值得结晶的笔记（只读）。评分依据：长正文、空壳/指针、日志味、低信息量。"""
@@ -268,16 +271,27 @@ def select_batch(root: Path, domain: Optional[str], limit: int,
         if is_index_stub(fm):
             continue                       # 目录页无内容
         layer = str(fm.get("kb_layer", "") or "").strip().lower()
-        if layer == "canon":
-            continue                       # 已是正典
+        if layer in ("canon", "noise"):
+            continue                       # 已是正典 / 已判为噪声，不再重复结晶
+        # 已判定过（raw-only / noise 写回了 curate_verdict）的笔记不再重复送模型：
+        #   否则每轮都会重炼同一批，命中率被稀释（实测第三批 250 篇里 223 篇是重复劳动）
+        if str(fm.get("curate_verdict", "") or "").strip().lower() in ("raw-only", "noise"):
+            continue
+        if str(fm.get("kb_index", "")).strip().lower() in ("false", "no", "0"):
+            continue                       # 显式退出检索的笔记不结晶
         n = len(body.replace("\n", "").strip())
         if n < SMALL_BODY:
             continue                       # 空壳/无信息量
         base = Path(rel).name.split(".")[0]
         if domain and str(fm.get("domain", "")).strip() != domain:
             continue
-        if not include_done and _already_done(st, rel, body):
-            continue
+        if not include_done:
+            if _already_done(st, rel, body):
+                continue
+            # 未通过校验（propose/error）的笔记：允许再试，但不超过 MAX_ATTEMPTS
+            prior = (st.get("done") or {}).get(rel) or {}
+            if int(prior.get("attempts") or 0) >= MAX_ATTEMPTS:
+                continue
         score = 0.0
         if BIG_BODY <= n <= HUGE_BODY:
             score += 3.0                   # 长而有界：结晶收益最高
@@ -709,8 +723,10 @@ def cmd_run(root: Path, domain: Optional[str], limit: int, apply: bool,
         rec = curate_one(root, c["rel"], llm, apply=apply)
         rec["batch"] = batch_id
         rec["secs"] = round(time.time() - t0, 1)
+        prev = (st.get("done") or {}).get(c["rel"]) or {}
         st.setdefault("done", {})[c["rel"]] = {"fp": content_fingerprint(_read(root / c["rel"])),
                                               "ts": _now(), "batch": batch_id,
+                                              "attempts": int(prev.get("attempts") or 0) + 1,
                                               "ok": rec.get("ok"), "action": rec.get("action")}
         recs.append(rec)
         _ledger_append(root, {k: v for k, v in rec.items() if k != "proposal"})
