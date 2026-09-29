@@ -450,6 +450,9 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
         v = str((f or {}).get("value", "") if isinstance(f, dict) else f).strip()
         if not v:
             continue
+        # 溯源 ID 不是"事实"：模型偶尔把 source_ref 混进 facts，不该按未接地计罚
+        if v.startswith(("vault:", "memory/", "openclaw/", "raw/")) or "::" in v:
+            continue
         if re.sub(r"\s+", "", v) in norm_body:
             grounded.append(v)
         else:
@@ -973,7 +976,8 @@ def cmd_recheck(root: Path, apply_pass: bool, export: bool) -> int:
                       f"- 未过原因：{why}",
                       f"- 模型标题：{prop.get('title', '-')}",
                       f"- 摘要：{prop.get('summary', '-')}",
-                      f"- 取原文：`kb raw show \"{r.get('sid', '')}\"`", "",
+                      f"- 取原文：`kb raw show \"{r.get('sid', '')}\"`",
+                      f"- 原记忆 ID：`{r.get('sid', '')}`", "",
                       "```markdown", render_canon(prop).strip(), "```", ""]
         out.write_text("\n".join(lines), encoding="utf-8")
         print(f"   人工清单：{out.relative_to(root)}")
