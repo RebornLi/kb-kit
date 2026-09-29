@@ -343,58 +343,25 @@ def cmd_plan(root: Path, domain: Optional[str], limit: int, as_json: bool) -> in
     return 0
 
 
-# ── 提示词 ──────────────────────────────────────────────────
-SYSTEM = """你是知识库的「结晶器」。你的唯一职责：把原始记录（会话日志/操作流水/碎片）
-炼成**可被检索、可被直接调用**的干净知识。你不是摘要器，你是编辑。
+# ── 提示词：由提示词层（curate_prompt）组装四层结构 ──────────────
+#   L1 契约（reference/kb-schema.json）· L2 规则 · L3 任务 · L4 范文
+#   旧版把这几层揉成一段硬编码文本；现在契约改了提示词自动跟着改。
+from curate_prompt import (build_messages as _build_layered,
+                           build_messages_baseline as _build_baseline)
 
-铁律（违反即失败）：
-1. 只保留有复用价值的内容：结论、依据、可操作步骤、坑与边界条件、决策与理由。
-2. 删掉一切废话：寒暄、过程性冗余、重复表述、"我正在/接下来/好的"、无关的临时进程记录。
-3. 逻辑必须清楚：把内容重排为 结论 → 依据 → 操作 → 坑与边界；同主题合并，不要流水账。
-4. 绝不编造。原文没有的数字/命令/路径/版本，一个字都不许写。
-5. 保留原文中所有关键标识符的**精确写法**（命令、路径、端口、版本号、时长、报错串），
-   一个字都不要改写、不要翻译、不要四舍五入。
-6. 如果原文确实没有可复用知识（只是过程记录），verdict 必须为 "raw-only"，不要硬凑。
-7. 如果原文只是空壳/目录/纯指针（没有实质内容），verdict 为 "noise"。
-8. 如果原文与提供的「已有正典」讲的是同一件事，verdict 为 "merge"，并给出 merge_into。
+PROMPT_STYLE = "baseline"      # baseline（实测更稳）| layered（四层契约结构，A/B 未胜出前不默认）
 
-长度纪律（硬约束，输出一旦超长就会被截断而整篇作废）：
-- sections 每节最多 3 条；每条 ≤ 40 字，只写要点，不复述原文、不写解释性从句。
-- facts 最多 8 条，每条只填标识符本身（命令/路径/版本/端口/时长/报错串），不带句子。
-- dropped 只写 1 条（一句话概括删了什么）。
-- 全文 JSON 控制在 1200 字以内。
 
-只输出一个 JSON 对象，不要任何解释文字。"""
-
-USER_TMPL = """【原文】ID: {sid}
-路径: {rel}
-正文：
-<<<原文开始
-{body}
-原文结束>>>
-
-【已有正典候选（可能同主题，用于判断 merge；没有则为空）】
-{cands}
-
-请按 schema 输出 JSON：
-{{
-  "verdict": "canon | raw-only | noise | merge",
-  "title": "一句话标题（<=30 字，具体，不要泛泛）",
-  "summary": "一句话摘要（<=60 字）",
-  "sections": {{
-    "结论": ["..."],
-    "依据": ["..."],
-    "操作": ["..."],
-    "坑与边界": ["..."]
-  }},
-  "facts": [{{"kind": "cmd|path|version|duration|port|number|error", "value": "原文中出现过的精确串"}}],
-  "sources": ["{sid}"],
-  "dropped": ["你删掉的都是什么类型的内容（一句话）"],
-  "confidence": 0.0,
-  "merge_into": null
-}}
-sections 里没有内容的小节请省略。长度纪律：每节最多 3 条、每条 ≤40 字；facts ≤8 条
-（只填标识符本身）；dropped 只 1 条；整个 JSON ≤1200 字 —— 超长会被截断而整篇作废。"""
+def _build_prompt_messages(root: Path, body: str, fm, sid: str, rel: str):
+    """按档位组装提示词。baseline 与 P0 前生产环境一致；layered 为契约驱动四层。"""
+    if PROMPT_STYLE == "layered":
+        return _build_layered(root, body, fm, sid, rel)
+    try:
+        from curate_prompt import _merge_candidates
+        merge_text = _merge_candidates(root, body)
+    except Exception:
+        merge_text = "（无）"
+    return _build_baseline(body, fm, sid, rel, merge_text=merge_text)
 
 
 def _existing_canon(root: Path, body: str, topk: int = 3) -> List[Dict[str, str]]:
@@ -415,6 +382,91 @@ def _existing_canon(root: Path, body: str, topk: int = 3) -> List[Dict[str, str]
 
 
 # ── 校验（接地 / 守恒 / 引用）────────────────────────────────
+_ID_PATTERNS = (
+    re.compile(r"`([^`\n]{2,60})`"),                       # 反引号包裹的命令/路径/参数
+    re.compile(r"(?:[A-Za-z]:)?(?:/[\w@+-]+){2,6}(?:\.[A-Za-z0-9]{1,6})?"),  # 路径（≥2 段）
+    re.compile(r"\b\d+(?:\.\d+){1,3}\b"),                # 版本号
+    re.compile(r"\b(?:localhost|127\.0\.0\.1|\d{1,3}(?:\.\d{1,3}){3}):\d{2,5}\b"),  # 主机:端口
+    re.compile(r"\b\d+(?:\.\d+)?\s?(?:GB|MB|KB|GiB|MiB|TB|ms|分钟|小时|天)\b"),         # 量纲
+    re.compile(r"\b[a-z][a-z0-9-]{2,30}\.(?:service|py|json|md|sh|sqlite|db|ya?ml)\b"),  # 服务/文件名
+)
+
+# 明确不是"标识符"的东西：表格分隔、列表符号、纯标点、软性短语
+_NOT_ID = re.compile(r"^[\s|\-:+#*>·。，、；：！？()\[\]{}]+$|^(?:默认|可选|必填|无|空|同上|见上)$")
+
+
+def _plausible_id(v: str) -> bool:
+    """判断抽取到的串是否真是"不能丢的标识符"（不是表格行、不是纯标点）。"""
+    v = re.sub(r"^[|\s`]+|[|\s`]+$", "", v.strip())
+    if len(v) < 2 or _NOT_ID.match(v):
+        return False
+    if v.count("|") >= 2:                 # 表格行残留（`| a | b |`）
+        return False
+    if v in ("--apply", "--dry-run"):     # 单独出现的开关太弱，交给命令模式捕获
+        return False
+    if v.startswith("|") or v.endswith("|"):
+        return False
+    return True
+
+
+def _key_identifiers(body: str, cap: int = 40) -> List[str]:
+    """抽取原文里"不能丢"的关键标识符（命令/路径/版本/端口/量纲/常量），去重限量。"""
+    found, seen = [], set()
+    for pat in _ID_PATTERNS:
+        for m in pat.finditer(body or ""):
+            v = (m.group(1) if m.groups() else m.group(0)).strip().strip("`").strip()
+            if not _plausible_id(v) or v in seen:
+                continue
+            seen.add(v)
+            found.append(v)
+            if len(found) >= cap:
+                return found
+    return found
+
+
+_FILLER_WORD = re.compile(r"好的?|收到|明白|稍等|嗯+|继续|没问题|哈哈+|谢谢|OK|okay|got it|好嘞", re.I)
+
+
+def is_filler_line(line: str) -> bool:
+    """是否纯寒暄行：由寒暄词/标点/空白组成，且不含实义内容。"""
+    if "：" in (line or "") or ":" in (line or ""):   # 带冒号 = 有内容标注，不是寒暄
+        return False
+    t = re.sub(r"[\s，。！？、,.!?~;；\-—…]", "", line or "")
+    # 寒暄行必须"几乎全是寒暄词"：去掉寒暄词后所剩无几
+    residue = _FILLER_WORD.sub("", t)
+    return bool(t) and len(t) <= 12 and len(residue) <= 2
+IMPERATIVE_PAT = re.compile(r"^\s*(?:我(?:们)?(?:现在|接下来|先|再)|让我|下面我|接下来我|现在开始)")
+
+
+def _boilerplate_ratio(body: str) -> Dict[str, Any]:
+    """测"废话/冗余"占比：寒暄行 + 指令性开头 + 重复行（≥3 次的短行）。
+
+    这是对"没有废话"这一目标的**直接度量**——比字符压缩比更贴近目标。
+    """
+    lines = [l.strip() for l in str(body or "").splitlines() if l.strip()]
+    if not lines:
+        return {"boilerplate_ratio": 0.0, "boiler_lines": 0, "lines": 0, "dup_lines": 0}
+    from collections import Counter
+    cnt = Counter(l for l in lines if len(l) <= 40)
+    boiler = 0
+    dup = 0
+    for l in lines:
+        if is_filler_line(l) or IMPERATIVE_PAT.match(l):
+            boiler += 1
+        elif len(l) <= 60 and cnt[l] >= 3:
+            dup += 1
+    return {"boilerplate_ratio": round((boiler + dup) / len(lines), 3),
+            "boiler_lines": boiler, "dup_lines": dup, "lines": len(lines)}
+
+
+def load_schema(root: Path) -> Optional[dict]:
+    """读知识契约（P1 起用于页型校验）；缺失 → None（校验降级为不查页型）。"""
+    try:
+        return json.loads((root / "reference" / "kb-schema.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def verify_note(body: str, prop: Dict[str, Any], root: Path,
                 sid: str) -> Dict[str, Any]:
     """对一份提案做确定性校验。返回 {ok, checks, issues, grounded_facts, dropped_facts}。"""
@@ -441,17 +493,25 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
     elif ratio < MIN_RATIO:
         issues.append(f"⚠️压缩偏狠：{ratio:.1%}（目标 ≥{MIN_RATIO:.0%}；原文超长时属正常，请抽检事实完整性）")
     elif ratio > MAX_RATIO:
-        issues.append(f"几乎没压缩：正典/原文 = {ratio:.1%} > {MAX_RATIO:.0%}（等于搬运，不算结晶）")
+        issues.append(f"⚠️压缩偏轻：{ratio:.1%}（目标 ≤{MAX_RATIO:.0%}；若原文本身就是要点清单，"
+                      f"保真优先可以接受——内容是否靠谱由接地关与覆盖关判定）")
 
-    # 接地关：facts 逐条回原文核对（精确子串，允许空白归一）
+    # 接地关：facts 逐条回原文核对（精确子串，允许空白归一），并按 kind 分型
     norm_body = re.sub(r"\s+", "", body)
-    grounded, dropped = [], []
+    grounded, dropped, inferred = [], [], []
     for f in (prop.get("facts") or []):
-        v = str((f or {}).get("value", "") if isinstance(f, dict) else f).strip()
+        if isinstance(f, dict):
+            v = str(f.get("value", "")).strip()
+            kind = str(f.get("kind", "verbatim") or "verbatim").strip().lower()
+        else:
+            v, kind = str(f).strip(), "verbatim"
         if not v:
             continue
         # 溯源 ID 不是"事实"：模型偶尔把 source_ref 混进 facts，不该按未接地计罚
         if v.startswith(("vault:", "memory/", "openclaw/", "raw/")) or "::" in v:
+            continue
+        if kind == "inferred":
+            inferred.append(v)          # 推断项：登记但不计入接地分母（必须在正文标 ^[推断]）
             continue
         if re.sub(r"\s+", "", v) in norm_body:
             grounded.append(v)
@@ -460,10 +520,56 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
     checks["facts_total"] = len(grounded) + len(dropped)
     checks["facts_grounded"] = len(grounded)
     checks["facts_dropped"] = dropped
+    checks["facts_inferred"] = inferred
+    checks["ground_rate"] = round(len(grounded) / max(len(grounded) + len(dropped), 1), 3)
     if dropped:
         issues.append(f"未接地事实 {len(dropped)} 条已丢弃：{dropped[:5]}")
     if (len(grounded) + len(dropped)) >= 3 and not grounded:
         issues.append("全部 facts 都无法在原文中找到 → 疑似编造，建议人工复核")
+    if inferred:
+        # 推断项必须在正文打标记，否则读者无法区分「原文有」与「模型想」
+        missing = [v for v in inferred if "^[推断]" not in canon]
+        issues.append(f"⚠️含 {len(inferred)} 条推断事实（正文需带 ^[推断] 标记）"
+                      + ("，当前正文缺少标记" if missing else ""))
+
+    # 页型关：按契约检查必填节（缺必填节 → 硬失败；节名不在契约里 → 警告）
+    pt = str(prop.get("page_type") or "").strip()
+    if pt:
+        schema = load_schema(root)
+        pt_def = ((schema or {}).get("page_types") or {}).get(pt) or {}
+        req = pt_def.get("required_sections") or []
+        allowed = set((pt_def.get("required_sections") or []) + (pt_def.get("optional_sections") or []))
+        secs = set((prop.get("sections") or {}).keys())
+        checks["page_type"] = pt
+        checks["missing_sections"] = [s for s in req if s not in secs]
+        checks["extra_sections"] = sorted(secs - allowed) if allowed else []
+        if checks["missing_sections"]:
+            issues.append(f"缺页型必填节 {checks['missing_sections']}（契约页型 `{pt}`）")
+        if checks["extra_sections"]:
+            issues.append(f"⚠️节名不在契约内：{checks['extra_sections']}")
+
+    # 蒸馏关（P1）：原文里的废话/冗余，被删掉多少？——直接对应"没有废话"这个目标
+    bp = _boilerplate_ratio(body)
+    checks.update({f"src_{k}": v for k, v in bp.items()})
+    if bp["lines"] >= 8 and bp["boilerplate_ratio"] >= 0.05:
+        keep = 1.0 - bp["boilerplate_ratio"]
+        if keep > 1.0 - bp["boilerplate_ratio"] * 0.8:      # 几乎没删
+            issues.append(f"⚠️废话未清：原文 {bp['boiler_lines']} 行寒暄/指令语 + "
+                          f"{bp['dup_lines']} 行重复（占 {bp['boilerplate_ratio']:.0%}），正典应把这些删掉")
+
+    # 覆盖关（P1）：用"原文关键标识符被正典覆盖的比例"代替"字符数守恒"。
+    #   字符守恒 ≠ 信息守恒；标识符（命令/路径/端口/版本/数字/报错串）才是真正不能丢的东西。
+    ids = _key_identifiers(body)
+    if ids:
+        covered = [x for x in ids if x in canon]
+        checks["identifiers_total"] = len(ids)
+        checks["identifiers_covered"] = len(covered)
+        checks["coverage"] = round(len(covered) / len(ids), 3)
+        missing = [x for x in ids if x not in covered]
+        if len(ids) >= 8 and len(covered) / len(ids) < 0.6:
+            issues.append(f"⚠️标识符覆盖偏低：{len(covered)}/{len(ids)}（<60%）漏掉：{missing[:6]}")
+    else:
+        checks["coverage"] = None
 
     # 引用关：sources 必须指向可达的原记忆
     srcs = [str(s).strip() for s in (prop.get("sources") or []) if str(s).strip()]
@@ -471,7 +577,7 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
     if not srcs:
         issues.append("未给出 sources（无法回溯原记忆）")
 
-    hard_kw = ("过度压缩", "几乎没压缩", "未给出 sources", "全部 facts")
+    hard_kw = ("过度压缩", "未给出 sources", "全部 facts", "缺页型必填节")
     hard = [i for i in issues if i.startswith(hard_kw)]
     warn = [i for i in issues if i not in hard]
     return {"ok": not hard, "issues": issues, "warnings": warn, "checks": checks,
@@ -506,6 +612,7 @@ def _canon_fm(rel: str, fm: Dict[str, Any], prop: Dict[str, Any],
     out = dict(fm)
     out.update({
         "kb_layer": "canon",
+        "canon_type": str(prop.get("page_type") or "canon-generic"),
         "kb_summary": str(prop.get("summary") or prop.get("title") or "")[:160],
         "title": str(prop.get("title") or "")[:120] or fm.get("title", Path(rel).stem),
         "updated": datetime.date.today().isoformat(),
@@ -527,18 +634,15 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
     p = root / rel
     fm, text, block, body = load(p)
     sid = str(fm.get("memory_source") or f"vault:{rel}")
-    cands = _existing_canon(root, body)
-    cand_txt = "\n".join(f"- {c['rel']}（相似度 {c['sim']}）：{c['excerpt'][:200]}"
-                         for c in cands) or "（无）"
-    payload = USER_TMPL.format(sid=sid, rel=rel, body=body[:12000], cands=cand_txt)
-    prop, note = llm.ask_json([{"role": "system", "content": SYSTEM},
-                               {"role": "user", "content": payload}], max_tokens=4096)
+    msgs = _build_prompt_messages(root, body, fm, sid, rel)
+    payload = msgs[-1]["content"]
+    prop, note = llm.ask_json(msgs, max_tokens=4096)
     # 被 max_tokens 截断（且括号补齐也没救回来）→ 就地重试一次，明确要求更紧凑
     if prop is None and "截断" in str(note):
         retry = (payload + "\n\n【重要】上次输出超长被截断而作废。本次必须极紧凑："
                  "sections 每节最多 2 条、每条不超过 30 字；facts 最多 6 条（只填标识符本身）；"
                  "dropped 只 1 条；整个 JSON 不超过 800 字。")
-        prop2, note2 = llm.ask_json([{"role": "system", "content": SYSTEM},
+        prop2, note2 = llm.ask_json([{"role": "system", "content": msgs[0]["content"]},
                                      {"role": "user", "content": retry}], max_tokens=4096)
         if prop2 is not None:
             prop, note = prop2, note2
@@ -998,6 +1102,8 @@ def main() -> int:
             s.add_argument("--model", default=None)
             s.add_argument("--max-seconds", type=int, default=0, dest="max_seconds",
                            help="单轮时间预算（秒）；到时停止，剩余留给下次 cron")
+            s.add_argument("--prompt", choices=("baseline", "layered"), default="baseline",
+                           help="提示词档位：baseline（默认，实测更稳）| layered（四层契约结构）")
         if name == "verify":
             s.add_argument("--batch", default=None)
             s.add_argument("--pending", action="store_true")
@@ -1013,6 +1119,8 @@ def main() -> int:
     if args.cmd == "plan":
         return cmd_plan(root, args.domain, args.limit, args.as_json)
     if args.cmd == "run":
+        global PROMPT_STYLE
+        PROMPT_STYLE = getattr(args, "prompt", "baseline")
         return cmd_run(root, args.domain, args.limit, args.apply, args.model, args.as_json,
                        max_seconds=getattr(args, "max_seconds", 0))
     if args.cmd == "verify":

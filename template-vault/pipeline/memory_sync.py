@@ -298,12 +298,22 @@ def ledger_append(root, entry):
         sys.stderr.write("⚠️ ledger-write-skipped: %s\n" % e)
 
 
+def _semantic_status(semantic: bool) -> str:
+    """语义五问可用性一句话说明（缺 key 时明确告知，不静默降级）。"""
+    if not semantic:
+        return "语义五问：关闭（纯关键词门禁）"
+    if not os.environ.get("ORNITH_API_KEY"):
+        return "⚠️ 语义五问：已请求但不可用（未设 ORNITH_API_KEY）→ 本轮退回关键词门禁"
+    return "语义五问：开启（本地模型判 ①根因②泛化③持久）"
+
+
 def do_review(root, density_thr, min_chars, semantic):
     vocab, idf, rel2vec, meta_all = load_index(root)
     state = load_state(root)
     promoted = state.get("promoted", {})
     mems = memory_files(root)
     print(f"🔍 记忆源 {len(mems)} 条 · 硬门槛 密度≥{density_thr} 长度≥{min_chars} 新颖(顶sims<{NOVEL_SIM})")
+    print(f"   {_semantic_status(semantic)}")
     if not mems:
         print("  （无 memory/ 源——记忆同步无输入，数据源到位后自动生效）")
     for rel, _, fm, body in mems:
@@ -328,6 +338,7 @@ def do_promote(root, density_thr, min_chars, semantic, dry_run=False):
     vocab, idf, rel2vec, meta_all = rel2vec_v
     state = load_state(root)
     promoted = state.setdefault("promoted", {})
+    print(f"   {_semantic_status(semantic)}")
     if dry_run:
         print("🔍 dry-run（只预览将晋升的笔记与目标路径，不写盘、不 commit）")
     else:
@@ -419,11 +430,16 @@ def main():
     r = sub.add_parser("review"); r.add_argument("--root", default=ROOT_DEFAULT)
     r.add_argument("--density", type=float, default=DEFAULT_DENSITY)
     r.add_argument("--min-chars", type=int, default=MIN_CHARS_DEFAULT)
-    r.add_argument("--semantic", action="store_true")
+    r.add_argument("--semantic", action="store_true", default=True,
+                   help="语义五问（默认开：本地模型判 ①根因②泛化③持久；用 --no-semantic 关）")
+    r.add_argument("--no-semantic", action="store_false", dest="semantic",
+                   help="关闭语义五问，退回纯关键词门禁")
     pr = sub.add_parser("promote"); pr.add_argument("--root", default=ROOT_DEFAULT)
     pr.add_argument("--density", type=float, default=DEFAULT_DENSITY)
     pr.add_argument("--min-chars", type=int, default=MIN_CHARS_DEFAULT)
-    pr.add_argument("--semantic", action="store_true")
+    pr.add_argument("--semantic", action="store_true", default=True,
+                    help="语义五问（默认开；--no-semantic 关）")
+    pr.add_argument("--no-semantic", action="store_false", dest="semantic")
     pr.add_argument("--apply", action="store_true",
                     help="真正写盘（默认 dry-run：只预览将晋升的笔记）")
     args = ap.parse_args()
