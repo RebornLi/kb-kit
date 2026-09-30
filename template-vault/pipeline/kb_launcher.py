@@ -100,6 +100,12 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("contradict", "scan"):   ("contradict", "scan"),
     ("contradict", "apply"):  ("contradict", "apply"),
 
+    # P4：评测
+    ("eval", None):        ("eval", "run"),
+    ("eval", "run"):       ("eval", "run"),
+    ("eval", "gold"):      ("eval", "gold"),
+    ("eval", "compare"):   ("eval", "compare"),
+
     # 原记忆可达性（证据层按需调用）
     ("raw", None):         ("raw", "list"),
     ("raw", "list"):       ("raw", "list"),
@@ -368,6 +374,12 @@ class KBLauncher:
         print("  kb decay                  原则性遗忘审计（只降层，从不删文件）")
         print("  kb contradict scan        矛盾扫描（区分真冲突 / 近似重复）")
         print("  kb contradict apply       把冲突标注写进两篇 + 入人工队列")
+        print("")
+        print("评测（P4）:")
+        print("  kb eval run               RAGAS 式四指标评测（本地模型当裁判）")
+        print("  kb eval gold --generate   生成 ground truth 草稿（30 题）")
+        print("  kb eval gold --review     逐题人工确认（交互式）")
+        print("  kb eval compare --baseline F  指标对比")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")
