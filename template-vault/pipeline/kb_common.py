@@ -421,12 +421,19 @@ GENERATED_REPORTS = {
 
 
 def is_generated_report(rel) -> bool:
-    """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（结晶提案目录）。"""
+    """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（审计/提案目录）。
+
+    注：`_MOC.md` / `_INDEX.md` 属于生成产物（语义不变）。
+    但它们是**知识导航**、最容易积累悬空链接，所以**死链巡检单独把它们纳入**
+    （见 kb-healthcheck 的 NAV_FILES），而不是改这里的语义。
+    """
     if Path(str(rel)).name in GENERATED_REPORTS:
         return True
     # 结晶提案（_curate/b*.md）与审计产物（_audit/*.md 含 log.md）：人读产物，不是知识笔记
     _parts = [str(x) for x in Path(str(rel)).parts[:-1]]
-    return "_curate" in _parts or "_audit" in _parts
+    if "_curate" in _parts or "_audit" in _parts:
+        return True
+    return False
 
 
 # ── 归档生命周期：别名重定向 + lineage（合并/去重可回溯，旧链接不失效）──

@@ -63,6 +63,10 @@ NOISE_TAGS = {"", "-", "ai", "gent", "2", "august-", "a", "an"}
 REPORT_NAMES = {"intake_triage.md", "link_suggestions.md", "recall_deck.md",
                 "feedback_hits.md", "recall_schedule.md", "_INDEX.md"}
 
+# 知识导航文件：`is_generated_report` 会把它们排除，但**死链巡检必须包含它们**
+#   （它们最容易积累悬空链接；修前 healthcheck 因此漏报 15 条死链，还误报成 0）。
+NAV_FILES = {"_MOC.md", "_INDEX.md"}
+
 
 def collect_md(root):
     """用 os.walk + EXCLUDE 遍历，避免 glob(**) 递归过深且无法排除目录。"""
@@ -176,10 +180,11 @@ def is_absent(raw_path, stems, titles, root):
     # 3) 作为目录（MOC）
     if full.is_dir():
         return False
-    # 4) 裸名跨命名空间（无 /）→ 按基名在内容层匹配
-    if "/" not in raw_path:
-        return raw_path not in stems
-    return True
+    # 4) 跨命名空间匹配：Obsidian 解析双链时**全库按文件名匹配**，不要求路径完全一致。
+    #   修前对含 `/` 的路径直接 `return True`（= 认为"不算缺失"）→ 结构性漏报：
+    #   `[[数据库/SQL优化]]` 这种"目录前缀写错但文件名对不上"的链接永远不会被报出来
+    #   （实测漏报 15 条，且 healthcheck 报 0 而 kb audit 报 15，两工具结论相反）。
+    return Path(raw_path).stem not in stems
 
 
 def check_deadlinks(root):
@@ -190,10 +195,11 @@ def check_deadlinks(root):
     NOISE_LINKS = ("reply_to:", "双向链接", "双链", "双链接", "wikilink", "…", "...", "$# -gt", "[[#", "[[...")
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
+        _nav = Path(rel).name in NAV_FILES
         if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
                 or rel.startswith("raw/") or rel.startswith("90-归档")
-                or "/kb-kit/" in rel or is_generated_report(rel)):
-            continue  # 模板/嵌套仓/raw 来源/归档/生成产物：不参与死链统计
+                or "/kb-kit/" in rel or is_generated_report(rel)) and not _nav:
+            continue  # 模板/嵌套仓/raw 来源/归档/生成产物：不参与死链统计（导航文件除外）
         content = fp.read_text(encoding="utf-8", errors="replace")
         for m in re.finditer(r"\[\[([^]]+)\]\]", content):
             raw = m.group(1)
@@ -397,7 +403,9 @@ def check_orphans(root):
 
 def check_overlong(root):
     """超长未分块笔记（正文 >2000 字，§3.3 颗粒度建议上限）。
-    与 clean.py/validate.py 的 BODY_LIMIT=2000 一致。"""
+
+    与 clean.py/validate.py 的 BODY_LIMIT=2000 一致。
+    """
     BODY_LIMIT = 2000
     over = []
     for fp in collect_md(root):
@@ -406,6 +414,9 @@ def check_overlong(root):
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or is_generated_report(rel)):
             continue  # 模板/raw 来源/归档/生成产物：不参与颗粒度巡检
+        # 导航清单（_MOC/_INDEX）天生就该长（按 domain 列全部笔记），分块会破坏导航用途
+        if Path(rel).name in NAV_FILES:
+            continue
         text = fp.read_text(encoding="utf-8", errors="replace")
         fm, body = parse_frontmatter(text)
         if is_source_note(fm):

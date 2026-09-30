@@ -37,6 +37,27 @@ AUDIT_DIR = Path("70-知识治理 Governance") / "_audit"
 
 
 # ── 采样：一次遍历收集所有需要的东西 ────────────────────────
+def all_aliases(root: Path) -> set:
+    """收集全库 frontmatter 的 aliases（Obsidian 语义：alias 也能被 [[...]] 解析）。"""
+    out = set()
+    for p in root.rglob("*.md"):
+        if ".git" in p.parts:
+            continue
+        try:
+            head = p.read_text(encoding="utf-8", errors="ignore")[:1200]
+        except OSError:
+            continue
+        m = re.search(r"^aliases:\s*(.+)$", head, re.M)
+        if not m:
+            continue
+        raw = m.group(1).strip().strip("[]")
+        for x in re.split(r"[,\s]+", raw):
+            x = x.strip().strip("'\"")
+            if x:
+                out.add(x)
+    return out
+
+
 def all_stems(root: Path) -> set:
     """全库所有 md 的 stem（**含 raw/ 与 raw/_curated/**）。
 
@@ -64,7 +85,9 @@ def sample(root: Path) -> Dict[str, Any]:
         fm, text, _b, body = load(p)
         heads = [l.strip() for l in body.splitlines() if l.strip().startswith("-")]
         inferred = sum(1 for l in heads if "^[推断]" in l)
-        links = set(re.findall(r"\[\[([^\]|#]+)", body))
+        # `[[目标]]` / `[[目标|别名]]` / `[[目标#锚点]]` → 取"目标"部分。
+        #   修前把 `数据库/数据库索引|索引优化` 整串当目标 → 误报死链（实测 10 条）。
+        links = {m.group(1).strip() for m in re.finditer(r"\[\[([^\]|#]+)", body)}
         notes[rel] = {
             "rel": rel, "fm": fm, "text": text, "body": body,
             "layer": kb_layer_of(fm, rel), "tags": _tags(fm),
@@ -170,6 +193,12 @@ def check_structure(root: Path, notes) -> Dict[str, List[Dict[str, Any]]]:
     dead, orphans = [], []
     PLACEHOLDER = {"关联笔记", "相关笔记", "相关", "关联", "见", "X", "名称", "链接",
                    "wikilink", "path", "link", "note.md", "页面名"}
+    # Obsidian 双链按**全库 stem** 解析，不限于同目录或全路径写法。
+    #   修前只查 notes(知识层) + exist(全库 stem) 但漏了"同目录相对路径"以外的情况，
+    #   导致 [[兄弟笔记]] 这类合法链接被误报死链（实测误报 9 条，恰好是我自己补的结构链接）。
+    # Obsidian 解析双链时 **aliases 也算**（`[[🔧-技术索引]]` 由 `_MOC.md` 的 aliases 提供）。
+    #   不认 aliases 会误报死链（实测 3 条）。
+    exist_stems = {Path(x).stem for x in exist} | all_aliases(root)
     for rel, n in notes.items():
         for l in n["links"]:
             if l in PLACEHOLDER or l.strip() in PLACEHOLDER:
@@ -177,8 +206,12 @@ def check_structure(root: Path, notes) -> Dict[str, List[Dict[str, Any]]]:
             key = Path(l).stem
             if key in stems:
                 inbound[stems[key]] += 1
-            elif key in exist or (root / (l if l.endswith(".md") else l + ".md")).exists():
-                pass                      # 指向证据层/归档：存在，不是死链
+            elif key in exist_stems or key in exist:
+                pass                      # 全库任意位置存在该笔记 → 不是死链
+            elif (root / (l if l.endswith(".md") else l + ".md")).exists():
+                pass
+            elif (root / rel).parent.joinpath(l if l.endswith(".md") else l + ".md").exists():
+                pass                      # 同目录相对路径
             else:
                 dead.append({"rel": rel, "target": l})
     PLACEHOLDER = {"关联笔记", "相关笔记", "相关", "关联", "见", "X", "名称", "链接",
@@ -411,11 +444,22 @@ def cmd_fix(root: Path, confirm: bool, only: Optional[str]) -> int:
                     new = new.replace(f"[[{a['target']}]]",
                                       f"{a['target']} <!-- 悬空链接：无唯一匹配 -->")
             elif a["kind"] in ("deadlink", "deadlink_annotate"):
+                # 用正则**只替换 wikilink 内部**，且兼容 `[[路径|别名]]` 形式。
+                #   修前的 `str.replace(f"[[{tgt}]]", ...)` 有两个坑：
+                #     ① 不认 `[[路径|别名]]` → 该注释的没注释掉；
+                #     ② 子串误伤 → `[[🔧-技术索引]]` 里的 `[[🔧-技术索引]]` 被替换成
+                #        `[[[索引]]`（实测损坏了 4 个 _INDEX 文件的那一行）。
+                tgt = str(a["target"]).strip()
                 if a["action"].startswith("改写为"):
-                    new = new.replace(f"[[{a['target']}]]", f"[[{a['action'][5:-2]}]]")
+                    repl = f"[[{a['action'][5:-2]}]]"
                 else:
-                    new = new.replace(f"[[{a['target']}]]",
-                                      f"{a['target']} <!-- broken link: no match -->")
+                    repl = f"{tgt} <!-- broken link: no match -->"
+                # `[[tgt]]` 或 `[[tgt|alias]]`；tgt 里的字符做转义，避免正则元字符
+                # 匹配 `[[目标]]` 或 `[[目标|别名]]` 的**整体**（别名部分直到 `]]` 结束）。
+                #   上一版写成 `(\|[^\]]*)?\]\]` → 别名组只吃一个 `]`，永远匹配不上，
+                #   于是"标注死链"静默改了 0 个文件（看起来成功、其实什么都没做）。
+                pat = re.compile(r"\[\[" + re.escape(tgt) + r"(?:\|[^\]]*)?\]\]")
+                new = pat.sub(lambda m: repl, new)
         if new != text:
             p.write_text(new, encoding="utf-8")
             touched.append(rel); done += 1
