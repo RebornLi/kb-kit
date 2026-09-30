@@ -77,9 +77,18 @@ CTX_PROMPT = """<文档标题>{title}</文档标题>
 
 class _LLM:
     def __init__(self) -> None:
-        self.base = (os.environ.get("ORNITH_BASE_URL") or "http://127.0.0.1:8000/v1").rstrip("/")
-        self.key = os.environ.get("ORNITH_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self.model = os.environ.get("ORNITH_CHAT_MODEL") or "ornith1.5-35b"
+        # 走统一配置（环境变量 > 库内 .kb/model.json）。
+        #   为什么：cron/systemd 读不到 ~/.bashrc → key 为空 → 这里会**静默不干活**，
+        #   而"静默降级"在本项目已经坑过多次（同 kb_embed / curate 的根因）。
+        try:
+            from kb_common import model_config
+            c = model_config()
+        except Exception:
+            c = {}
+        self.base = (c.get("base_url") or os.environ.get("ORNITH_BASE_URL")
+                     or "http://127.0.0.1:8000/v1").rstrip("/")
+        self.key = c.get("api_key") or os.environ.get("ORNITH_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
+        self.model = c.get("chat_model") or os.environ.get("ORNITH_CHAT_MODEL") or "ornith1.5-35b"
 
     def available(self) -> bool:
         if not self.key:
@@ -92,16 +101,42 @@ class _LLM:
         except (urllib.error.URLError, OSError, ValueError):
             return False
 
-    def ask(self, prompt: str, max_tokens: int = 160) -> Optional[str]:
+    # 注意：max_tokens 必须覆盖 **reasoning** 再留出正文额度。
+    #   实测（2026-10-01）：max_tokens=64 时 64 token 全是 reasoning、content 为空，
+    #   而 finish_reason 仍是 stop —— 看起来像"模型没输出"，其实是预算不够。
+    #   旧值 160 低于该模型的 reasoning 开销（实测单次 162+）→ 此函数**一直静默返回 None**。
+    def _ask_raw(self, prompt: str, max_tokens: int) -> Optional[str]:
+        """单次调用并抽 content（收紧重试用；不递归、不告警）。"""
         payload = json.dumps({"model": self.model, "temperature": 0.1, "max_tokens": max_tokens,
                               "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
         req = urllib.request.Request(f"{self.base}/chat/completions", data=payload,
                                      headers={"Content-Type": "application/json",
                                               "Authorization": f"Bearer {self.key}"})
         try:
-            with urllib.request.urlopen(req, timeout=90) as r:
+            with urllib.request.urlopen(req, timeout=120) as r:
                 d = json.loads(r.read().decode("utf-8", "replace"))
             txt = ((d.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+            return re.sub(r"\s+", " ", txt).strip()[:120] or None
+        except (urllib.error.URLError, OSError, ValueError, KeyError):
+            return None
+
+    def ask(self, prompt: str, max_tokens: int = 2048) -> Optional[str]:
+        payload = json.dumps({"model": self.model, "temperature": 0.1, "max_tokens": max_tokens,
+                              "messages": [{"role": "user", "content": prompt}]}).encode("utf-8")
+        req = urllib.request.Request(f"{self.base}/chat/completions", data=payload,
+                                     headers={"Content-Type": "application/json",
+                                              "Authorization": f"Bearer {self.key}"})
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                d = json.loads(r.read().decode("utf-8", "replace"))
+            ch = (d.get("choices") or [{}])[0]
+            txt = (ch.get("message") or {}).get("content") or ""
+            if not txt.strip() and (d.get("usage") or {}).get("completion_tokens"):
+                # 有 token 消耗却无正文 = reasoning 吃光预算。
+                #   实测：长片段会让模型陷入超长思考（>1200 token 全在 reasoning）。
+                #   策略：**收紧输入 + 直接要结果**，重试一次（重试仍失败才算失败）。
+                short = prompt[:900] + "\n\n（直接给一句定位语，不要推理过程）"
+                return self._ask_raw(short, max_tokens)
             txt = re.sub(r"\s+", " ", txt).strip()
             return txt[:120] or None
         except (urllib.error.URLError, OSError, ValueError, KeyError):

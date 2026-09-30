@@ -112,6 +112,11 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("audit", "fix"):      ("audit", "fix"),
     ("audit", "log"):      ("audit", "log"),
 
+    # P2/P5：上下文强化（LLM 上下文为可选增强）
+    ("contextual", None):    ("contextual", "build"),
+    ("contextual", "build"): ("contextual", "build"),
+    ("contextual", "show"):  ("contextual", "show"),
+
     # 原记忆可达性（证据层按需调用）
     ("raw", None):         ("raw", "list"),
     ("raw", "list"):       ("raw", "list"),

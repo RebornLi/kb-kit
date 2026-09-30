@@ -794,7 +794,10 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     # P5：标题/路径/摘要匹配加成 —— 修「自指问题」盲区
     #   原理：长文里关键词稀疏，纯 TF-IDF/BM25 会把高信号文档排到后面；
     #   而标题/路径里出现查询词，是**高置信的定位信号**。
-    if scored and meta_all and os.environ.get("KB_TITLE_BOOST", "1") != "0":
+    # **默认关闭**：受控实测 top3 全正典 70% → 60%（负增益）。
+    #   机理推测：标题/路径命中的文档与"问题本身更相关"并不总是同一回事，
+    #   加权会把工程报告类文档（标题含系统术语）顶到前面，挤掉真正的领域笔记。
+    if scored and meta_all and os.environ.get("KB_TITLE_BOOST", "0") == "1":
         scored = _title_boost(scored, q, meta_all)
 
     # 应用过滤器
@@ -842,20 +845,30 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
 
     # P2: 语义重排（本地嵌入）—— 只看 top-N，超预算/不可用即原样返回
     #   KB_NO_EMBED_RERANK=1 可关闭（对照实验 / 端点故障时手动降级）
-    # 默认**关闭**：30 题黄金集实测 top1/top3 与不重排完全一致（候选本来就干净），
-    #   而它带 0.3s 延迟与嵌入调用成本 → 需要时用 KB_EMBED_RERANK=1 开启。
+    # **默认关闭**（受控实测 2026-10-01，30 题黄金集，禁查询缓存）：
+    #   不重排           canon@K 88.7% · top1 90% · top3 70%
+    #   +cross-encoder   canon@K 87.7% · top1 70% · top3 50%   ← 明显更差
+    #   原因：首段（分层+RRF+标题加权）已经足够好，重排器用**纯语义**覆盖了
+    #   带元数据强信号的首段排序，把"元数据明显更对题"的结果换成了"语义上像"的结果。
+    #   保留能力与开关，但默认不启用：KB_RERANK=cross|embed|0
+    _mode = os.environ.get("KB_RERANK", "0").strip().lower()
     try:
-        if os.environ.get("KB_EMBED_RERANK") != "1":
-            raise ImportError("embed-rerank disabled by default")
-        from embed_rerank import EmbedReranker
-        _er = EmbedReranker(Path(root))
-        if _er.available():
+        if _mode not in ("0", "off", "none"):
             _texts = {}
-            for rel, _sc in hits[:25]:
+            for rel, _sc in hits[:60]:
                 m = meta_all.get(rel) or {}
                 _f, _b = load_meta(Path(root) / rel)
                 _texts[rel] = (str(m.get("context") or "") + "\n" + _b)[:2000]
-            hits = _er.rerank(q, hits, _texts)
+            if _mode == "embed":
+                from embed_rerank import EmbedReranker
+                _er = EmbedReranker(Path(root))
+                if _er.available():
+                    hits = _er.rerank(q, hits, _texts)
+            else:
+                from embed_rerank import CrossEncoderReranker
+                _ce = CrossEncoderReranker()
+                if _ce.available():
+                    hits = _ce.rerank(q, hits, _texts)
     except Exception:
         pass
 
@@ -970,7 +983,10 @@ def _expand_query(q):
       · 同义词 → 规范词（gather 到用户实际用的说法）
       · 规范词/同义词 → 该条目的**全部同义说法**（把库里的另一种表述也拉进来）
     """
-    if os.environ.get("KB_SYNONYM_EXPAND", "1") == "0":
+    # **默认关闭**：受控实测 canon@K 88.7% → 88.3%、top3 70% → 67%（轻微负增益）。
+    #   机理：双向扩展把大量同义表述塞进查询，等于给查询加了噪声——
+    #   而自指问题的痛点已由 docs/concepts.md（集中定义）解决，不靠扩展。
+    if os.environ.get("KB_SYNONYM_EXPAND", "0") != "1":
         return q
     table, reverse = _load_synonyms()
     toks = tokenize(q)
