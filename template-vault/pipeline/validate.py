@@ -10,7 +10,8 @@
 import argparse, os, re, sys, json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, is_generated_report
+from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, is_generated_report,
+                       is_index_stub)
 
 ENUM_STATUS  = {"draft", "active", "stable", "legacy", "archived"}
 REQUIRED = ["tags", "status", "domain", "created", "updated", "importance"]
@@ -126,7 +127,24 @@ def validate_file(path: Union[str, Path]) -> Tuple[List[str], List[str], Dict[st
     rel = str(path)
     is_chunk = bool(fm.get("chunk_of") or fm.get("chunk")) or bool(
         re.search(r"-(p\d+|c\d+|index)\.md$", rel))
-    is_scoped_out = ("raw/" in rel or "/90-归档" in rel or rel.startswith("90-归档")
+    # 颗粒度建议只针对"可再切分的知识笔记"。
+    #   以下不受约束：raw/(证据保真) · memory/(Agent 日志) · docs/(人写交付文档，分块会毁可读性)
+    #   · 导航清单 _MOC/_INDEX(天生是长清单) · 归档 · 生成产物
+    # 用**路径无关**判定：rel 可能是绝对路径（实测如此），
+    #   用 startswith("docs/") 永远不命中 → 豁免失效（改了两轮都没生效的根因）。
+    _parts = set(Path(rel).parts)
+    is_scoped_out = ("raw" in _parts or "memory" in _parts or "docs" in _parts
+                     or any(str(x).startswith("90-") for x in _parts)
+                     or Path(rel).name in ("_MOC.md", "_INDEX.md")
+                     # 目录分派页（tags 含 toc / is_chunk_index，正文是指向子块的指针清单）
+                     #   与 _MOC 同类：天生很长，分块会毁掉分派用途。
+                     #   注意：不能只靠 is_index_stub——它要求 chunk_of，而分派页未必有该字段
+                     #   （实测 部署运维.md 就是 tags:[toc] + 83 条指针，is_index_stub=False）。
+                     # 用 g("tags")（它已把 `[toc]` 字符串解析成列表）；
+                     #   fm.get("tags") 是**原始字符串**，直接遍历会变成逐字符比较（踩过）
+                     or "toc" in [str(t).strip().lower() for t in (g("tags") or [])]
+                     or str(fm.get("is_chunk_index", "")).strip().lower() in ("true", "yes", "1")
+                     or is_index_stub(fm, body)
                      or is_generated_report(rel))
     if (len(body.replace("\n", "")) > BODY_LIMIT and not is_src
             and not is_chunk and not is_scoped_out):
