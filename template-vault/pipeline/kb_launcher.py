@@ -112,6 +112,11 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("audit", "fix"):      ("audit", "fix"),
     ("audit", "log"):      ("audit", "log"),
 
+    # P6：标签越界治理
+    ("tagfix", None):      ("tagfix", "scan"),
+    ("tagfix", "scan"):    ("tagfix", "scan"),
+    ("tagfix", "fix"):     ("tagfix", "fix"),
+
     # P2/P5：上下文强化（LLM 上下文为可选增强）
     ("contextual", None):    ("contextual", "build"),
     ("contextual", "build"): ("contextual", "build"),
@@ -397,6 +402,10 @@ class KBLauncher:
         print("  kb audit fix              预览可安全修复的动作（dry-run）")
         print("  kb audit fix --confirm    确认后落盘（不含合并/删除）")
         print("  kb audit log              审计历史与修复日志")
+        print("")
+        print("标签治理（P6）:")
+        print("  kb tagfix scan            扫三类越界（路径型/别名型/未收录）")
+        print("  kb tagfix fix [--apply]   治理（默认 dry-run）")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")

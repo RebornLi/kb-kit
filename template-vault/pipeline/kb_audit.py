@@ -255,6 +255,62 @@ def cmd_scan(root: Path, as_json: bool, limit: int) -> int:
 
 
 # ── fix：只做安全动作，且必须 --confirm ─────────────────────
+def _link_block(parent: str, siblings: List[str], me: str) -> str:
+    """为孤立笔记生成"结构补链"区块（父文档 + 同族兄弟）。"""
+    lines = ["", "<!-- 结构补链（kb audit 生成，可人工移除） -->"]
+    if parent:
+        lines.append(f"[[{Path(parent).stem}]] ← 所属文档")
+    sibs = [x for x in siblings if x != me][:8]
+    if sibs:
+        lines.append("同族： " + " · ".join(f"[[{Path(x).stem}]]" for x in sibs))
+    return "\n".join(lines) + "\n"
+
+
+def _safe_fix_actions_orphans(root: Path, notes) -> List[Dict[str, Any]]:
+    """为**分块族内**的孤立笔记补结构链接（父文档 + 同族兄弟）。
+
+    严格判据（第一版踩过坑，必须记住）：
+      · **只处理真正的分块族**：要求 `parent_of(rel)` 能解析出父文档（有 `chunk_of`
+        或文件名 `-pN` 链）。非分块笔记**不补**——按"文件名相同"去连会把
+        `README-p2.md` 连到 `README.md`、把 `测试-p2.md` 连到 `测试.md` 这类无关文档，
+        第一版就是这么误伤 48 个文件的（还写出了 `同族： [[README]] · [[README]]` 的自链）。
+      · **排除自链与重复**：父/兄弟的 stem 等于自己的一律跳过。
+    """
+    from kb_common import parent_of, root_of
+    st = check_structure(root, notes)
+    actions = []
+    for o in st["orphans"]:
+        rel = o["rel"]
+        n = notes.get(rel)
+        if not n or n.get("generated"):
+            continue
+        fm = n["fm"]
+        par = parent_of(rel, fm, root)
+        if not par:
+            continue                       # 不是分块族 → 不补链（避免误伤）
+        anchor = root_of(rel, fm, root) or par
+        me = Path(rel).stem
+        sibs = []
+        for r, m in notes.items():
+            if r == rel or m.get("generated"):
+                continue
+            if parent_of(r, m["fm"], root) != par:
+                continue                   # 必须同父
+            st_r = Path(r).stem
+            if st_r == me or st_r == Path(anchor).stem:
+                continue                   # 排除自链与父链
+            sibs.append(r)
+        sibs = sorted(set(sibs))[:8]
+        if not sibs and Path(anchor).stem == me:
+            continue
+        actions.append({"kind": "link_orphan", "rel": rel, "parent": anchor,
+                        "parent_ref": par, "siblings": sibs,
+                        "action": f"补结构链接（父 {Path(anchor).stem}"
+                                  + (f" + {len(sibs)} 同族" if sibs else "") + "）",
+                        "safe": True})
+    return actions
+
+
 def _safe_fix_actions(root: Path, notes) -> List[Dict[str, Any]]:
     """列出"可安全自动修复"的动作（不含合并/删除）。"""
     st = check_structure(root, notes)
@@ -294,6 +350,9 @@ def _safe_fix_actions(root: Path, notes) -> List[Dict[str, Any]]:
             else:
                 actions.append({"kind": "index_link_drop", "rel": ic["file"], "target": l,
                                 "action": "转为纯文本（无唯一匹配）", "safe": True})
+
+    # 1c) 知识层孤立笔记：补"所属文档 + 同族"结构链接
+    actions.extend(_safe_fix_actions_orphans(root, notes))
 
     # 2) 缺 summary 的正典：用首条结论补
     for r in st["no_summary"]:
@@ -341,6 +400,10 @@ def cmd_fix(root: Path, confirm: bool, only: Optional[str]) -> int:
                     new = re.sub(r"^kb_summary:.*$", f"kb_summary: {val}", new, count=1, flags=re.M)
                 else:
                     new = re.sub(r"^---\s*$", f"---\nkb_summary: {val}", new, count=1, flags=re.M)
+            elif a["kind"] == "link_orphan":
+                if "结构补链" not in new:
+                    new = new.rstrip() + "\n" + _link_block(a.get("parent", ""),
+                                                              a.get("siblings") or [], a["rel"])
             elif a["kind"] in ("index_link", "index_link_drop"):
                 if a["action"].startswith("改写为"):
                     new = new.replace(f"[[{a['target']}]]", f"[[{a['action'][5:-2]}]]")

@@ -558,10 +558,14 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
         if kind == "inferred":
             inferred.append(v)          # 推断项：登记但不计入接地分母（必须在正文标 ^[推断]）
             continue
-        if re.sub(r"\s+", "", v) in norm_body:
-            grounded.append(v)
+        # 去掉模型可能带上的 wikilink 包裹：`[[X]]` → `X`。
+        #   为什么：frontmatter 列表写成 `[a, [[X]], b]` 会让 Obsidian/巡检解析成 `[[[X]]]`
+        #   这种三连括号死链（实测 2 处）。fact 只要标识符本身，不要链接语法。
+        v_clean = re.sub(r"^\[\[|\]\]$", "", str(v).strip())
+        if re.sub(r"\s+", "", v_clean) in norm_body:
+            grounded.append(v_clean)
         else:
-            dropped.append(v)
+            dropped.append(v_clean)
     checks["facts_total"] = len(grounded) + len(dropped)
     checks["facts_grounded"] = len(grounded)
     checks["facts_dropped"] = dropped

@@ -424,8 +424,9 @@ def is_generated_report(rel) -> bool:
     """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（结晶提案目录）。"""
     if Path(str(rel)).name in GENERATED_REPORTS:
         return True
-    # 结晶提案（70-知识治理 Governance/_curate/b*.md 等）：人读产物，不是知识笔记
-    return "_curate" in [str(x) for x in Path(str(rel)).parts[:-1]]
+    # 结晶提案（_curate/b*.md）与审计产物（_audit/*.md 含 log.md）：人读产物，不是知识笔记
+    _parts = [str(x) for x in Path(str(rel)).parts[:-1]]
+    return "_curate" in _parts or "_audit" in _parts
 
 
 # ── 归档生命周期：别名重定向 + lineage（合并/去重可回溯，旧链接不失效）──

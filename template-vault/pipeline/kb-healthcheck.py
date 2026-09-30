@@ -31,8 +31,14 @@ ROOT_DEFAULT = Path(_ROOT_DEFAULT_STR)
 VAULT_DIRS = ["00-收件箱 Inbox", "10-项目 Projects", "20-技术 Technology",
               "30-决策日志 Decisions", "40-资源库 Resources", "50-模板 Templates",
               "60-运营 Operations", "70-知识治理 Governance", "90-归档 Archive"]
+# 系统/特殊目录：不参与"知识笔记"的各项巡检。
+#   `raw/`  = 证据层（网页抓取 + 保号原文），天生无出链、非字数受控对象；
+#   `docs/` = **人写的交付文档**（报告/手册），本来就长，分块会毁掉可读性，
+#             且不属于 `NN-` 编号的 PARA 目录体系。
+#   这两条曾让 discipline(2) 与 overlong(10) 长期误报（全是 docs/ 报告）。
 SYSTEM_HINTS = ("memory/", "reference/", "main/", ".git/", ".obsidian/",
-                ".openclaw/", ".venvo", ".trash", "scripts/", "media/")
+                ".openclaw/", ".venvo", ".trash", "scripts/", "media/",
+                "raw/", "docs/")
 FRONTMATTER_FIELDS = {"tags", "status", "domain", "importance"}
 
 # 标签白名单：系统层 + 主题白名单 + 历史沿用通用标签
@@ -315,7 +321,10 @@ def check_discipline(root):
     sys_dirs = {"memory", "reference", "scripts", "media", "main", "backups",
                 "reports", "tmp", "plans", "jd_fetch", "career-ai-test",
                 ".venvo", ".trash", ".trash-old", "pipeline", "vector index",
-                "logs", "kb", "kb.cmd"}
+                "logs", "kb", "kb.cmd",
+                # 同为系统/特殊层，不属 PARA 编号体系：
+                "raw",    # 证据层（抓取物 + 保号原文）
+                "docs"}   # 人写交付文档（报告/手册）
     viol = []
     for entry in Path(root).iterdir():
         n = entry.name
@@ -362,8 +371,18 @@ def check_orphans(root):
             continue
         if rel.startswith(("raw/", "memory/")) or "_curated" in rel:
             continue                       # ① 证据层不算孤儿
+        try:
+            if is_generated_report(rel):
+                continue                   # 生成产物（_MOC/_graph/_audit/log 等）不算孤儿
+        except Exception:
+            pass
         text = fp.read_text(encoding="utf-8", errors="replace")
         if any(k in fp.stem for k in ("首页", "索引", "INDEX", "toc")):
+            continue
+        # 归档态（legacy/archived/draft）已退出检索：不按活跃笔记要求互链，
+        #   否则"归档旧笔记"会永远挂在孤儿清单里（实测 vLLM-Qwen3.6.md 就是这种）
+        m_st = re.search(r"^status:\s*(\S+)", text, re.M)
+        if m_st and m_st.group(1).strip().strip('"\'') in ("legacy", "archived", "draft"):
             continue
         has_out = bool(re.search(r"\[\[([^\]]+)\]\]", text))
         has_in = fp.stem in linked
@@ -417,6 +436,10 @@ def check_freshness(root):
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or is_generated_report(rel)):
             continue  # 来源/归档/产物：不做新鲜度巡检
+        # 模板目录：`status: draft` 是模板的**正确状态**（模板就不是活跃知识），
+        #   不该报"非可检索状态"（实测 50-模板 Templates/项目笔记模板.md 长期占用告警位）
+        if rel.startswith("50-模板") or "模板" in rel:
+            continue
         fm, _ = parse_frontmatter(fp.read_text(encoding="utf-8", errors="replace"))
         if is_source_note(fm):
             continue
