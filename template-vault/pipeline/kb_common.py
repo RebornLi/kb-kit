@@ -243,7 +243,7 @@ _POINTER_LINE = re.compile(
 )
 
 
-def is_index_stub(fm) -> bool:
+def is_index_stub(fm, body: str = "") -> bool:
     """是否「分块索引页 / 目录页」（无正文、只指向子块）：
     显式 `is_chunk_index: true`，或 `chunk_of` 存在但无 `chunk: N`（=父页被改写成目录）。
 
@@ -253,6 +253,9 @@ def is_index_stub(fm) -> bool:
     if v is True or str(v).strip().lower() in ("true", "yes", "1"):
         return True
     if fm.get("chunk_of") and not fm.get("chunk"):
+        return True
+    # 级联分块的"中间层目录页"：chunk_of 存在、正文却极短（正文都指向别的块）
+    if fm.get("chunk_of") and body and len(str(body).replace("\n", "").strip()) < 200:
         return True
     if str(fm.get("kb_layer", "")).strip().lower() == "index":
         return True
@@ -298,14 +301,14 @@ LAYER_MULTIPLIER = {
 DEFAULT_LAYER = "page"
 
 
-def kb_layer_of(fm, rel: str = "") -> str:
+def kb_layer_of(fm, rel: str = "", body: str = "") -> str:
     """笔记所属知识层：显式 `kb_layer` 优先，否则按 is_source / index stub 推断。"""
     v = str(fm.get("kb_layer", "") or "").strip().lower()
     if v:
         return v
     if is_source_note(fm):
         return "raw"
-    if is_index_stub(fm):
+    if is_index_stub(fm, body):
         return "index"
     if rel and is_raw_path(rel):
         return "raw"

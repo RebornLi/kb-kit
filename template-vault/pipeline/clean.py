@@ -201,7 +201,7 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
         "kb_summary": infer_summary(body),
     }
     # P0：分块索引页显式打标（无正文、只指向子块）→ RAG 不入索引，防"空壳顶替真内容"
-    if is_index_stub(fm):
+    if is_index_stub(fm, body):
         fm2["kb_layer"] = "index"
         fm2["is_chunk_index"] = True
     # P0：历史分块 bug 残留的字面占位符摘要（`{name} · 块{i}`）就地纠正
@@ -451,7 +451,7 @@ def do_chunk(root: Union[str, Path], limit: int) -> Tuple[int, List[str]]:
         # 幂等：分块产物 / 父索引页不再分块（防重复运行产生级联膨胀）
         if fm.get("chunk_of") or fm.get("chunk") or fm.get("is_chunk_index"):
             continue
-        if is_index_stub(fm) or str(fm.get("kb_layer", "")).strip().lower() == "index":
+        if is_index_stub(fm, body) or str(fm.get("kb_layer", "")).strip().lower() == "index":
             continue  # P0：目录页/索引页绝不二次分块（-p2-p2 级联的来源）
         if re.search(r"-(p\d+|c\d+|index)\.md$", rel):
             continue

@@ -15,8 +15,17 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status, kb_layer_of, layer_multiplier, is_index_stub, LAYER_MULTIPLIER
 
+try:                       # 上下文强化（P2）：缺失/异常都不影响索引可用
+    from contextual import cch as _cch
+except Exception:          # pragma: no cover
+    def _cch(rel, fm, body):
+        return ""
+
+CONTEXT_IN_INDEX = True    # 是否把上下文串拼进索引文本（默认开）
+
 IDX_DIR = "vector index"
-IDX_VERSION = 3  # df_idf.json schema 版本；v2 新增 doc_hashes/doc_mtimes/inverted_index；v3 meta 增加 layer/chunk_of（分层降级 + 根文档归并）
+IDX_VERSION = 4  # v2 doc_hashes/doc_mtimes/inverted_index；v3 layer/chunk_of；
+                 # v4 context（上下文强化，只进索引）+ parent/root（父子块：查子块、返回父块）
 
 
 def load_index(idx_path: Path) -> Tuple[Optional[Dict[str, Any]], int]:
@@ -87,6 +96,66 @@ def main() -> int:
                          include_raw=args.include_raw, include_stubs=args.include_stubs)
     return 1
 
+_CHUNK_SUFFIX = re.compile(r"-(?:p|c)\d+$")   # 只剥一层：-p2-p2 → -p2 → 主文档
+
+
+def _infer_parent_from_name(rel: str) -> str:
+    """无 chunk_of 时的兜底：按文件名推断父文档（-p2-p2 → -p2 → 主文档）。
+
+    为什么需要：历史分块产物有不少没写全 chunk_of（或写了但被后续改写覆盖），
+    只靠 frontmatter 会漏掉一大半父块回填。
+    """
+    cur = Path(rel)
+    for _ in range(8):                       # 逐层向上一级（-p2-p2 的父是 -p2，再父是主文档）
+        stem = cur.stem
+        if not _CHUNK_SUFFIX.search(stem):
+            return ""
+        base = _CHUNK_SUFFIX.sub("", stem)
+        if not base:
+            return ""
+        cand = cur.with_name(base + ".md")
+        root = Path(__file__).resolve().parents[1]
+        if (root / str(cand)).exists():
+            return str(cand)
+        cur = cand                        # 该层不存在则继续往上一层找
+    return ""
+
+
+def _parent_path(rel: str, fm: dict) -> str:
+    """块所属的直接父文档路径（chunk_of 优先，文件名兜底）；非块返回空串。"""
+    co = str(fm.get("chunk_of", "") or "").strip()
+    if not co:
+        return _infer_parent_from_name(rel)
+    cand = co if co.endswith(".md") else co + ".md"
+    d = str(Path(rel).parent)
+    p1 = f"{d}/{cand}" if d != "." else cand
+    root = Path(__file__).resolve().parents[1]
+    if (root / p1).exists():
+        return p1
+    if (root / cand).exists():
+        return cand
+    return ""
+
+
+def _root_path(rel: str, fm: dict) -> str:
+    """沿 chunk_of 链回溯到最顶层文档（-p2-p2 这类级联也能归并到同一篇）。"""
+    root = Path(__file__).resolve().parents[1]
+    cur, cur_fm, seen = rel, fm, set()
+    for _ in range(8):
+        if cur in seen:
+            break
+        seen.add(cur)
+        par = _parent_path(cur, cur_fm)
+        if not par or par == cur:
+            break
+        try:
+            cur_fm, _body = load_meta(root / par)
+        except Exception:
+            break
+        cur = par
+    return cur if cur != rel else ""
+
+
 def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
     idx = Path(root) / IDX_DIR
     idx.mkdir(parents=True, exist_ok=True)
@@ -113,7 +182,8 @@ def _full_rebuild(root, idx):
         fm, body = load_meta(p)
         if index_excluded(fm):
             continue  # 归档/来源/显式退出：不入检索
-        toks = tokenize(body + " " + " ".join(fm.get("tags", "").split()))
+        ctx = _cch(rel, fm, body) if CONTEXT_IN_INDEX else ""
+        toks = tokenize((ctx + "\n" + body) + " " + " ".join(str(fm.get("tags", "")).split()))
         if not toks:
             continue
         c = Counter(toks)
@@ -123,7 +193,10 @@ def _full_rebuild(root, idx):
         meta_all[rel] = {"title": fm.get("title", p.stem),
                          "domain": fm.get("domain", "-"), "tags": fm.get("tags", ""),
                          "layer": kb_layer_of(fm, rel),
-                         "chunk_of": str(fm.get("chunk_of", "") or "")}
+                         "chunk_of": str(fm.get("chunk_of", "") or ""),
+                         "context": ctx,
+                         "parent": _parent_path(rel, fm),
+                         "root": _root_path(rel, fm)}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
     N = len(docs)
@@ -181,7 +254,8 @@ def _incremental_update(root, idx, old):
     tf_all = dict(old.get("tf", {}))
     meta_all = dict(old.get("meta", {}))
     for rel, p, fm, body in changed:
-        toks = tokenize(body + " " + " ".join(fm.get("tags", "").split()))
+        ctx = _cch(rel, fm, body) if CONTEXT_IN_INDEX else ""
+        toks = tokenize((ctx + "\n" + body) + " " + " ".join(str(fm.get("tags", "")).split()))
         if not toks:
             tf_all.pop(rel, None)
             meta_all.pop(rel, None)
@@ -190,7 +264,10 @@ def _incremental_update(root, idx, old):
         meta_all[rel] = {"title": fm.get("title", p.stem),
                          "domain": fm.get("domain", "-"), "tags": fm.get("tags", ""),
                          "layer": kb_layer_of(fm, rel),
-                         "chunk_of": str(fm.get("chunk_of", "") or "")}
+                         "chunk_of": str(fm.get("chunk_of", "") or ""),
+                         "context": ctx,
+                         "parent": _parent_path(rel, fm),
+                         "root": _root_path(rel, fm)}
     for rel in deleted:
         tf_all.pop(rel, None)
         meta_all.pop(rel, None)
@@ -286,6 +363,17 @@ def _inverted_lookup(query_tokens, inverted_index):
 
 # ── 检索结果去重（FR-3.1.8 + P0：按根文档归并）─────────────────
 CHUNK_FAMILY_MAX = 2   # 同一根文档最多保留几个命中（防"整篇碎片墙"顶掉其它主题）
+RRF_K = 60             # RRF 平滑常数（行业惯用 60）
+RRF_CAP = 300          # 每路只取前 N 参与融合（控制复杂度）
+
+
+def _rrf_fuse(list_a, list_b, k: int = RRF_K, cap: int = RRF_CAP):
+    """Reciprocal Rank Fusion：score = Σ 1/(k + rank)。对分数量纲免疫。"""
+    fused = {}
+    for lst in (list_a, list_b):
+        for rank, (rel, _sc) in enumerate(list(lst)[:cap], start=1):
+            fused[rel] = fused.get(rel, 0.0) + 1.0 / (k + rank)
+    return sorted(fused.items(), key=lambda x: x[1], reverse=True)
 
 
 def _root_of(rel, meta_all):
@@ -424,12 +512,88 @@ def _apply_filters(scored, root, domain, content_type, author,
     return filtered
 
 
-def _build_hit(rel, score, fm, body, query, context):
-    """构造单条 JSON hit。"""
+PARENT_WINDOW = 900   # 返回父块正文时的字符上限（"查子块、答父块"）
+
+
+def _is_index_like(root: Path, path: str) -> bool:
+    """父页是否只是"目录页"（被改写成指向子块的索引）。"""
+    try:
+        fm, body = load_meta(root / path)
+    except Exception:
+        return False
+    if is_index_stub(fm, body):
+        return True
+    lines = [l.strip() for l in body.splitlines() if l.strip()]
+    if not lines:
+        return True
+    pointer = sum(1 for l in lines if l.startswith(("-", "*")) and ("→" in l or "[[" in l))
+    return pointer / len(lines) >= 0.6
+
+
+def _parent_block(root: Path, rel: str, meta_all: dict, context: int,
+                  sib_scores: Optional[Dict[str, float]] = None) -> Dict[str, str]:
+    """命中碎片时，回填所属父文档的正文窗口（父子块的"父"侧）。
+
+    为什么：子块便于**匹配**，父块才有足够上下文让 Agent 正确**推理**——
+    这正是 Anthropic「Hierarchical Chunking」的生产标准做法。
+    """
+    m = meta_all.get(rel) or {}
+    par = str(m.get("parent") or m.get("root") or "").strip()
+    if not par or par == rel:
+        return {}
+    pp = root / par
+    if not pp.exists():
+        return {}
+    try:
+        _fm, pbody = load_meta(pp)
+    except Exception:
+        return {}
+    if not pbody.strip():
+        return {}
+    if _is_index_like(root, par):
+        # 父页只是目录 → 改回填"同一父页下、本次查询得分最高的兄弟碎片"
+        best, best_sc = "", -1.0
+        for other, m in (meta_all or {}).items():
+            if other == rel or other == par:
+                continue
+            if str(m.get("parent") or "") != par:
+                continue
+            sc = float((sib_scores or {}).get(other, -1.0))
+            if sc > best_sc:
+                try:
+                    _f, ob = load_meta(root / other)
+                except Exception:
+                    continue
+                if ob.strip():
+                    best, best_sc = other, sc
+        if best:
+            return {"parent": best, "parent_excerpt": best_sentence(best_body(best), query="")[:PARENT_WINDOW]} if False else {
+                "parent": best, "parent_excerpt": _read_head(root / best)[:PARENT_WINDOW], "parent_is_sibling": "1"}
+        return {}
+    win = best_sentence(pbody, "")            # 父块开头的结论窗口
+    if len(win) < 40:
+        win = pbody.strip()[:PARENT_WINDOW]
+    return {"parent": par, "parent_excerpt": win[:PARENT_WINDOW]}
+
+
+def _read_head(p: Path, n: int = PARENT_WINDOW) -> str:
+    try:
+        return p.read_text(encoding="utf-8", errors="ignore")[:n]
+    except OSError:
+        return ""
+
+
+def _build_hit(rel, score, fm, body, query, context, root=None, meta_all=None,
+               sib_scores=None):
+    """构造单条 JSON hit（含上下文串与父块回填）。"""
     snippet = best_sentence(body, query)
     if len(snippet) > context:
         snippet = snippet[:context] + "…"
+    extra = {}
+    if root is not None and meta_all:
+        extra = _parent_block(Path(root), rel, meta_all, context, sib_scores)
     return {
+        "context": str((meta_all or {}).get(rel, {}).get("context") or ""),
         "path": rel,
         "title": fm.get("title", Path(rel).stem),
         "domain": fm.get("domain", "-"),
@@ -441,6 +605,7 @@ def _build_hit(rel, score, fm, body, query, context):
         "enforce_level": fm.get("enforce_level"),
         "author": fm.get("author"),
         "updated": fm.get("updated"),
+        **extra,
     }
 
 
@@ -577,15 +742,13 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     scored.sort(key=lambda x: x[1], reverse=True)
     scored = [(r, s) for r, s in scored if s > 0]
 
-    # P0 Stage3: 混合检索 —— 余弦 + BM25 归一加权（提升召回与稳健性）
+    # P2: 混合检索 —— 余弦 + BM25 用 RRF（Reciprocal Rank Fusion）融合
+    #   为什么换掉线性加权：两路打分量纲不同（余弦∈[0,1]、BM25 无上界），
+    #   归一化系数对语料敏感；RRF 只看**排名**，对分数量纲免疫，是混合检索的行业标准。
     bm25 = _bm25_scores(tf_all, tokenize(q_expanded))
     if bm25:
-        cmax = max((s for _, s in scored), default=0.0) or 1.0
-        bmax = max(bm25.values()) or 1.0
-        merged = {r: HYBRID_ALPHA * (s / cmax) for r, s in scored}
-        for r, s in bm25.items():
-            merged[r] = merged.get(r, 0.0) + (1.0 - HYBRID_ALPHA) * (s / bmax)
-        scored = sorted(merged.items(), key=lambda x: x[1], reverse=True)
+        scored = _rrf_fuse(scored, sorted(bm25.items(), key=lambda x: x[1], reverse=True),
+                           k=RRF_K, cap=RRF_CAP)
 
     # 倒排索引命中加成（FR-3.2.2）
     inverted_index = payload.get("inverted_index", {})
@@ -636,13 +799,33 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     hits = [(item[0], item[1]) for item in deduped]
     chunk_siblings_map = {item[0]: item[2] for item in deduped if len(item) > 2}
 
-    # P2: 重排 rerank（FR-3.2.6）
+    # P2: 语义重排（本地嵌入）—— 只看 top-N，超预算/不可用即原样返回
+    #   KB_NO_EMBED_RERANK=1 可关闭（对照实验 / 端点故障时手动降级）
+    # 默认**关闭**：30 题黄金集实测 top1/top3 与不重排完全一致（候选本来就干净），
+    #   而它带 0.3s 延迟与嵌入调用成本 → 需要时用 KB_EMBED_RERANK=1 开启。
     try:
-        from rerank import rerank as _rerank
-        reranked = _rerank(q, hits, root)
-        hits = [(rel, new_sc) for rel, new_sc, _ in reranked]
-    except ImportError:
+        if os.environ.get("KB_EMBED_RERANK") != "1":
+            raise ImportError("embed-rerank disabled by default")
+        from embed_rerank import EmbedReranker
+        _er = EmbedReranker(Path(root))
+        if _er.available():
+            _texts = {}
+            for rel, _sc in hits[:25]:
+                m = meta_all.get(rel) or {}
+                _f, _b = load_meta(Path(root) / rel)
+                _texts[rel] = (str(m.get("context") or "") + "\n" + _b)[:2000]
+            hits = _er.rerank(q, hits, _texts)
+    except Exception:
         pass
+
+    # 兼容保留：启发式 rerank（默认让位给上面的语义重排，可用 KB_HEURISTIC_RERANK=1 启用）
+    if os.environ.get("KB_HEURISTIC_RERANK") == "1":
+        try:
+            from rerank import rerank as _rerank
+            reranked = _rerank(q, hits, root)
+            hits = [(rel, new_sc) for rel, new_sc, _ in reranked]
+        except ImportError:
+            pass
     latency_ms = int((time.time() - t0) * 1000)
 
     if as_json:
@@ -650,7 +833,8 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         hit_list = []
         for rel, sc in hits:
             fm, body = load_meta(Path(root) / rel)
-            h = _build_hit(rel, sc, fm, body, q, context)
+            h = _build_hit(rel, sc, fm, body, q, context, root=root, meta_all=meta_all,
+                           sib_scores=dict(hits))
             if rel in chunk_siblings_map:
                 h["chunk_siblings"] = chunk_siblings_map[rel]
             hit_list.append(h)

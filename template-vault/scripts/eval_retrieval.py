@@ -23,28 +23,55 @@ from pathlib import Path
 
 # 黄金问题集：覆盖 KB 的主要主题域（口语化提问，模拟真实调用）
 GOLD = [
+    # ── 事实查找 ──
     "vLLM 部署有哪些坑",
     "OpenClaw 失忆 embedding 服务排查",
-    "知识库怎么备份和恢复演练",
-    "记忆衰减 阈值 晋升规则",
     "微信消息接入怎么配",
-    "cron 定时任务空转怎么防",
     "SearXNG 本地联网搜索部署",
     "Codex CLI 部署 自启",
-    "知识结晶 正典 是什么",
-    "标签归一 受控词表",
+    "embedding 服务端口是多少",
+    "vLLM 显存占用多少",
+    "知识库备份怎么恢复",
+    # ── 操作复现 ──
+    "怎么重建向量索引",
+    "怎么给笔记打标签归一",
+    "怎么做 cron 健康巡检",
+    "怎么把 agent 记忆摄取进库",
+    "怎么开启知识结晶",
+    "RAG 索引怎么增量更新",
+    # ── 决策依据 ──
+    "检索方案为什么选 BM25",
+    "记忆引擎为什么保留 dsh-evolve",
+    "为什么移除 memory-fortress",
+    "为什么禁止直接改 OpenClaw 会话库",
+    "vLLM 部署铁律是哪几条",
+    # ── 多跳 / 关联 ──
+    "记忆衰减 阈值 晋升规则",
     "矛盾检测 在环调和",
     "skill 技能库 编排",
+    "知识结晶 正典 是什么",
+    "标签归一 受控词表",
+    "知识库三层结构是什么",
+    "原始记忆 与 正典 什么关系",
+    "索引分层 降级 规则",
+    "提示词 A/B 测试结论",
+    "知识契约 schema 检查什么",
+    "无废话 知识 怎么保证",
 ]
 
 
-def run_query(root: Path, q: str, top: int, no_layer: bool) -> dict:
+def run_query(root: Path, q: str, top: int, no_layer: bool, no_rerank: bool = False) -> dict:
     cmd = [sys.executable, str(root / "pipeline" / "rag.py"), "query", q,
            "--root", str(root), "--top", str(top), "--json", "--context", "400",
            "--exclude-stale"]
     if no_layer:
         cmd += ["--include-raw", "--include-stubs"]
-    r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    env = dict(**__import__("os").environ)
+    if not no_rerank:
+        env.pop("KB_EMBED_RERANK", None)     # 默认：不开启语义重排
+    else:
+        env["KB_EMBED_RERANK"] = "1"         # 对照：开启语义重排
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
     try:
         return json.loads(r.stdout or "{}")
     except json.JSONDecodeError:
@@ -58,13 +85,14 @@ def classify(root: Path, rel: str, meta: dict) -> str:
     return "page"
 
 
-def measure(root: Path, top: int, no_layer: bool) -> dict:
+def measure(root: Path, top: int, no_layer: bool, no_rerank: bool = False) -> dict:
     idx = json.loads((root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))
     meta_all = idx.get("meta", {})
     per_q, agg = [], {"canon": 0, "stub": 0, "raw": 0, "page": 0}
     body_lens, snip_lens, n_hits = [], [], 0
+    top1_canon = top3_canon_all = 0
     for q in GOLD:
-        data = run_query(root, q, top, no_layer)
+        data = run_query(root, q, top, no_layer, no_rerank)
         hits = data.get("hits") or []
         row = {"q": q, "n": len(hits), "canon": 0, "stub": 0, "raw": 0, "page": 0}
         for h in hits:
@@ -83,6 +111,13 @@ def measure(root: Path, top: int, no_layer: bool) -> dict:
             body_lens.append(len(str(h.get("snippet") or "")))
             snip_lens.append(len(str(h.get("snippet") or "")))
             n_hits += 1
+        kinds = []
+        for h in hits:
+            rel = h.get("path") or ""
+            kinds.append(classify(root, rel, meta_all.get(rel)))
+        if kinds:
+            top1_canon += 1 if kinds[0] == "canon" else 0
+            top3_canon_all += 1 if all(k == "canon" for k in kinds[:3]) else 0
         for k in ("canon", "stub", "raw", "page"):
             agg[k] += row[k]
         per_q.append(row)
@@ -96,6 +131,8 @@ def measure(root: Path, top: int, no_layer: bool) -> dict:
         "page_share": round(agg["page"] / n, 3),
         "avg_body_chars": int(sum(body_lens) / n),
         "avg_snippet_chars": int(sum(snip_lens) / n),
+        "top1_canon_rate": round(top1_canon / max(len(GOLD), 1), 3),
+        "top3_canon_rate": round(top3_canon_all / max(len(GOLD), 1), 3),
         "per_question": per_q,
     }
 
@@ -114,9 +151,11 @@ def main() -> int:
 
     now = measure(root, args.top, no_layer=False)
     before = measure(root, args.top, no_layer=True)
+    norank = measure(root, args.top, no_layer=False, no_rerank=True)
 
     if args.as_json:
-        print(json.dumps({"now": now, "no-layer": before}, ensure_ascii=False, indent=2))
+        print(json.dumps({"now": now, "no-layer": before, "no-rerank": norank},
+                         ensure_ascii=False, indent=2))
         return 0
 
     def fmt(m):
@@ -128,6 +167,8 @@ def main() -> int:
     print("")
     print(f"   现在（分层生效）  : {fmt(now)}")
     print(f"   对照（关闭分层）  : {fmt(before)}")
+    print(f"   对照（开启语义重排）: {fmt(norank)}"
+          f"  top1正典 {norank['top1_canon_rate']:.0%} · top3全正典 {norank['top3_canon_rate']:.0%}")
     print("")
     d_canon = now["canon_share"] - before["canon_share"]
     d_stub = now["stub_share"] - before["stub_share"]

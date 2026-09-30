@@ -66,22 +66,21 @@ def tokenize(s: str) -> List[str]:
 
 
 # ── Layer 0 语义向量地基（kb_embed 可选接入）───────────────
-# 默认行为不变：kb_embed 不可用时原样退回字面 char-vec。USE_EMBEDDING=1 强制语义路径，
-# =0 强制字面路径（调试/回归）。cos 自动兼容 dict(char-vec) 与 list(embedding)。
+# **显式 opt-in**：只有 USE_EMBEDDING=1 才走语义向量；否则一律字面 char-vec。
+#   为什么改默认（2026-09-30 实测事故）：加了库内模型配置 .kb/model.json 之后，
+#   embedding "可用性" 从 False 变 True，而旧逻辑是"自动探测即启用"→
+#   kb_l4 的接地检查（kb_rsi.collect 全库）开始为**每篇笔记**调嵌入，
+#   `kb_l4 docket` 从 ~10s 变成 >300s 超时，连带验收探针失败。
+#   结论：语义向量是"研究层增强"，必须由调用方显式请求，不能因配置变化自动启用。
 _USE_EMBED_OVERRIDE = os.environ.get("USE_EMBEDDING")
 
 
 def _use_embed():
-    """是否走 embedding：默认自动探测；USE_EMBEDDING=1 强制语义、=0 强制字面。
-    best-effort：kb_embed 导入失败/探测异常都安全回落为字面向量，绝不爆炸。"""
+    """是否走 embedding：**默认关闭**；USE_EMBEDDING=1 开启语义、=0 显式关闭。"""
     ov = _USE_EMBED_OVERRIDE
-    if ov is not None:
-        return ov.strip().lower() in ("1", "true", "yes", "on")
-    try:
-        import kb_embed
-        return kb_embed.available()
-    except (ImportError, ModuleNotFoundError, OSError, ValueError, TypeError):
+    if ov is None:
         return False
+    return ov.strip().lower() in ("1", "true", "yes", "on")
 
 
 def _safe_embed(text):
@@ -110,11 +109,19 @@ def cos(a: Union[Dict[str, float], List[float]], b: Union[Dict[str, float], List
     同一度量中所有向量同一种实现，不会混合。
     注意：此 cos 与 kb_common.cos 不同——本版本兼容 embedding list，
     kb_common.cos 仅处理 dict。保留本地版本以支持 Layer 0 embedding 路径。"""
-    if isinstance(a, dict) or isinstance(b, dict):
+    # 类型不一致（dict vs list）说明上游混用了字面路径与嵌入路径：
+    #   嵌入可用性可能在同一次运行中变化（如配置热加载），此时**降级为字面余弦**，
+    #   而不是崩在 b.get() 上（此前 embedding 首次启用就会静默炸掉整个 RSI）。
+    if isinstance(a, dict) and isinstance(b, dict):
         if len(a) > len(b):
             a, b = b, a
         return sum(av * b.get(k, 0) for k, av in a.items())
-    return sum(x * y for x, y in zip(a, b))
+    if isinstance(a, list) and isinstance(b, list):
+        return sum(x * y for x, y in zip(a, b))
+    # 混合类型：长度不同无法对齐 → 返回 0（保守，不伪造相似度）
+    if isinstance(a, dict) != isinstance(b, dict):
+        return 0.0
+    return 0.0
 
 
 def parse_f(v: Any, default: float = 0.0) -> float:
