@@ -54,7 +54,12 @@ REUSE_WINDOW = 0.35      # 与已有正典正文相似度超过此值 → 视为
 CONF_MIN = 0.6           # 模型自评置信度低于此 → 不自动写回，转人工裁决队列（kb curate review）
 # 不参与结晶的路径（判定为「非知识正文」）
 SKIP_DIRS = {"90-归档 Archive", "50-模板 Templates", "00-收件箱 Inbox", "_curated",
-             "stale-reports", "_curate", "backups", "memory"}
+             "stale-reports", "_curate", "backups", "memory",
+             # P5 事故修复（2026-10-01）：docs/ 是**人写+版本控制**的交付文档，
+             # 不是待结晶的原始笔记。被自动结晶过一次 → 报告正文被压缩、
+             # 原文被搬去 raw/_curated/，属于不可逆的内容损失（已从源码仓库 git 恢复原文）。
+             # 铁律：人写的交付文档不自动结晶，要改就人来改。
+             "docs"}
 SKIP_NAME_RE = re.compile(r"^(?:_|README|索引|index|使用说明)", re.I)
 
 

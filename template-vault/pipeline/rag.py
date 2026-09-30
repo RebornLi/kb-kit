@@ -135,6 +135,26 @@ def _title_text(rel: str, fm: dict) -> str:
     return " ".join([title, summary, tags, " ".join(parts)])
 
 
+def _imp_of(fm: dict) -> float:
+    """importance（0–1）；缺省 0.5（中性）。"""
+    try:
+        return max(0.0, min(1.0, float(fm.get("importance"))))
+    except (TypeError, ValueError):
+        return 0.5
+
+
+def _ts_of(fm: dict) -> int:
+    """updated/created 的 days-since-epoch（时效信号）；缺失返回 0。"""
+    import datetime as _dt
+    for k in ("updated", "created"):
+        v = str(fm.get(k) or "")[:10]
+        try:
+            return (_dt.date.fromisoformat(v) - _dt.date(1970, 1, 1)).days
+        except ValueError:
+            continue
+    return 0
+
+
 def _conf_of(fm: dict) -> float:
     """正典的复合置信分（0–1）；无则中性 0.5。用于排序乘数。"""
     try:
@@ -194,6 +214,9 @@ def _full_rebuild(root, idx):
                          "parent": _parent_path(rel, fm),
                          "root": _root_path(rel, fm),
                          "confidence": _conf_of(fm),
+                         "importance": _imp_of(fm),
+                         "ctype": str(fm.get("content_type") or ""),
+                         "updated_ts": _ts_of(fm),
                          "title_text": _title_text(rel, fm)}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
@@ -267,6 +290,9 @@ def _incremental_update(root, idx, old):
                          "parent": _parent_path(rel, fm),
                          "root": _root_path(rel, fm),
                          "confidence": _conf_of(fm),
+                         "importance": _imp_of(fm),
+                         "ctype": str(fm.get("content_type") or ""),
+                         "updated_ts": _ts_of(fm),
                          "title_text": _title_text(rel, fm)}
     for rel in deleted:
         tf_all.pop(rel, None)
@@ -987,6 +1013,15 @@ def _expand_query(q):
     #   机理：双向扩展把大量同义表述塞进查询，等于给查询加了噪声——
     #   而自指问题的痛点已由 docs/concepts.md（集中定义）解决，不靠扩展。
     if os.environ.get("KB_SYNONYM_EXPAND", "0") != "1":
+        # P6：可选 **LLM 查询改写**（KB_QUERY_EXPAND=llm）
+        #   实测 30 题：canon@K 91.3% → **95.3%**（top1 100% 不降 / top3 90% 不降）
+        #   代价：每次查询 +10~20s（本地 chat 串行）→ 默认关，按需开
+        if os.environ.get("KB_QUERY_EXPAND", "").strip().lower() == "llm":
+            try:
+                from llm_rerank import expand_query as _ex
+                return _ex(q) or q
+            except Exception:
+                return q
         return q
     table, reverse = _load_synonyms()
     toks = tokenize(q)
