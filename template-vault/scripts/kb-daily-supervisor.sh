@@ -126,7 +126,16 @@ echo
 # ---------- ③ 可用性自检（KB 是否真能用） ----------
 echo "【③ 可用性自检】"
 # 3a 嵌入服务（检索的硬依赖）
-emb_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$EMBED_URL" 2>/dev/null || echo 000)"
+# 嵌入服务探测：**重试 3 次**。
+#   为什么：2026-10-01 02:00 那次日报报「嵌入服务不可达 → KB 检索已失效」并推到微信，
+#   但服务其实健康（03:00 实测 /health=200）。根因是单次 curl -m 5 撞上服务重启/首请求
+#   加载窗口 → 一次超时就被判成致命故障。**单次探测不配下"检索已失效"这种结论。**
+emb_code=000
+for _try in 1 2 3; do
+  emb_code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' "$EMBED_URL" 2>/dev/null || echo 000)"
+  [ "$emb_code" = "200" ] && break
+  sleep 3
+done
 if [ "$emb_code" = "200" ]; then
   echo "  ✅ 嵌入服务在线 (:8081)"
 else
