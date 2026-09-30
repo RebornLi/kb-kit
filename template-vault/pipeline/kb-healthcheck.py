@@ -333,19 +333,44 @@ def check_orphans(root):
     """孤儿笔记（无 [[...]] 出链，SOP-03 巡检项）。
     排除系统目录/模板；MOC/索引页不视为孤儿（它们是导航节点）。"""
     orphans = []
+    # 两个曾把本指标搞成噪声的坑（2026-10-01 修）：
+    #  ① **证据层不该算孤儿**：raw/ 是抓取物/保号原文，天生没有出链。
+    #     不排除时孤儿数虚高到 2903，而真正的知识层孤儿只有几百 —— 阈值告警永远响，等于没有告警。
+    #  ② **只看出链也不对**：没有出链但有入链的笔记（被 MOC/他人引用）不是孤儿。
+    #     判据应为"出链与入链都没有"。
+    present = set()
+    for fp in collect_md(root):
+        r = str(fp.relative_to(root))
+        if any(h in r for h in SYSTEM_HINTS):
+            continue
+        present.add(Path(r).stem)
+    linked = set()
+    for fp in collect_md(root):
+        r = str(fp.relative_to(root))
+        if r.startswith(("raw/", "memory/")) or "_curated" in r:
+            continue
+        try:
+            t = fp.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for m in re.finditer(r"\[\[([^\]|#]+)", t):
+            tgt = m.group(1).strip()
+            linked.add(Path(tgt).stem)
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
         if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板"):
             continue
+        if rel.startswith(("raw/", "memory/")) or "_curated" in rel:
+            continue                       # ① 证据层不算孤儿
         text = fp.read_text(encoding="utf-8", errors="replace")
-        # 有 [[...]] 出链 → 非孤儿
-        if re.search(r"\[\[([^\]]+)\]\]", text):
-            continue
-        # MOC/索引/首页 不视为孤儿
         if any(k in fp.stem for k in ("首页", "索引", "INDEX", "toc")):
             continue
+        has_out = bool(re.search(r"\[\[([^\]]+)\]\]", text))
+        has_in = fp.stem in linked
+        if has_out or has_in:
+            continue                       # ② 出入链任一存在即非孤儿
         orphans.append(rel)
-    print(f"🏝  孤儿笔记: {len(orphans)} 个(无出链，排除系统/模板/MOC)\n   阈值: 0")
+    print(f"🏝  孤儿笔记: {len(orphans)} 个（知识层 · 无出链且无入链；证据层已排除）\n   阈值: 0")
     for rel in orphans[:20]:
         print(f"   ⚠ {rel}")
     return len(orphans)
