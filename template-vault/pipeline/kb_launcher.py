@@ -106,6 +106,12 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("eval", "gold"):      ("eval", "gold"),
     ("eval", "compare"):   ("eval", "compare"),
 
+    # P5：审计与确认后修复
+    ("audit", None):       ("audit", "scan"),
+    ("audit", "scan"):     ("audit", "scan"),
+    ("audit", "fix"):      ("audit", "fix"),
+    ("audit", "log"):      ("audit", "log"),
+
     # 原记忆可达性（证据层按需调用）
     ("raw", None):         ("raw", "list"),
     ("raw", "list"):       ("raw", "list"),
@@ -380,6 +386,12 @@ class KBLauncher:
         print("  kb eval gold --generate   生成 ground truth 草稿（30 题）")
         print("  kb eval gold --review     逐题人工确认（交互式）")
         print("  kb eval compare --baseline F  指标对比")
+        print("")
+        print("审计与修复（P5）:")
+        print("  kb audit scan             结构审计（漂移/内聚/一致性/孤儿/死链，只读）")
+        print("  kb audit fix              预览可安全修复的动作（dry-run）")
+        print("  kb audit fix --confirm    确认后落盘（不含合并/删除）")
+        print("  kb audit log              审计历史与修复日志")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")

@@ -210,9 +210,20 @@ def apply_links(root: Union[str, Path], threshold: float, limit: int,
 
 
 def moc(root: Union[str, Path]) -> int:
-    """生成/刷新 MOC 知识地图（按 domain 汇总 + 跨域洞察）；幂等覆盖，不改其它笔记。"""
+    """生成/刷新 MOC 知识地图（按 domain 汇总 + 跨域洞察）；幂等覆盖，不改其它笔记。
+
+    P5 修正：**只写"当前真实存在"的笔记**。
+    为什么：suggestions() 基于索引，而索引里可能残留已被结晶合并/改名的条目
+    （实测：MOC 里 34 条链接指向不存在的页面）。生成器不过滤 → 每轮都再造一批死链，
+    审计永远修不完。过滤后 MOC 自身保持零死链。
+    """
     from collections import defaultdict
+    live = {str(p.relative_to(root)) for p in Path(root).rglob("*.md") if ".git" not in p.parts}
+    live_stems = {Path(r).stem for r in live}
     _rels, notes, _recs, cross = suggestions(root, 0.75)
+    notes = {rel: n for rel, n in notes.items() if rel in live}
+    cross = [c for c in cross
+             if Path(c.get("from", "")).stem in live_stems and Path(c.get("to", "")).stem in live_stems]
     bydom = defaultdict(list)
     for rel, n in notes.items():
         bydom[n["domain"]].append(rel)

@@ -121,6 +121,20 @@ def _infer_parent_from_name(rel: str) -> str:
     return ""
 
 
+def _title_text(rel: str, fm: dict) -> str:
+    """标题/路径信号文本（查询时加权用）。
+
+    为什么需要：自指类问题（"知识结晶正典是什么"）的答案在 docs/*.md 里，
+    但"正典"在千词长文里只出现几次 → TF-IDF 被淹没，排不上来。
+    标题/路径是**高置信的定位信号**：标题里有"正典/契约/结晶"的文档，几乎一定更对题。
+    """
+    title = str(fm.get("title") or Path(rel).stem)
+    summary = str(fm.get("kb_summary") or "")[:120]
+    tags = " ".join(str(t) for t in (fm.get("tags") or []) if isinstance(t, (str, int)))
+    parts = [str(x) for x in Path(rel).parts]
+    return " ".join([title, summary, tags, " ".join(parts)])
+
+
 def _conf_of(fm: dict) -> float:
     """正典的复合置信分（0–1）；无则中性 0.5。用于排序乘数。"""
     try:
@@ -179,7 +193,8 @@ def _full_rebuild(root, idx):
                          "context": ctx,
                          "parent": _parent_path(rel, fm),
                          "root": _root_path(rel, fm),
-                         "confidence": _conf_of(fm)}
+                         "confidence": _conf_of(fm),
+                         "title_text": _title_text(rel, fm)}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
     N = len(docs)
@@ -251,7 +266,8 @@ def _incremental_update(root, idx, old):
                          "context": ctx,
                          "parent": _parent_path(rel, fm),
                          "root": _root_path(rel, fm),
-                         "confidence": _conf_of(fm)}
+                         "confidence": _conf_of(fm),
+                         "title_text": _title_text(rel, fm)}
     for rel in deleted:
         tf_all.pop(rel, None)
         meta_all.pop(rel, None)
@@ -568,6 +584,33 @@ def _read_head(p: Path, n: int = PARENT_WINDOW) -> str:
         return ""
 
 
+TITLE_BOOST = 0.55      # 标题/路径命中：最多把分数提到 1+0.55 倍（保守，避免压过真正高相关）
+TITLE_BOOST_CAP = 200   # 只对前 N 个候选算（控开销）
+
+
+def _title_boost(scored, query: str, meta_all: dict):
+    """按「查询词在标题/路径/摘要里的覆盖度」给候选加权。"""
+    q_tokens = {t for t in tokenize(query) if len(t) > 1}
+    if not q_tokens:
+        return scored
+    out = []
+    for i, (rel, sc) in enumerate(scored):
+        if i >= TITLE_BOOST_CAP or not sc:
+            out.append((rel, sc))
+            continue
+        m = meta_all.get(rel) or {}
+        tt = str(m.get("title_text") or "")
+        if not tt:
+            out.append((rel, sc)); continue
+        hit = {t for t in q_tokens if t in tt}
+        if not hit:
+            out.append((rel, sc)); continue
+        cov = len(hit) / len(q_tokens)
+        out.append((rel, sc * (1.0 + TITLE_BOOST * cov)))
+    out.sort(key=lambda x: x[1], reverse=True)
+    return out
+
+
 def _build_hit(rel, score, fm, body, query, context, root=None, meta_all=None,
                sib_scores=None):
     """构造单条 JSON hit（含上下文串与父块回填）。"""
@@ -748,6 +791,12 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         scored = list(scored_dict.items())
         scored.sort(key=lambda x: x[1], reverse=True)
 
+    # P5：标题/路径/摘要匹配加成 —— 修「自指问题」盲区
+    #   原理：长文里关键词稀疏，纯 TF-IDF/BM25 会把高信号文档排到后面；
+    #   而标题/路径里出现查询词，是**高置信的定位信号**。
+    if scored and meta_all and os.environ.get("KB_TITLE_BOOST", "1") != "0":
+        scored = _title_boost(scored, q, meta_all)
+
     # 应用过滤器
     has_filters = any([domain, content_type, author, min_importance is not None,
                         enforce_level, tags, date_from, date_to])
@@ -912,15 +961,33 @@ def _load_synonyms(path=None):
 
 
 def _expand_query(q):
-    """查询扩展：返回扩展后的查询字符串。"""
-    _, reverse = _load_synonyms()
+    """查询扩展（双向，P5 修复）。
+
+    修前只做「同义词 → 规范词」：查「正典」时 reverse 把它映射回「正典」自己，
+    于是展开后**完全没有新增词**——同义词表等于白建（实测：自指类问题检索失败的原因之一）。
+
+    现在做**两个方向**：
+      · 同义词 → 规范词（gather 到用户实际用的说法）
+      · 规范词/同义词 → 该条目的**全部同义说法**（把库里的另一种表述也拉进来）
+    """
+    if os.environ.get("KB_SYNONYM_EXPAND", "1") == "0":
+        return q
+    table, reverse = _load_synonyms()
     toks = tokenize(q)
     expanded = set(toks)
     for t in toks:
-        canon = reverse.get(t.lower()) or reverse.get(t)
+        canon = reverse.get(t.lower()) or reverse.get(t) or t
         if canon:
             expanded.add(canon)
             expanded.update(tokenize(canon))
+        # 反向补全：把该条目下所有同义说法都加进来（含英文/缩写/别称）
+        for key in (canon, t, t.lower()):
+            syns = table.get(key)
+            if not syns:
+                continue
+            for s in syns:
+                expanded.add(str(s))
+                expanded.update(tokenize(str(s)))
     return " ".join(expanded)
 
 
