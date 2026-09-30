@@ -117,6 +117,10 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("tagfix", "scan"):    ("tagfix", "scan"),
     ("tagfix", "fix"):     ("tagfix", "fix"),
 
+    # 一行验收（五项全绿）
+    ("verify", None):      ("verify", "all"),
+    ("verify", "all"):     ("verify", "all"),
+
     # P2/P5：上下文强化（LLM 上下文为可选增强）
     ("contextual", None):    ("contextual", "build"),
     ("contextual", "build"): ("contextual", "build"),
@@ -406,6 +410,10 @@ class KBLauncher:
         print("标签治理（P6）:")
         print("  kb tagfix scan            扫三类越界（路径型/别名型/未收录）")
         print("  kb tagfix fix [--apply]   治理（默认 dry-run）")
+        print("")
+        print("验收（推荐每次改动后跑）:")
+        print("  kb verify                  五项全绿：契约/校验/巡检/探针/单测")
+        print("  kb verify --with-index     额外跑检索质量评测（慢）")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")

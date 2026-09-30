@@ -199,32 +199,52 @@ def check_structure(root: Path, notes) -> Dict[str, List[Dict[str, Any]]]:
     # Obsidian 解析双链时 **aliases 也算**（`[[🔧-技术索引]]` 由 `_MOC.md` 的 aliases 提供）。
     #   不认 aliases 会误报死链（实测 3 条）。
     exist_stems = {Path(x).stem for x in exist} | all_aliases(root)
+    # 入链图：**键用 stem**（[[X]] 解析出来的是文件名）。
+    #   修前的坑：只在 `key in stems` 时 `inbound[stems[key]] += 1`，
+    #   而 stems 只含知识层笔记 → 指向其它层的链接不记边；且查表用 rel 去查 stem 键
+    #   → 永远取到 0 → 把所有笔记都报成孤儿（实测多报 46 篇，且与 healthcheck 的 0 相反）。
+    inbound = Counter()
     for rel, n in notes.items():
         for l in n["links"]:
             if l in PLACEHOLDER or l.strip() in PLACEHOLDER:
                 continue
             key = Path(l).stem
-            if key in stems:
-                inbound[stems[key]] += 1
-            elif key in exist_stems or key in exist:
-                pass                      # 全库任意位置存在该笔记 → 不是死链
+            if key in stems or key in exist_stems:
+                inbound[key] += 1
             elif (root / (l if l.endswith(".md") else l + ".md")).exists():
                 pass
             elif (root / rel).parent.joinpath(l if l.endswith(".md") else l + ".md").exists():
                 pass                      # 同目录相对路径
             else:
                 dead.append({"rel": rel, "target": l})
-    PLACEHOLDER = {"关联笔记", "相关笔记", "相关", "关联", "见", "X", "名称", "链接",
-                   "wikilink", "path", "link", "note.md", "页面名"}
+    # 孤儿：与 kb-healthcheck 同口径（知识层 · 无出链且无入链 · 排除归档态与产物），
+    #   保证两个工具的数字可比，不会一个说 0 一个说 46。
+    # 判据与排除集**逐条对齐 kb-healthcheck.check_orphans**，保证两工具数字可比。
+    #   （曾出现 healthcheck=0 / audit=46 的相反结论，根因是排除集不同却没写明）
+    from kb_common import EXCLUDE as _EXC
+    _SYS = ("memory/", "reference/", "main/", ".git/", ".obsidian/", ".openclaw/",
+            ".venvo", ".trash", "scripts/", "media/", "raw/", "docs/")
+    _parts = lambda r: set(Path(r).parts)
     for rel, n in notes.items():
-        if n["generated"] or n["layer"] not in ("canon", "page"):
-            continue                       # 索引文件自身不算孤儿候选
+        if n["generated"]:
+            continue                       # 生成产物（_MOC/_graph/_audit…）不算孤儿
+        if any(h.rstrip("/") in _parts(rel) for h in _SYS) or "raw" in _parts(rel) \
+                or "memory" in _parts(rel) or "_curated" in _parts(rel):
+            continue                       # 证据层/参考层/交付文档：不该按活跃笔记要求互链
         if Path(rel).name.startswith(("_", "🏠", "📖", "01-", "如何使用")):
             continue
+        if any(k in Path(rel).stem for k in ("首页", "索引", "INDEX", "toc")):
+            continue                       # 导航节点不算孤儿
         if "模板" in rel:
             continue
-        if inbound.get(rel, 0) == 0:
-            orphans.append({"rel": rel, "why": "没有任何入链"})
+        # 归档态（legacy/archived/draft）已退出检索：不按活跃笔记要求互链
+        if str(n["fm"].get("status", "") or "").strip().lower() in ("legacy", "archived", "draft"):
+            continue
+        if n["links"]:
+            continue                       # 有出链 → 非孤儿
+        if inbound.get(Path(rel).stem, 0) > 0:
+            continue                       # 有入链 → 非孤儿
+        orphans.append({"rel": rel, "why": "无出链且无入链"})
     stale, no_summary = [], []
     today = date.today()
     for rel, n in notes.items():
