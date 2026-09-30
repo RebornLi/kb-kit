@@ -72,10 +72,13 @@ def run_query(root: Path, q: str, top: int, no_layer: bool, no_rerank: bool = Fa
     else:
         env["KB_EMBED_RERANK"] = "1"         # 对照：开启语义重排
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=300, env=env)
+    if r.returncode != 0:
+        # 静默失败＝把崩溃当成"0 命中"，会把评测结论带偏（实测踩过：NameError 被当成 0 命中）
+        raise RuntimeError(f"kb query 退出码 {r.returncode}：{(r.stderr or '').strip()[:200]}")
     try:
         return json.loads(r.stdout or "{}")
-    except json.JSONDecodeError:
-        return {}
+    except json.JSONDecodeError as e:
+        raise RuntimeError(f"kb query 输出非 JSON：{(r.stdout or '')[:120]}") from e
 
 
 def classify(root: Path, rel: str, meta: dict) -> str:

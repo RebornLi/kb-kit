@@ -166,6 +166,89 @@ def content_fingerprint(body):
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
+# ── 分块族：根文档解析（父子块 / 同族排除 共用）──────────────────
+_CHUNK_SUFFIX = re.compile(r"-(?:p|c)\d+$")
+
+
+def parent_of(rel: str, fm: dict, root: Optional[Union[str, Path]] = None) -> str:
+    """块的直接父文档（chunk_of 优先，文件名逐层兜底）；非块返回空串。"""
+    base = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
+    co = str((fm or {}).get("chunk_of", "") or "").strip()
+    if co:
+        cand = co if co.endswith(".md") else co + ".md"
+        d = str(Path(rel).parent)
+        p1 = f"{d}/{cand}" if d != "." else cand
+        if (base / p1).exists():
+            return p1
+        if (base / cand).exists():
+            return cand
+    cur = Path(rel)
+    for _ in range(8):
+        if not _CHUNK_SUFFIX.search(cur.stem):
+            return ""
+        nxt = cur.with_name(_CHUNK_SUFFIX.sub("", cur.stem) + ".md")
+        if (base / str(nxt)).exists():
+            return str(nxt)
+        cur = nxt
+    return ""
+
+
+def root_of(rel: str, fm: dict, root: Optional[Union[str, Path]] = None) -> str:
+    """沿 parent 链回溯到最顶层文档（无父则返回自身）。"""
+    base = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
+    cur, cur_fm, seen = rel, fm or {}, set()
+    for _ in range(8):
+        if cur in seen:
+            break
+        seen.add(cur)
+        par = parent_of(cur, cur_fm, base)
+        if not par or par == cur:
+            break
+        try:
+            cur_fm = load_meta(base / par)[0]
+        except Exception:
+            break
+        cur = par
+    return cur
+
+
+# ── 模型端点配置（P2）：环境变量优先，回退库内 .kb/model.json ──────
+#   为什么要文件：cron / systemd / 自动化跑的命令**读不到 ~/.bashrc**，
+#   于是 ORNITH_API_KEY 缺失 → 结晶与嵌入静默降级。库内配置文件让"库自带模型配置"。
+_MODEL_CFG_CACHE: Dict[str, Any] = {}
+
+
+def model_config(root: Union[str, Path, None] = None) -> Dict[str, str]:
+    """读模型端点配置：环境变量 > `.kb/model.json`。
+
+    文件格式（本机私有，已 gitignore）：
+      {"api_key": "sk-...", "base_url": "http://127.0.0.1:8000/v1",
+       "chat_model": "ornith1.5-35b",
+       "embed_url": "http://127.0.0.1:8081/v1", "embed_model": "qwen3-embedding"}
+    """
+    root = Path(root) if root else Path(__file__).resolve().parents[1]
+    key = str(root)
+    if key in _MODEL_CFG_CACHE:
+        return _MODEL_CFG_CACHE[key]
+    file_cfg: Dict[str, Any] = {}
+    for cand in (root / ".kb" / "model.json", root / "kb-model.json"):
+        try:
+            file_cfg = json.loads(cand.read_text(encoding="utf-8"))
+            break
+        except (OSError, json.JSONDecodeError):
+            continue
+    cfg = {
+        "api_key": os.environ.get("ORNITH_API_KEY") or os.environ.get("OPENAI_API_KEY")
+                   or str(file_cfg.get("api_key") or ""),
+        "base_url": os.environ.get("ORNITH_BASE_URL") or str(file_cfg.get("base_url") or ""),
+        "chat_model": os.environ.get("ORNITH_CHAT_MODEL") or str(file_cfg.get("chat_model") or ""),
+        "embed_url": os.environ.get("ORNITH_EMBED_URL") or str(file_cfg.get("embed_url") or ""),
+        "embed_model": os.environ.get("ORNITH_EMBED_MODEL") or str(file_cfg.get("embed_model") or ""),
+    }
+    _MODEL_CFG_CACHE[key] = cfg
+    return cfg
+
+
 # ── 索引纳入判定（raw/来源归档不参与检索，防噪声与超长污染）──────
 def is_source_note(fm) -> bool:
     """是否为「原始来源」笔记（如 raw/ 抓取物）：`is_source: true` 或 `kind: source`。"""

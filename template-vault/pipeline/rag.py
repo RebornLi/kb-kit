@@ -13,7 +13,7 @@ import argparse, os, re, sys, json, math, time, datetime, hashlib, uuid
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status, kb_layer_of, layer_multiplier, is_index_stub, LAYER_MULTIPLIER
+from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status, kb_layer_of, layer_multiplier, is_index_stub, LAYER_MULTIPLIER, parent_of, root_of
 
 try:                       # 上下文强化（P2）：缺失/异常都不影响索引可用
     from contextual import cch as _cch
@@ -121,39 +121,21 @@ def _infer_parent_from_name(rel: str) -> str:
     return ""
 
 
+def _conf_of(fm: dict) -> float:
+    """正典的复合置信分（0–1）；无则中性 0.5。用于排序乘数。"""
+    try:
+        return max(0.0, min(1.0, float(fm.get("confidence"))))
+    except (TypeError, ValueError):
+        return 0.5
+
+
 def _parent_path(rel: str, fm: dict) -> str:
-    """块所属的直接父文档路径（chunk_of 优先，文件名兜底）；非块返回空串。"""
-    co = str(fm.get("chunk_of", "") or "").strip()
-    if not co:
-        return _infer_parent_from_name(rel)
-    cand = co if co.endswith(".md") else co + ".md"
-    d = str(Path(rel).parent)
-    p1 = f"{d}/{cand}" if d != "." else cand
-    root = Path(__file__).resolve().parents[1]
-    if (root / p1).exists():
-        return p1
-    if (root / cand).exists():
-        return cand
-    return ""
+    return parent_of(rel, fm)
 
 
 def _root_path(rel: str, fm: dict) -> str:
-    """沿 chunk_of 链回溯到最顶层文档（-p2-p2 这类级联也能归并到同一篇）。"""
-    root = Path(__file__).resolve().parents[1]
-    cur, cur_fm, seen = rel, fm, set()
-    for _ in range(8):
-        if cur in seen:
-            break
-        seen.add(cur)
-        par = _parent_path(cur, cur_fm)
-        if not par or par == cur:
-            break
-        try:
-            cur_fm, _body = load_meta(root / par)
-        except Exception:
-            break
-        cur = par
-    return cur if cur != rel else ""
+    r = root_of(rel, fm)
+    return r if r != rel else ""
 
 
 def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
@@ -196,7 +178,8 @@ def _full_rebuild(root, idx):
                          "chunk_of": str(fm.get("chunk_of", "") or ""),
                          "context": ctx,
                          "parent": _parent_path(rel, fm),
-                         "root": _root_path(rel, fm)}
+                         "root": _root_path(rel, fm),
+                         "confidence": _conf_of(fm)}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
     N = len(docs)
@@ -267,7 +250,8 @@ def _incremental_update(root, idx, old):
                          "chunk_of": str(fm.get("chunk_of", "") or ""),
                          "context": ctx,
                          "parent": _parent_path(rel, fm),
-                         "root": _root_path(rel, fm)}
+                         "root": _root_path(rel, fm),
+                         "confidence": _conf_of(fm)}
     for rel in deleted:
         tf_all.pop(rel, None)
         meta_all.pop(rel, None)
@@ -363,6 +347,7 @@ def _inverted_lookup(query_tokens, inverted_index):
 
 # ── 检索结果去重（FR-3.1.8 + P0：按根文档归并）─────────────────
 CHUNK_FAMILY_MAX = 2   # 同一根文档最多保留几个命中（防"整篇碎片墙"顶掉其它主题）
+CONF_WEIGHT = 0.20     # P3：复合置信分对排序的影响幅度（×0.9 ~ ×1.1）
 RRF_K = 60             # RRF 平滑常数（行业惯用 60）
 RRF_CAP = 300          # 每路只取前 N 参与融合（控制复杂度）
 
@@ -784,13 +769,20 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     if not include_raw or not include_stubs:
         adjusted = []
         for r, s in scored:
-            layer = str(meta_all.get(r, {}).get("layer", "") or "").lower()
+            m = meta_all.get(r, {}) or {}
+            layer = str(m.get("layer", "") or "").lower()
             if layer == "raw" and not include_raw:
                 s = s * LAYER_MULTIPLIER.get("raw", 0.72)
             elif layer in ("index", "noise") and not include_stubs:
                 s = s * LAYER_MULTIPLIER.get(layer, 0.60)
             elif layer == "canon":
                 s = s * LAYER_MULTIPLIER.get("canon", 1.25)
+                # P3：置信分参与排序（高置信优先，低置信让位）
+                try:
+                    cf = float(m.get("confidence", 0.5))
+                except (TypeError, ValueError):
+                    cf = 0.5
+                s = s * (1.0 + CONF_WEIGHT * (cf - 0.5) * 2)
             adjusted.append((r, s))
         scored = sorted(adjusted, key=lambda x: x[1], reverse=True)
 

@@ -89,6 +89,17 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("schema", "check"):   ("schema", "check"),
     ("schema", "fields"):  ("schema", "fields"),
 
+    # P3：置信分与矛盾在环
+    ("confidence", None):     ("confidence", "audit"),
+    ("confidence", "audit"):  ("confidence", "audit"),
+    ("confidence", "show"):   ("confidence", "show"),
+    ("confidence", "apply"):  ("confidence", "apply"),
+    ("confidence", "decay"):  ("confidence", "decay"),
+    ("decay", None):          ("confidence", "decay"),
+    ("contradict", None):     ("contradict", "scan"),
+    ("contradict", "scan"):   ("contradict", "scan"),
+    ("contradict", "apply"):  ("contradict", "apply"),
+
     # 原记忆可达性（证据层按需调用）
     ("raw", None):         ("raw", "list"),
     ("raw", "list"):       ("raw", "list"),
@@ -350,6 +361,13 @@ class KBLauncher:
         print("  kb validate               frontmatter 校验")
         print("  kb schema check           对照知识契约（reference/kb-schema.json）查偏差")
         print("  kb schema fields          字段使用率（看契约实际覆盖）")
+        print("")
+        print("置信与矛盾（P3）:")
+        print("  kb confidence audit       复合置信分审计（四因子可解释）+ 分档")
+        print("  kb confidence show --rel P 解释某一篇为什么是这个分")
+        print("  kb decay                  原则性遗忘审计（只降层，从不删文件）")
+        print("  kb contradict scan        矛盾扫描（区分真冲突 / 近似重复）")
+        print("  kb contradict apply       把冲突标注写进两篇 + 入人工队列")
         print("")
         print("原记忆（证据层，按需调用）:")
         print("  kb raw list               列出证据层清单（raw/ + memory/）")

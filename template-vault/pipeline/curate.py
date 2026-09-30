@@ -364,6 +364,46 @@ def _build_prompt_messages(root: Path, body: str, fm, sid: str, rel: str):
     return _build_baseline(body, fm, sid, rel, merge_text=merge_text)
 
 
+# P3：写回前的"近重复正典"闸门阈值——同内容被结晶两遍的直接原因就是缺这道闸
+DUP_CANON_SIM = 0.90
+
+
+def find_dup_canon(root: Path, body: str, exclude: str = "") -> Optional[Dict[str, Any]]:
+    """检查是否已有内容近乎相同的正典（≥DUP_CANON_SIM）。
+
+    为什么需要：同一份内容会被不同来源碎片各结晶一次，产出两个文件名不同的正典，
+    既浪费又会在检索里互相稀释（实测发现 22 对 99%+ 重叠的"正典双胞胎"）。
+    命中时应改为 merge/跳过，而不是再新建一篇。
+    """
+    best = None
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_raw_path(rel) or is_generated_report(rel):
+            continue
+        fm, _t, _b, b = load(p)
+        if str(fm.get("kb_layer", "")).strip().lower() != "canon":
+            continue
+        if exclude and rel == exclude:
+            continue                      # 别和自己比（否则恒 sim=1.0 自己挡自己）
+        sim = _jaccard(_emphasis_of(b), _emphasis_of(body))
+        if sim >= DUP_CANON_SIM and (best is None or sim > best["sim"]):
+            best = {"rel": rel, "sim": round(sim, 3)}
+    return best
+
+
+def _emphasis_of(body: str) -> str:
+    """取结论性部分（结论/决定/要点/现象/根因）做比对。"""
+    out, cur = [], None
+    keep = ("结论", "决定", "要点", "现象", "根因")
+    for line in str(body or "").splitlines():
+        m = re.match(r"^##\s+(.+?)\s*$", line)
+        if m:
+            cur = m.group(1).strip()
+        elif cur and any(cur.startswith(k) for k in keep):
+            out.append(line)
+    return "\n".join(out).strip() or str(body or "")[:1500]
+
+
 def _existing_canon(root: Path, body: str, topk: int = 3) -> List[Dict[str, str]]:
     """找与本文相似的已有正典（kb_layer: canon），用于判断 merge。"""
     scored = []
@@ -606,6 +646,51 @@ def render_canon(prop: Dict[str, Any]) -> str:
     return "\n".join(lines).strip() + "\n"
 
 
+_DATE_IN_TEXT = re.compile(r"(20\d{2})[-/年](\d{1,2})[-/月](\d{1,2})")
+
+
+def _event_at(fm: Dict[str, Any], body: str) -> str:
+    """该正典描述的**事实何时为真**（双时态的事件时间）。
+
+    取法（按可信度）：原文 frontmatter 的 event_at > created > updated > 正文里最早出现的日期。
+    与 derived_at（何时学到）分开存，才能回答"当时知道什么"。
+    """
+    for k in ("event_at", "created", "updated"):
+        v = str(fm.get(k) or "")[:10]
+        if re.match(r"^20\d{2}-\d{2}-\d{2}$", v):
+            return v
+    ms = _DATE_IN_TEXT.findall(body[:3000])
+    if ms:
+        y, m, d = ms[0]
+        return f"{int(y):04d}-{int(m):02d}-{int(d):02d}"
+    return ""
+
+
+def _composite_confidence(prop: Dict[str, Any], verified: Dict[str, Any]) -> float:
+    """P3：写回时算复合置信分（四因子），而不是只信模型自评。
+
+    与 kb_confidence.score() 同口径，但这里用的是**当下可得**的信号
+    （接地事实数、标识符覆盖、页型、source_ref 数），避免写回后再扫库。
+    """
+    try:
+        from kb_confidence import _basis_field, _corroboration, _recency, _verification, W
+    except Exception:
+        return 0.5
+    fake_fm = {
+        "source_ref": ["x"],                                   # 至少一条（刚结晶）
+        "updated": datetime.date.today().isoformat(),
+        "grounded_facts": (verified or {}).get("grounded_facts") or [],
+        "coverage": ((verified or {}).get("checks") or {}).get("coverage"),
+        "canon_type": prop.get("page_type"),
+    }
+    body_render = render_canon(prop)
+    e, _ = _basis_field(body_render)
+    c, _ = _corroboration(len(prop.get("sources") or ["x"]))
+    r, _ = _recency(fake_fm["updated"])
+    v, _ = _verification(fake_fm)
+    return round(W["extraction"] * e + W["corroboration"] * c + W["recency"] * r + W["verification"] * v, 3)
+
+
 def _canon_fm(rel: str, fm: Dict[str, Any], prop: Dict[str, Any],
               sid: str, verified: Dict[str, Any], model: str) -> Dict[str, Any]:
     """正典 frontmatter：继承原 frontmatter + 溯源字段（可一键回原记忆）。"""
@@ -618,11 +703,14 @@ def _canon_fm(rel: str, fm: Dict[str, Any], prop: Dict[str, Any],
         "updated": datetime.date.today().isoformat(),
         "curated_by": model,
         "curated_at": _now(),
+        "derived_at": _now(),                       # 双时态：何时学到
+        "event_at": _event_at(fm, str(prop.get("summary") or "")),  # 双时态：事实何时为真
         "source_ref": list(dict.fromkeys([sid] + [str(s) for s in (verified.get("checks", {}).get("sources") or [])])),
         "source_chars": verified.get("checks", {}).get("orig_chars", 0),
         "canon_ratio": verified.get("checks", {}).get("ratio", 0),
         "grounded_facts": verified.get("grounded_facts", [])[:20],
-        "curate_confidence": prop.get("confidence", None),
+        "curate_confidence": prop.get("confidence", None),   # 模型自评（原始信号）
+        "confidence": _composite_confidence(prop, verified),  # P3 复合置信分（可审计四因子）
     })
     for junk in ("chunk_of", "chunk", "is_chunk_index", "related_to", "memory_source"):
         out.pop(junk, None)
@@ -686,6 +774,12 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
                               "canon": render_canon(prop)[:4000]})
         return rec
     if apply and rec["ok"]:
+        # P3：写回前先查"是否已有近乎相同的正典"（同内容被结晶两遍的根治闸）
+        dup = find_dup_canon(root, render_canon(prop), exclude=rel)
+        if dup:
+            rec["action"] = f"skip:duplicate-of({dup['rel']})"
+            rec["dup_of"] = dup
+            return rec
         rec["action"] = apply_canon(root, rel, fm, prop, sid, verified, llm.model)
     return rec
 

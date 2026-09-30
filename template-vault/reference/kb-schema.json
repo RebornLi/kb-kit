@@ -270,6 +270,30 @@
     "is_source": {
       "type": "bool",
       "required": false
+    },
+    "confidence_tier": {
+      "type": "enum",
+      "required": false,
+      "values": [
+        "publish",
+        "review",
+        "evidence-only"
+      ],
+      "_note": "相对分档（canon 群体内 p10/p3）"
+    },
+    "coverage": {
+      "type": "number",
+      "required": false,
+      "range": [
+        0.0,
+        1.0
+      ],
+      "_note": "关键标识符覆盖率（P1 覆盖关）"
+    },
+    "canon_type": {
+      "type": "string",
+      "required": false,
+      "_note": "页型（P1 契约）"
     }
   },
   "canon_required": [
