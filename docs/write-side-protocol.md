@@ -96,3 +96,7 @@ link apply   指名即写，无预览 ✘
 | 正典层（`kb_layer: canon`） | 只有 `curate --apply` | 必须过三关校验（接地/守恒/引用）+ 置信闸门 |
 | 判定（noise/raw-only） | 只有 `curate` | 写回 frontmatter，让索引降级生效 |
 | 索引 `vector index/` | 只有 `rag index` | 纯可重建产物；任何正文改动之后都要重跑 |
+| **状态文件路径** | **`<vault>/.kb/state/<name>`（唯一约定）** | 只经 `state_manager` 原语读写：`state_path()` 取写路径、`read_state_path()`/`read_json()` 读（含旧位置回退）；`write_json()`/`append_jsonl()` 写（原子、自动建目录）。**不要自己拼路径** |
+| 状态文件旧位置 | 登记在 `state_manager.LEGACY_PATHS`（37 项） | 只读回退，**不搬不删**：旧库升级后状态照常读到，用户可自行清理。由 `tests/test_p0_fixes.py::StatePathConventionTest` 守卫 |
+| 索引格式 | `df_idf.pkl`（v6+，pickle）/ 旧 `df_idf.json` 仍可读 | 只经 `rag.load_index()` 读取（含受限反序列化白名单）；别写死文件名 |
+| 索引结构 | v7：`postings`（词主序）取代 `tf`；`df` 由 `len(postings[t])//2` 导出 | 需要文档向量请用 `rag.all_doc_vectors(payload)`，别自己读 `tf` |

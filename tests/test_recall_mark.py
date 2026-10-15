@@ -8,6 +8,7 @@
   python3 -m unittest discover -s tests
 """
 import os
+import datetime
 import shutil
 import sys
 import tempfile
@@ -48,14 +49,33 @@ class RecallMarkSeedTest(unittest.TestCase):
         self.assertAlmostEqual(st["20-技术 Technology/low.md"]["interval"], 7.0, places=2)
         self.assertEqual(st["20-技术 Technology/low.md"]["reps"], 1)
 
-    def test_second_mark_grows_from_seed(self):
+    def test_second_mark_grows_when_days_elapsed(self):
+        """跨天复习应增长（FSRS：S 随成功次数增长）。
+
+        注意**不要**用"同日连点两次"来测这件事：FSRS 有意让同日重复几乎不改变稳定性
+        （同一天里你不可能真的多记住多少），而旧 SM-2 的 `interval *= ease` 每次复习
+        都放大间隔 —— 那正是 SM-2 在"一天点十次"时会给出荒谬间隔的原因。
+        """
         rel = "20-技术 Technology/low.md"
         rs.mark(self.root, 10, rel)
         first = rs.load_state(self.root)[rel]["interval"]
+        # 把水位拨回到 7 天前，模拟真实间隔
+        st = rs.load_state(self.root)
+        st[rel]["last_seen"] = (datetime.date.today() - datetime.timedelta(days=7)).isoformat()
+        rs.save_state(self.root, st)
         rs.mark(self.root, 10, rel)
         second = rs.load_state(self.root)[rel]["interval"]
-        self.assertGreater(second, first, "第二次复习应在既有间隔上按 ease 增长")
-        self.assertAlmostEqual(second, min(first * 2.5, 365), places=2)
+        self.assertGreater(second, first, "跨天复习后间隔应增长")
+
+    def test_same_day_repeat_does_not_inflate(self):
+        """同日重复**不应**放大间隔 —— 这是 FSRS 相对 SM-2 的关键修正。"""
+        rel = "20-技术 Technology/low.md"
+        rs.mark(self.root, 10, rel)
+        a = rs.load_state(self.root)[rel]["interval"]
+        for _ in range(5):
+            rs.mark(self.root, 10, rel)
+        b = rs.load_state(self.root)[rel]["interval"]
+        self.assertLess(b, a * 2, "同日重复把间隔放大了 —— FSRS 不该这样")
 
     def test_lapse_shortens_interval(self):
         rel = "20-技术 Technology/high.md"
@@ -63,8 +83,9 @@ class RecallMarkSeedTest(unittest.TestCase):
         rs.mark(self.root, 10, rel, "again")  # 遗忘 → 缩短
         st = rs.load_state(self.root)[rel]
         self.assertLess(st["interval"], 180, "遗忘应缩短间隔")
-        self.assertEqual(st["reps"], 0)
         self.assertGreaterEqual(st.get("lapses", 0), 1)
+        # FSRS 的难度会因遗忘显著上升（D 越大越难）
+        self.assertGreater(float(st.get("difficulty") or 0), 5.0)
 
 
 if __name__ == "__main__":

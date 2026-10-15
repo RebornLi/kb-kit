@@ -7,14 +7,14 @@ from plugins._subprocess_plugin import SubprocessPlugin
 
 class HealthMetricsPlugin(SubprocessPlugin):
     SCRIPT_NAME = "kb_health.py"
-    ACTION_MAP = {"metrics": None}
+    ACTION_MAP = {"metrics": None, "kpi": "kpi"}
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="health_metrics",
             version="1.0",
             plugin_type="kb_module",
-            actions=["metrics"],
+            actions=["metrics", "kpi"],
             cli_aliases={"health-metrics": "metrics"},
             description="健康度量指标",
         )

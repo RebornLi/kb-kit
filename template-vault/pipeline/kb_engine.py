@@ -29,7 +29,36 @@ import kb_fitness  # P1-A: 外部锚定 fitness（解耦 T3 于可自抬的内�
 import kb_scale  # P3-1: 规模档位 + 索引层覆盖感知（双层检索预留）
 from kb_constants import MERGE_MIN_SIM, RETIRE_AGE_DAYS
 
-CONFIG_PATH = Path(__file__).resolve().parent / ".kb_rsi_config.json"
+# 旧位置之一：模块所在目录（不传 root 时的历史行为）。规范位置是 .kb/state/<CONFIG_NAME>。
+_LEGACY_CONFIG_PATH = Path(__file__).resolve().parent / ".kb_rsi_config.json"
+CONFIG_NAME = "kb_rsi_config.json"   # 统一存 .kb/state/
+
+
+# 旧位置（只读回退）：pipeline/.kb_rsi_config.json（以及不传 root 时的模块目录）
+_LEGACY_CONFIG = ("pipeline/.kb_rsi_config.json",)
+
+
+def config_path(root: Union[str, Path, None] = None) -> Path:
+    """RSI 配置的**写**路径（规范：`<root>/.kb/state/kb_rsi_config.json`）。
+
+    以前硬编码 `Path(__file__).parent`，于是 `--root <别的库>` 仍然读写**安装目录**的
+    配置（读错开关 + 往源码树写脏数据）；后来改成 `<root>/pipeline/`，但那与
+    「状态统一在 .kb/state/」的约定不一致。读请用 `read_config_path`。
+    """
+    if root is None:
+        return _LEGACY_CONFIG_PATH
+    from state_manager import state_path
+    return state_path(root, CONFIG_NAME)
+
+
+def read_config_path(root: Union[str, Path, None] = None) -> Optional[Path]:
+    """RSI 配置的**读**路径：规范优先，旧位置回退；都没有返回 None。"""
+    if root is None:
+        return _LEGACY_CONFIG_PATH if _LEGACY_CONFIG_PATH.exists() else None
+    from state_manager import read_state_path
+    return read_state_path(root, CONFIG_NAME, legacy=_LEGACY_CONFIG)
+
+
 CONFIG_DEFAULT = {
     "version": 1,
     "auto_apply": False,        # 是否自动写入（对应 --auto）
@@ -69,21 +98,21 @@ def _resolve_health_weights(cfg):
 
 
 # ── 配置读写 ──────────────────────────────────────────────
-def load_config() -> Dict[str, Any]:
+def load_config(root: Union[str, Path, None] = None) -> Dict[str, Any]:
     cfg = dict(CONFIG_DEFAULT)
-    if CONFIG_PATH.exists():
+    p = read_config_path(root)          # 读：规范优先、旧位置回退
+    if p is not None and p.exists():
         try:
-            user = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+            user = json.loads(p.read_text(encoding="utf-8"))
             cfg.update(user)
         except (OSError, json.JSONDecodeError):
             pass
     return cfg
 
 
-def save_config(cfg: Dict[str, Any]) -> None:
-    tmp = CONFIG_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
-    tmp.replace(CONFIG_PATH)
+def save_config(cfg: Dict[str, Any], root: Union[str, Path, None] = None) -> None:
+    from kb_common import atomic_write_text
+    atomic_write_text(config_path(root), json.dumps(cfg, ensure_ascii=False, indent=2))
 
 
 # ── git checkpoint + 记录（所有写操作必经此门）──────────────
@@ -176,10 +205,9 @@ def log_decision(cfg: Dict[str, Any], root: Union[str, Path], tier: str, action:
     }
     if extra:
         rec.update(extra)
-    lp = Path(root) / "pipeline" / ".kb_engine_proposals.jsonl"
-    lp.parent.mkdir(parents=True, exist_ok=True)  # 健壮：日志目录不存在则建
-    with open(lp, "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    from state_manager import append_jsonl
+    # 统一 .kb/state/（旧位置 pipeline/.kb_engine_proposals.jsonl 由读取方回退）
+    append_jsonl(root, "kb_engine_proposals.jsonl", rec)
     return rec
 
 
@@ -384,8 +412,10 @@ def tier_t2(root: Union[str, Path], cfg: Dict[str, Any], do_apply: bool) -> List
 # ── T3 A/B 自调参验证机制 ──────────────────────────────────
 def _load_last_ab_snapshot(root: Path) -> Optional[dict]:
     """从 .kb_engine_proposals.jsonl 读取最后一条 ab_snapshot。"""
-    log_path = Path(root) / "pipeline" / ".kb_engine_proposals.jsonl"
-    if not log_path.exists():
+    from state_manager import read_state_path
+    log_path = read_state_path(root, "kb_engine_proposals.jsonl",
+                               legacy=("pipeline/.kb_engine_proposals.jsonl",))
+    if log_path is None or not log_path.exists():
         return None
     try:
         lines = log_path.read_text(encoding="utf-8").strip().split("\n")
@@ -403,7 +433,9 @@ def _load_last_ab_snapshot(root: Path) -> Optional[dict]:
 
 def _save_ab_snapshot(root: Path, snapshot: dict) -> None:
     """追加写入 ab_snapshot 到决策日志。"""
-    log_path = Path(root) / "pipeline" / ".kb_engine_proposals.jsonl"
+    from state_manager import read_state_path
+    log_path = read_state_path(root, "kb_engine_proposals.jsonl",
+                               legacy=("pipeline/.kb_engine_proposals.jsonl",))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("a", encoding="utf-8") as f:
         f.write(json.dumps({"ab_snapshot": snapshot, "ts": datetime.now().isoformat()}, ensure_ascii=False) + "\n")
@@ -411,8 +443,10 @@ def _save_ab_snapshot(root: Path, snapshot: dict) -> None:
 
 def _count_consecutive_neg_delta(root: Path) -> int:
     """统计连续负 delta 次数。"""
-    log_path = Path(root) / "pipeline" / ".kb_engine_proposals.jsonl"
-    if not log_path.exists():
+    from state_manager import read_state_path
+    log_path = read_state_path(root, "kb_engine_proposals.jsonl",
+                               legacy=("pipeline/.kb_engine_proposals.jsonl",))
+    if log_path is None or not log_path.exists():
         return 0
     try:
         lines = log_path.read_text(encoding="utf-8").strip().split("\n")
@@ -420,14 +454,19 @@ def _count_consecutive_neg_delta(root: Path) -> int:
         for line in reversed(lines):
             try:
                 rec = json.loads(line)
-                snap = rec.get("ab_snapshot", {})
-                delta = snap.get("delta", 0)
-                if delta < 0:
-                    count += 1
-                else:
-                    break
             except json.JSONDecodeError:
                 continue
+            snap = rec.get("ab_snapshot")
+            # 只有 A/B 快照行才参与连续负 delta 统计。每轮末尾还会追加 tier="health" 行，
+            # 它没有 ab_snapshot → 以前算 delta=0 → 首行即 break → count 恒 0，
+            # 于是 T3 的「连续 3 次负 delta 自动回滚」永不触发。
+            if not isinstance(snap, dict):
+                continue
+            delta = snap.get("delta", 0)
+            if delta < 0:
+                count += 1
+            else:
+                break
         return count
     except (OSError, json.JSONDecodeError):
         return 0
@@ -435,8 +474,10 @@ def _count_consecutive_neg_delta(root: Path) -> int:
 
 def _build_ab_report(root: Path) -> str:
     """生成 A/B 调参效果报告。"""
-    log_path = Path(root) / "pipeline" / ".kb_engine_proposals.jsonl"
-    if not log_path.exists():
+    from state_manager import read_state_path
+    log_path = read_state_path(root, "kb_engine_proposals.jsonl",
+                               legacy=("pipeline/.kb_engine_proposals.jsonl",))
+    if log_path is None or not log_path.exists():
         return "无 A/B 调参记录"
     try:
         lines = log_path.read_text(encoding="utf-8").strip().split("\n")
@@ -568,26 +609,51 @@ def tier_t3(root: Union[str, Path], cfg: Dict[str, Any], do_apply: bool) -> List
         if ab_snapshot:
             _save_ab_snapshot(Path(root), ab_snapshot)
             base[0]["ab_snapshot"] = ab_snapshot
-    elif fitness_trend is not None and fitness_trend <= 0:
+    elif fitness_trend is not None and fitness_trend < 0:
         new_step = max(0.02, step * (1 - cfg["t3_step"]))   # 收缩
         new_floor = min(0.80, floor + 0.05)                  # 更严的质量门
         new_cfg = dict(cfg, t3_step=round(new_step, 3), confidence_floor=round(new_floor, 3))
         saved = dict(cfg.get("tuned", {}), last_tune=datetime.now().isoformat())
         saved["nudge"] = {"t3_step": new_step, "confidence_floor": new_floor,
-                          "reason": "fitness趋势停滞/下降(外部锚定)→收缩"}
+                          "reason": "fitness下降(外部锚定)→收缩"}
         new_cfg["tuned"] = saved
         if do_apply:
-            save_config(new_cfg)
+            save_config(new_cfg, root)
             git_backup(root, "pre-rsi-t3 tune checkpoint")
         base.append({"tier": "t3", "action": "TUNED", "from": {"step": step, "floor": floor},
                      "to": {"step": round(new_step, 3), "floor": round(new_floor, 3)},
-                     "reason": "fitness(外部锚定)趋势停滞/下降 → 收缩步长+收紧质量门",
+                     "reason": "fitness(外部锚定)下降 → 收缩步长+收紧质量门",
                      "rolled_back_possible": True,
                      "before": {"step": step, "floor": floor},
                      "after": {"step": round(new_step, 3), "floor": round(new_floor, 3)}})
-    elif fitness_trend and fitness_trend > 0:
+    elif fitness_trend is not None and fitness_trend > 0:
+        # 对称放宽：以前只有"收紧"分支（且把 trend==0 也算停滞），长期运行后
+        # 质量门越来越严、写回越来越少，且**没有任何恢复路径** —— 单向棘轮。
+        new_step = min(float(CONFIG_DEFAULT["t3_step"]), round(step * (1 + cfg["t3_step"]), 3))
+        new_floor = max(float(CONFIG_DEFAULT["confidence_floor"]), round(floor - 0.05, 3))
+        if new_floor != floor or new_step != step:
+            new_cfg = dict(cfg, t3_step=new_step, confidence_floor=new_floor)
+            saved = dict(cfg.get("tuned", {}), last_tune=datetime.now().isoformat())
+            saved["nudge"] = {"t3_step": new_step, "confidence_floor": new_floor,
+                              "reason": "fitness上升(外部锚定)→对称放宽回默认"}
+            new_cfg["tuned"] = saved
+            if do_apply:
+                save_config(new_cfg, root)
+                git_backup(root, "pre-rsi-t3 relax checkpoint")
+            base.append({"tier": "t3", "action": "TUNED_RELAX",
+                         "from": {"step": step, "floor": floor},
+                         "to": {"step": new_step, "floor": new_floor},
+                         "reason": "fitness(外部锚定)上升 → 放宽步长/质量门回默认",
+                         "before": {"step": step, "floor": floor},
+                         "after": {"step": new_step, "floor": new_floor}})
+        else:
+            base.append({"tier": "t3", "action": "T3_STABLE",
+                         "reason": "fitness(外部锚定)趋势上升，且参数已在默认值，维持"})
+    else:
+        # fitness_trend == 0（稳定）或 None（无基线）：**稳定不是失败信号**。
+        # 以前 `<= 0` 把稳定也算「停滞」→ 每次运行都收紧一档，单向棘轮。
         base.append({"tier": "t3", "action": "T3_STABLE",
-                     "reason": "fitness(外部锚定)趋势上升，维持当前参数"})
+                     "reason": "fitness(外部锚定)稳定/无趋势 → 不调参"})
 
     # 保存 A/B snapshot（非回滚分支）
     if not ab_rollback and ab_snapshot:
@@ -624,14 +690,14 @@ def main() -> int:
     args = ap.parse_args()
     root = Path(args.root)
 
-    cfg = load_config()
+    cfg = load_config(root)
 
     if args.ab_report:
         print(_build_ab_report(root))
         return 0
 
     if args.reset_config:
-        save_config(CONFIG_DEFAULT)
+        save_config(CONFIG_DEFAULT, root)
         print("🔄 已重置配置为默认：tiers_enabled=%s t3_enabled=%s auto_apply=%s"
               % (CONFIG_DEFAULT["tiers_enabled"], CONFIG_DEFAULT["t3_enabled"],
                  CONFIG_DEFAULT["auto_apply"]))

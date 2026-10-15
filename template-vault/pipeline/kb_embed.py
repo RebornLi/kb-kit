@@ -35,18 +35,28 @@ _last_probe_ts = 0.0
 _PROBE_INTERVAL = 300.0      # 两次探测的最小间隔（秒），避免每句都试网
 
 
+def _cfg():
+    """端点配置：环境变量优先，回退库内 .kb/model.json（cron/systemd 也拿得到）。"""
+    try:
+        from kb_common import model_config
+        return model_config()
+    except Exception:
+        return {}
+
+
 def _base_url():
-    # embedding 专用地址（可与 chat 服务不同端口，本仓库 embedding 跑在独立 vLLM）；
-    # 缺省回退 ORNITH_BASE_URL（向后兼容：只设 BASE_URL 时二者同源）。
-    return (os.environ.get("ORNITH_EMBED_URL") or os.environ.get("ORNITH_BASE_URL") or "").strip()
+    c = _cfg()
+    return (c.get("embed_url") or c.get("base_url") or "").strip()
 
 
 def _api_key():
-    return (os.environ.get("ORNITH_API_KEY") or "").strip()
+    c = _cfg()
+    return (c.get("api_key") or "").strip()
 
 
 def _model():
-    return (os.environ.get("ORNITH_EMBED_MODEL") or "").strip()
+    c = _cfg()
+    return (c.get("embed_model") or "").strip()
 
 
 def _post(url, payload):

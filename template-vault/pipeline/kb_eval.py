@@ -95,6 +95,9 @@ def run_query(rag_abs: str, question: str, root: Union[str, Path], top: int,
     `import kb_common` 天然可达；--root 显式传 vault 根。
     """
     cmd = [sys.executable, rag_abs, "query", question, "--top", str(top)]
+    # 评测流量不得写入使用信号：否则同一小时重跑黄金题会把再问率顶到 1、
+    # 成功率代理打到 0，反过来压低 fitness（测量行为污染被测对象）。
+    cmd.append("--no-record")
     if as_json:
         cmd.append("--json")
     cmd += ["--root", str(root)]

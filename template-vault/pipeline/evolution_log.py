@@ -18,13 +18,14 @@ from datetime import datetime
 from pathlib import Path
 
 # 统一前缀：ingest/query/lint/engine 四类 + 细分 tier/health/note
-EVENTS = ("INGEST", "QUERY", "LINT", "ENGINE", "HEALTH", "T1", "T2", "T3", "NOTE", "CONTRADICTION")
+EVENTS = ("INGEST", "QUERY", "LINT", "ENGINE", "HEALTH", "T1", "T2", "T3", "NOTE",
+          "CONTRADICTION", "ALERT")
 # 人读颜色前缀（同事件固定配色语义，仅文档）
 _EVENT_LABEL = {
     "INGEST": "摄入记忆", "QUERY": "查询综合", "LINT": "质量lint",
     "ENGINE": "引擎整理", "HEALTH": "健康快照", "T1": "T1整理",
     "T2": "T2加权", "T3": "T3调参", "NOTE": "备注",
-    "CONTRADICTION": "矛盾纠正",
+    "CONTRADICTION": "矛盾纠正", "ALERT": "护栏告警",
 }
 _HEADER = [
     "# 📚 RSI 演进日志（人可读）", "",
@@ -39,6 +40,13 @@ def _root(root):
 
 def pipeline_dir(root):
     return _root(root) / "pipeline"
+
+
+def _jsonl_path(root):
+    """机器可读演进日志的**读**路径（规范优先，回退旧位置；都没有返回 None）。"""
+    from state_manager import read_state_path
+    return read_state_path(root, "kb_evolution.jsonl",
+                           legacy=("pipeline/.kb_evolution.jsonl",))
 
 
 def append(root, event, summary, *, detail=None, category="info"):
@@ -60,8 +68,11 @@ def append(root, event, summary, *, detail=None, category="info"):
     pdir.mkdir(parents=True, exist_ok=True)
 
     # 1) 机器可读（可 diff、可脚本过滤）
-    with open(pdir / ".kb_evolution.jsonl", "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    # 统一写 .kb/state/（旧位置 pipeline/.kb_evolution.jsonl 由读取方回退兼容）。
+    # 用 append_jsonl 而不是裸 open("a")：它会自动创建 .kb/state/ 父目录
+    # （pdir 建的是 pipeline/，不是状态目录）。
+    from state_manager import append_jsonl
+    append_jsonl(root, "kb_evolution.jsonl", rec)
 
     # 2) 人类可读（按日期分组插入）
     _append_md(pdir / "EVOLVED.md", rec["date"], rec)
@@ -97,8 +108,8 @@ def _append_md(path, date, rec):
 
 def tail(root, n=30):
     """读最近 n 条演进事件（机器可读），供 CLI/status 展示。"""
-    p = pipeline_dir(root) / ".kb_evolution.jsonl"
-    if not p.exists():
+    p = _jsonl_path(root)
+    if p is None or not p.exists():
         return []
     return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines()[-n:]]
 

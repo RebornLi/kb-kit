@@ -108,3 +108,40 @@ class OnboardingFilesTest(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+
+class TemplateCleanlinessTest(unittest.TestCase):
+    """模板**绝不能**夹带运行态 —— 它会随 create_vault 复制进每个新用户的知识库。
+
+    实测踩到：`template-vault/.kb/state/feedback_state.json`、`query_cache.json`、
+    `pipeline/.kb_rsi_proposals.jsonl`（在模板目录里跑测试留下的）会被原样分发，
+    新库开局就带着指向不存在笔记的反馈命中与查询缓存。
+    """
+
+    def test_no_state_dir_in_template(self):
+        self.assertFalse((REPO / "template-vault" / ".kb").exists(),
+                         "模板里不应有 .kb/（运行态；create_vault.STATE_IGNORE 现已排除）")
+
+    def test_pipeline_and_scripts_contain_only_code(self):
+        stray = []
+        for d in ("pipeline", "scripts"):
+            base = REPO / "template-vault" / d
+            if not base.is_dir():
+                continue
+            for p in base.rglob("*"):
+                if not p.is_file() or "__pycache__" in p.parts:
+                    continue
+                if p.name.startswith(".") or p.suffix in (".json", ".jsonl"):
+                    stray.append(f"{d}/{p.relative_to(base)}")
+        self.assertEqual(stray, [], f"模板运行目录里混入运行态文件：{stray}")
+
+    def test_state_ignore_covers_runtime_dirs(self):
+        """create_vault 的忽略表必须覆盖运行态目录（否则上面两条会被绕过）。"""
+        import create_vault
+        # ignore_patterns 不接受直接查询，改为断言源码里登记了这些名字
+        src = (REPO / "create_vault.py").read_text(encoding="utf-8")
+        for name in (".kb", ".agents", "vector index"):
+            self.assertIn(f'"{name}"', src, f"STATE_IGNORE 未登记 {name}")
+
+
+if __name__ == "__main__":
+    unittest.main()

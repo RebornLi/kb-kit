@@ -8,6 +8,7 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class ConfidencePlugin(SubprocessPlugin):
     SCRIPT_NAME = "kb_confidence.py"
     ACTION_MAP = {"show": "show", "audit": "audit", "apply": "apply", "decay": "decay"}
+    IN_PROCESS_ACTIONS = {"show", "audit"} # apply/decay 是写，走 subprocess
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

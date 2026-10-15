@@ -3,12 +3,327 @@ domain: 管理
 status: active
 importance: 0.5
 created: 2026-09-19
-updated: 2026-09-19
+updated: 2026-10-15
 tags: ["管理"]
 ---
 # 📋 kb-kit 版本更新日志（CHANGELOG）
 
 > 记录 kb-kit 工程套件的版本演进。日期格式：YYYY-MM-DD。
+
+---
+
+## v2.4.0 — 全代码梳理与缺陷修复（2026-10-15）
+
+一次**逐文件全文梳理**（8 份分册 + 总册见 `docs/CODE-SURVEY.md`）之后的集中修复。
+测试从 69 条涨到 **168 条**（约 1 秒全绿）；改动只落在开发仓库，未触碰生产库。
+
+### 🔴 数据安全（会丢数据 / 违反自家写侧协议）
+- **`kb clean apply` 会改写 `raw/` 不可变证据层** → `do_clean` 主循环补 `_is_raw_rel` 守卫
+  （同文件其余 5 处本就有）；顺带修：空值 frontmatter 键（`url:`）不再被删。
+- **`do_clean(dry=True)` 其实会写盘** → 去重段补 `dry` 守卫（否则把 `clean dry-run`
+  接上真实预览时，只读命令会立刻变成破坏性命令）。
+- **`kb curate run`（不带 `--apply`）也会改笔记 frontmatter** → noise/raw-only 判定
+  写回加 `apply` 门控。
+- **`kb sync rollback` 的 `git clean -fdq` 会删未提交笔记** → 清理前列出清单并备份到
+  `backups/rollback-<ts>/`，备份不完整则整体放弃清理。
+- **`kb_query apply --id X` 清空整个提案文件** → 只重写未写入的条目。
+- **sqlite/opencode 适配器「同标题、新内容」被永久丢弃** → 去重键带内容指纹 +
+  文件内改内容级幂等（原 tuple 键是死代码）。
+- **块列表 `tags:` 被目录名派生标签替换**（`["开发","kb-kit"]` → `["40-资源库 Resources"]`）
+  → 根因修在 `kb_common.load_note_full` 支持 YAML 块列表续行。
+- `kb_calibrate.synth` 的 `rmtree` 加守卫（误传真实库路径不再整库删除）。
+
+### 🟠 功能不可用 / 静默错误
+- **`kb.cmd` 变量闭合符写错**（`%VAULT:~0,-1}`）→ Windows 上 `kb` 完全不可用，已修。
+- **`kb tagfix` 整体崩溃**（`taxonomy.known_tags` 签名不匹配）→ 代码回流修复。
+- **`kb clean --apply` 报 argparse 错**（README 与 `kb help` 都这么写）→ 启动器新增
+  「旗标形态子命令」提升。
+- **CLI 解析**：支持 `--key=value`；`BOOL_FLAGS` 从 13 补到 43 个（附源码扫描守卫测试）；
+  短选项 `-h` 不再被改写成 `--h`；`--project-context-root`（`nargs="+"`）不再丢值。
+- **`kb ingest agent --list` 不列清单而是直接写库** → 短路成只读列举。
+- **适配器插件把「写入条数」当退出码**（成功写 5 条 → rc=5 破坏 `set -e`）→ 规范化为 0/1。
+- **路由表指向不存在的 PARA 目录**（`30-资源 Resources` / `40-领域 Areas`）→ 改为真实目录名，
+  并补 `intake_triage` 漏配的 `运维`/`数据`。
+- `kb_consistency` 的忠实度判定**只认英文**，中文回答一律默认判「忠实」→ 中英词表 + 不可解析即降级。
+- `sync.ingest-any` 导入不存在的 `convert_to_markdown`、domain 恒「综合」、无 checkpoint → 全修。
+- `kb_meta apply --all` 写 0 个却报成功；`kb_rsi` 的 `ALERT` 抛未捕获 `ValueError`；
+  curate 蒸馏关恒假条件；`kb_l4` 未接地也照样冻结（自锁）；L3 账本路径错；
+  T3 的 A/B 回滚永不触发；`kb_claim` 日期约束导致配不到对；`kb_engine` 配置写死模块目录；
+  `dashboard` 死链=0 假告警；`kb-healthcheck` 的 `_INDEX.md` 死链豁免不可达；
+  `graph.py` 生成的 Mermaid 语法非法；`gen_kb_arch.py` 新克隆必崩 —— 均修。
+
+### ⚡ 性能（实测）
+- **查询期不再物化全库向量**：索引升到 **v5**，预存每篇 `norms`/`dl`/`avgdl`，
+  余弦 **155 ms → 2.3 ms**（现役库量级），索引仅 +1.9%。旧索引自动回退，不强制迁移。
+- **「增量」索引终于真增量**：mtime 快路径提到任何读盘之前 + 倒排索引零读盘重建
+  → 无变更 **30 → 0** 次读盘，改 1 篇 **65 → 1** 次。
+- `kb_l4.render` 不再重复全库扫描；`kb_usage`/`kb_adaptretrieve` 的事件窗口从「取最老」
+  改为「取最新」（原先最新查询信号被永久忽略）。
+
+### 🧪 测试与守卫（防回退）
+- 新增 `tests/test_p0_fixes.py`（85 条）、`test_route_consistency.py`、`test_readme_plugin_list.py`。
+- **评测不再污染自身指标**：`rag query --no-record` + `KB_NO_FEEDBACK=1`，
+  5 处评测/对照调用点全部接上（以前跑一次黄金集会顶高再问率、反过来压低 fitness）。
+- 新增 **`scripts/eval_retrieval_gold.py`**：确定性检索评测（不需要 LLM 裁判）。
+- **P1-9 复核结论：不改排序。** 倒排加成看起来是量纲缺陷，实测却是排序主力 ——
+  6 种改法对照（30 题×4 目标黄金集）：现状 top1 90.0% / recall@10 98.3%，
+  改成乘性+IDF 加权掉到 60.0% / 55.0%。已在 `rag.py` 就地写入证据与「不要这么改」的说明。
+- `kb_adaptretrieve` 明确降级为**审计清单**（其写下的「检索修正契约」目前没有运行时消费者，
+  不再暗示检索已被修正），并接进 dashboard 告警使其可见。
+
+### 🔀 路由表收敛（按语料证据）
+- 4 套 `domain → PARA` 路由表原先在 `产品` / `管理` 上给出 2-3 个不同答案
+  （同一篇笔记「从收件箱进来」和「从记忆晋升进来」会落到不同分区）。
+- 仓库文档只定义 domain 词表与二级子域，**没有**分区映射，故以现役库知识层实测为准：
+  产品 85% 落 `40-资源库 Resources`、管理 48% 落 `10-项目 Projects`（`60-运营` 仅 5.8%）。
+- 据此对齐 3 处异类：`intake_triage.产品`、`memory_sync.管理`、`memory_ingest.产品`；
+  并删掉 `intake_triage` 里的死配置 `生活`。**现 4 表 8 域全票一致**。
+- `tests/test_route_consistency.py` 收紧为「必须全票一致 + 必须等于实测期望值 +
+  必须覆盖白名单 + 目标目录必须存在」，`KNOWN_DIVERGENCE` 已删除。
+
+### 🚀 kb-context-dsh / kb-context-hook：常驻查询 worker（单查 ~190ms→~60ms）
+- 新增 `pipeline/kb_worker.py`（常驻 retriever：索引加载一次、mtime 失效重载、JSON-lines stdio）。
+- 两个上下文钩子改用常驻 worker（懒 spawn + 崩溃回退 execFile + seq 匹配/FIFO 兼容）。
+- 片段质量：`context` 优先于 snippet，默认截断 40→140 字；修掉字节封顶没算前缀/围栏的 bug。
+
+### ⚡ 插件只读命令进程内快路径（query 端到端 -25%）
+- `SubprocessPlugin` 加 `IN_PROCESS_ACTIONS` 白名单：只读命令（query/validate/healthcheck/
+  schema check/gate check/recall deck/audit scan…）在启动器进程内 `import + main()`，省一次
+  解释器启动+import（实测 ~40ms，占 query 端到端 21%）；写命令仍走 subprocess 隔离。
+- 安全：import 失败/异常回退 subprocess，stdout/stderr 捕获、成功才回放（无双份输出）；
+  静态护栏禁止写动作进白名单。query 输出与子进程逐字节一致，287 测试全绿。
+
+### ⏱ 睡眠时整理的灾难性回溯修复（6 分 40 秒 → 6 秒）
+- `gate._PLACEHOLDER` 正则 `^(?:...|-+|\s)*$` 里 `-+` 嵌套 `(?:)*` → 遇 `----` 分隔线后接文字
+  指数级回溯（每多 2 字符 ×4）。用 faulthandler 堆栈转储定位，改线性字符类 + 回归测试。
+- `consolidate` 签名/陈旧/门禁三层缓存：首跑 6 秒、二跑 2.7 秒（0 篇重算）。
+
+### 📅 调度与双时态迁移落地
+- 新增 `kb-consolidate-nightly`（04:30）+ `kb-gate-daily`（05:00）两个 openclaw cron 任务
+  （isolated + announce + best-effort），gate 已用一次性任务经调度器端到端验证。
+- `kb schema bitemporal --apply` 已在生产库执行（842 篇），提交 `50ebcae`，回滚点 `77dd652`。
+- 修 checkpoint 的 `git add -A` 越权提交问题（改为只登记本次文件 + 记录 HEAD sha）。
+
+### 🧠 P2 全部落地（FSRS / 睡眠整理 / claim 槽位 / 质量门禁）
+- **FSRS-6 替换 SM-2**（`fsrs_core.py`，纯 stdlib）：用定义式当不变量自检 **10/10 成立**
+  （`R(0,S)=1`、`R(S,S)=0.9`、`I(S,0.9)=S`）。**评分口径同时切到 1/2/3/4**（SM-2 的 1/3/4/5 会让 D 反向更新）。
+  接线时修掉两个真问题：首次复习丢掉 `importance` 先验种子；残留的 `st.pop("stability")` 会删掉 FSRS 主状态。
+  顺带纠正 SM-2：同日重复**不该**放大间隔（旧实现 `interval *= ease` 一天点十次会给出荒谬间隔）。
+- **睡眠时整理**（`consolidate.py`）：空闲期算近重复/槽位冲突/陈旧/闸门，**只产提议不改笔记**，
+  幂等 + 增量 + 有界，默认不用 LLM。
+- **claim 补槽位与时间态**：`subject/relation/value/temporal_state/valid_from/valid_to` +
+  `classify_pair()` —— 同槽位且时间**不相交**是**时序更新**而非矛盾（混淆会让系统去调和不存在的冲突）。
+- **质量门禁三态**（`gate.py` + `source_tier/derived/generated_by`）：reject **只用于不变量**，
+  噪声走 quarantine；LLM 派生内容必须挂非 LLM `source_ref`（防回灌污染）。
+
+### 📏 Contextual Retrieval 增益量化（结论：无法证明有增益）
+- 加了 `KB_CONTEXT_IN_INDEX` 开关做 A/B + **配对 bootstrap 4000 次**：
+  `recall@4 Δ=+1.7pp, CI95=[0,+4.2pp]` → **不显著**，其余指标恰好为 0。
+- 保留开启（方向为正、零边际成本），但**不再宣称它有依据** —— Anthropic 的数字属于长文档分块场景。
+
+### ⚖️ 提案裁决改为本地模型自主裁决
+- 新增 `pipeline/adjudicate.py` + `kb ladder adjudicate` / `kb ladder verdicts`，接进每日 cron。
+- **L1 双闸**：LLM 判「能否回答该查询」（相似度 ≠ 相关性）+ **实测**判「加契约前后排名是否真的改善」，
+  两闸都过才落地。实测出现 `LLM 同意但实测无改善 → 否决` 与 `相似度高但 LLM 判答不了 → 否决`。
+- L2/L3 无 ground truth → LLM 判断 + 硬边界（上限/只升不降/写前 checkpoint）+ 账本 + 可回滚。
+- 每一条判断都进账本（模型身份 + 理由 + 实测前后排名），人工可复查。
+- 踩坑修正：本地裁判是**推理模型**（`ornith1.5-35b`），推理 token 吃掉 `max_tokens` 导致
+  首版 40/50 次返回空内容 → 额度提到 3000 + 从推理文本兜底提取 + 加倍重试，空响应降到 1/15。
+
+### 🕰 双时态字段（P1#5）
+- 契约加 `valid_from` / `valid_to` / `recorded_at` / `superseded_by` / `conflict_with`，
+  写清"事件时间 vs 事务时间"语义（2025–2026 时序知识图谱研究的核心结论，**零依赖**实现）。
+- 新增 `kb schema bitemporal` 迁移命令：**默认 dry-run**（生产库 842 篇待迁移），
+  `--apply` 才写，写前 git checkpoint，可整体回滚。
+
+### 📐 抗 Goodhart 健康 KPI（P1#9）
+- 新增 `kb health kpi`：只算**难刷**的 5 个量（两跳可达覆盖率 / 检索一次命中率 /
+  预测校准 Brier / 陈旧率 / 复用率）；拿不到数据时**诚实报 N/A**，绝不用 0 冒充"测过了"。
+- 易刷量（笔记数/链接数）在输出里被显式标注"仅诊断，勿当 KPI"。
+- 生产库实测：**两跳可达覆盖率仅 26.0%**（1100/4228）—— 这是"有条理"的一个真实改进点。
+
+### ⚖️ 提案裁决 + 生成器缺陷修复
+- **L1**：修生成器后 29 条提案，逐条实测 → **批准 11 条**（目标进入 top-10，0 条有害）并落地。
+- **L2 驳回/缓议**：776 条要改写笔记 frontmatter，无法逐条裁决、信号当天才修好、top-20 仍含污染项。
+- **L3 批准 3 条**内部旋钮（低风险、有回滚态）。
+- **修掉 3 个生成器缺陷**（这才是首次产出是垃圾的原因）：自动化系统提示词被当用户查询
+  （44/50 来自同一段 4788 字提示词）、提案指向不该入索引的路径（28/50）、
+  排序不按重问次数（问了 73 次的问题零提案）。修复后垃圾路径 28/50 → **0/29**。
+- 诚实记录一次**被推翻的判断**：我一度判定"noise 层被排除是重大检索 bug"，
+  继续查发现那是 curate + kb_schema **契约强制**的有意设计（`kb_index: false`），
+  真正成立的只是 `LAYER_MULTIPLIER["noise"]` 是一处不可达的死配置（已加注）。
+
+### 📊 评测加配对 bootstrap（判断差异是否真实）
+- `eval_retrieval_gold.py` 新增 `--bootstrap N`（95% CI）与 `--compare baseline.json`
+  （**配对** bootstrap：同批题重采样，看差异是否跨过 0）；n=30 时只信 ≥5pp。
+- 自检通过（与自己对比全部不显著），并抓到自身两个 bug（`--save` 顺序、JSON int 键变字符串）。
+
+### 🪜 L0–L5 反馈阶梯接通（26% 的代码此前**连入口都没有**）
+- 实测发现：`kb_l4`/`kb_l5`/`kb_retriage`/`kb_selfweight`/`kb_meta`/`kb_adaptretrieve`
+  **没有任何插件** → `kb l4` 等全是「未知命令」，用户敲不出来、调度器也无从调用。
+  这是比"未调度"更根本的断点。
+- 新增 `pipeline/ladder.py`（`kb ladder status/propose/run/apply`）+ 插件 + README 登记
+  + `scripts/kb-ladder-daily.sh`（只产提案、不改笔记），排进 openclaw cron **每天 04:00**。
+- 首次运行产出（生产库真数据，此前为零）：**L1 检索修正提案 50 条**（来自 2039 次查询中
+  5.3× 的反复再问）、**L2 775 条**、L3 旋钮 3 条、L4 案卷 14 条。
+- 端到端验证：一次性任务经调度器执行成功并自动删除，提案文件时间戳证明是调度器所写。
+
+### 🔗 建链改多信号（误链代价远大于漏链）
+- `link_engine` 从"仅余弦阈值"改为 **≥2 信号且至少一个结构性信号**（共享标签/同源/共引）。
+- 真实库实测：建议 3107 → **2164** 条（-30%），滤掉的**全部**是 `lexical+neighbor`
+  （同域+用词相近，无任何结构性证据）—— 最弱的一类。
+- 依据：KG Refinement（噪声边沿图传播放大）；且 `kb link apply` 会写进笔记。
+
+### 🧠 语义补召回通道（索引 v8）
+- **实测依据**：让本地模型写"换措辞、不复用原文关键词"的查询（`tests/probe_semantic_gap.py`），
+  纯词法只命中源笔记 **37.5%**，稠密向量 **94%** —— **62% 的情况只有语义能找回**。
+- 新增 `pipeline/dense.py`：稀疏随机投影 4096→256（1.6 MB，可复现），向量存进索引（v8），
+  增量索引复用未变文档的旧向量。
+- 查询侧 **尾部槽位填充**（不是 RRF 融合）：词法前 60% 名次按构造不变，其余槽位给稠密-only。
+  实测加权 RRF 会让黄金集 top1 90.0%→83.3%(w=0.3)→76.7%(w=0.5) 单调变差（与语义重排同因）。
+- 双指标结果：头部 top1/rec@4/MRR **逐位不变**，改写探针 37.5%→**68.8%**（+31.2pp），
+  黄金集 rec@10 98.3%→97.5%（−0.8pp，n=30 噪声内）。可用 `KB_DENSE_FRAC` / `KB_DENSE=0` 调。
+- 成本：建向量一次性 113 s · 索引 7.6→9.2 MB · 查询延迟无显著变化。
+- 修复：`_SafeUnpickler` 白名单补 `array`（漏登记会让 `load_index` 静默失败 → `index not found`），
+  并新增载荷往返守卫测试拦住同类遗漏。
+
+### ♻️ 去重换 bottom-k MinHash
+- 每 shingle 哈希数 **64→1**；候选对加 size filter；存活候选用**精确 Jaccard 复核**。
+- 真实库 800 篇实测：**5.3s/259 对/88.4% 准确 → 2.6s/263 对/100% 准确**。
+- 新增 `containment` 判据区分"重复片段"（只提示不合并）与"重复笔记"。
+
+### 🚀 生产库升级（工具 + 已执行）
+- 新增 `tests/deploy.py`（dev-repo 专用）：`plan` 看差异、`rehearse` 在副本上演练、
+  `apply` 执行「备份 → 复制代码 → 重建索引 → 验证」。**只部署 `pipeline/`+`scripts/`，
+  跳过所有 `.md`**（模板内容 ≠ 用户笔记）；判据是「不引入新失败」而非「绝对全绿」。
+- 生产库升级实测：索引 **17.5 MB(version 0) → 7.6 MB(version 7, postings)**；
+  黄金集质量**逐项不变**（90.0% / 98.3% / 0.950）；冷查询 p50 **350 → 143 ms**；
+  升级窗口内被修改的 `.md` 文件数 **0**（有 `find -newermt` 证据）。
+
+### 🔁 L1 检索修正闭环打通（含实测依据）
+- `rag.cmd_query` 现在会消费 `kb adaptretrieve apply` 落下的检索修正契约 —— 原来「信号→缺口→人工确认」
+  之后的**最后一跳是断的**（契约写了没人读）。
+- **黄金集实测（30 题）**：契约正确时 top1 90.0%→**96.7%**、recall@4 82.5%→**90.0%**、
+  recall@10 98.3%→**100%**、MRR 0.950→**0.983**；而契约指向无关笔记时 top1 掉到 **76.7%**、MRR 0.883。
+- 结论：机制有效，**安全性完全取决于契约质量** → 三道护栏：置信地板 `ADJUST_MIN_SIM`、
+  条数上限 `ADJUST_MAX`、逃生门 `KB_RETRIEVAL_ADJUST=0`；`--json` 增加 `adjustments_applied` 便于审计；
+  `apply` 保持人工确认。
+
+### 🧹 遍历范围与发货洁净
+- `kb_schema_migrate.iter_notes` 改为委托 `kb_common.iter_notes`：它原先会遍历 `pipeline/` 与 `logs/`，
+  导致 `kb schema-migrate --apply` 给生成物 `pipeline/EVOLVED.md` 写 frontmatter
+  （真实库作用范围 4430 → 4228 篇，排除的 202 篇全是非笔记）。
+- `create_vault.STATE_IGNORE` 补上 `.kb`/`.agents`/`.trash`/`_curate`/`*.jsonl`：
+  原先模板里**跑测试留下的**状态文件会被复制进每个新用户的知识库。
+  新增 `TemplateCleanlinessTest` 守卫。
+
+### 🧩 重复实现收尾（可证等价才合并，其余显式登记）
+- **实测等价后合并/委托**：`kb_rsi.parse_f`→`parse_importance`、`kb_claim._parse_d`→`parse_date`、
+  `rag._cos`/`kb_rsi.cos`(dict 分支)→`kb_common.cos`、`curate_prompt.load_schema`→`curate.load_schema`
+  （抽样逐例/逐位验证；热路径耗时无变化）。
+- **改名让语义显式**（名字撞车但不是一回事）：`kb_usage._norm_query`/`_cos_vec`、
+  `embed_rerank._norm_vec`/`_cos_vec`、`kb_retriage._parse_tags_line`、
+  `kb_calibrate._parse_day_epoch`。
+- **配置漂移**：`memory_sync.DUP_SIM(0.92)` 与 `kb_constants.DUP_SIM(0.85)` 同名不同值（兜底 vs 阈值）
+  → 改名 `DUP_SIM_FALLBACK`；`clean.ARCHIVE_DAYS` 改为 import 单一事实源；
+  清掉 `memory_ingest` 两个未使用的导入。
+- **不可合并的登记 + 钉住**：新增 `tests/test_intentional_divergence.py`（17 条），
+  固定 tokenize 4 口径、frontmatter 4 读取器、iter_notes 2 套排除集、日期/tags/norm-cos 的
+  类型与边界差异 —— 谁"顺手统一"了就会红。含配置漂移守卫（常量不得二次定义、
+  契约表取值必须与代码常量一致）。
+- ⚠️ 顺带发现：`kb_schema_migrate.iter_notes` 会遍历 `pipeline/` 与 `logs/`，
+  即 `kb schema-migrate --apply` 会给生成物 `pipeline/EVOLVED.md` 写 frontmatter。
+  属于变更写工具作用范围，已在 docstring 与登记表写明，待人工确认。
+
+### 🗂 状态文件路径统一（5 套约定 → `.kb/state/`）
+- 状态曾散在 5 处：vault 根 dotfile、`pipeline/` dotfile、`.kb/` 直下、`.kb/state/`、
+  vault 根非点文件（`kb-agent.json`）。**迁移 20 个模块**统一到 `<vault>/.kb/state/<name>`。
+- `state_manager` 新增统一原语：`state_path()`（写）、`read_state_path()`/`read_json()`/
+  `read_jsonl()`（读，含旧位置回退）、`write_json()`/`append_jsonl()`（原子写 + 自动建目录）。
+- **旧位置全部保留为只读回退**（回退表 37 项），不搬不删 —— 旧库升级后状态照常读到。
+  原先的 `migrate_legacy_state`/`LEGACY_PATHS` 从无调用方（死代码），所谓迁移从未运行。
+- 新增守卫 `StatePathConventionTest`：**扫全仓点文件字面量**，禁止再写旧位置。
+  它在落地过程中抓出 **14 处漏改**（含跨模块硬编码路径、`except ImportError` 回退分支、
+  以及一处「写点绕过了自己的路径助手」）—— 这些没有任何既有测试能发现。
+- 顺带补齐原子写：`kb_query` 频率状态、`kb_selfweight`/`kb_retriage` 账本、
+  `kb_engine` 配置、`curate` 状态、`kb_contradiction` 快照。
+
+### ⚡ 索引格式 v7（tf → postings）
+- 第十四轮后 pickle 口径下 **`tf` 仍占 64.6%**（6.66 MB / 70 万「文档,词」对），`df` 另占 8.5%。
+- **改为词主序 `postings`**：`{词: [doc_id, tf, ...]}`（扁平，避免 35 万个 2 元素 list）；
+  `df` 由 `len(postings[t])//2` 导出，不再存；打分（余弦 + BM25）**只访问命中文档**。
+- **`rag.all_doc_vectors(payload)` 统一入口**：`recall_schedule` / `feedback_loop` / `memory_sync`
+  原先各自 `_vec(tf_all[r], ...)`，格式一换就会崩 —— 现已收敛。
+- **确定性构建**：范数改为排序后求和、postings/倒排按排序后文档序构建 →
+  「增量索引」与「全量重建」**逐字节一致**（可复现基线的前提，有守卫测试）。
+- 顺带修掉第十四轮的一处漏改：`memory_sync` 里残留的裸 `json.loads(idx_path.read_text())`
+  在 pickle 索引上会 `UnicodeDecodeError`。
+- 顺带修一处真实的浮点结合律差异（`f*(idf*w)` vs `(f*idf)*w`，1 ULP 在并列项上翻转名次）。
+- 结果（clone 1530 篇，对比最初 v5 基线）：索引 **17.95 → 7.64 MB（−57%）**、
+  `load_index` **189 → 75 ms**、进程内查询 **302 → 89 ms（3.4×）**、冷缓存端到端 **350 → 182 ms**；
+  **15 题分数 15/15 一致**（唯一顺序差异是第 10 名的精确并列换位）、黄金集**完全不变**。
+
+### ⚡ 索引格式 v6（先测量再优化）
+- **先做耗时分解**：一次真实查询进程内 302 ms = `load_index` 189 ms + `_bm25_scores` 88 ms + 其余。
+- **`_bm25_scores` 71.3 ms → 1.2 ms（59×）**：它每次查询都遍历全库「文档×词次」（≈70 万次）
+  重算 `df`，而 `df` 只与 `tf` 有关。索引 v6 预存 `df`（构建期本已算过），
+  并把 `idf`/文档归一因子两个循环不变量提出内层；分数逐位一致。
+- **实测推翻一个想当然**：倒排 postings 从路径字符串换成整数 doc id，体积 −19%
+  但解析**慢 9 ms** —— JSON 解析成本取决于 token 数量而非字节数。编码保留（省 3 MB），
+  但不再指望它提速。
+- **真正的杠杆是格式**：同一 payload `pickle.load` 70 ms vs `json.loads` 161 ms（2.3×），
+  体积还小 20%。索引 v6 主格式改为 **pickle**，仍能读旧 `df_idf.json`（不强制迁移）。
+- **安全**：受限 `_SafeUnpickler` 只放行内置容器/标量与白名单（`collections.Counter`
+  是 dict 子类，`isinstance` 检查会漏过 —— 实测踩到）；写入「先原子落 pkl，成功再删旧 json」，
+  中途失败不会出现无索引空窗。已反向验证：放开白名单 → 恶意 pickle 真的执行 → 测试变红。
+- **收敛 9 处写死的索引路径**（含 `feedback_loop` 绕过 `rag.load_index` 直接读 JSON、
+  shell 巡检脚本、6 个测试）到 `rag.index_file()` / `rag.load_index()`。
+- 结果：索引 **17.95 MB → 10.32 MB（−42.5%）**；`cmd_query` **302 → 123 ms**；
+  端到端冷缓存 **350 → 217 ms**；**15/15 查询命中与分数完全一致**、
+  黄金集 **top1 90.0% / recall@10 98.3% / MRR 0.950 逐项不变**。
+
+### 🧩 重复实现收敛（只收敛可证明等价的）
+- **CJK 字正则 9 份 → 1 份**：9 个逐字相同的 `re.compile(r"[\u4e00-\u9fff]")`（散在 7 个文件，
+  `kb_common` 内部还重复一份）归一到 `kb_common.CJK`。
+- 删除死函数 `kb_common.dedup_check`（无调用方，且内联重复实现了 `norm`），共 61 行。
+- **状态写入原子化**：新增 `kb_common.atomic_write_text`；`kb_meta`（状态+配置）、
+  `user_manager.save_users`、`agent_registry.save_registry` 由直接 `write_text` 改为原子写
+  （写一半崩溃不再留下半截文件），`state_manager._atomic_write` 改为委托同一实现。
+- **明确不合并**：`tokenize`（5 种切分口径）、`cos`、日期解析（7 份）、tags 解析、
+  配置加载（3 套策略）、`iter_notes`、状态 load/save 包装 —— 语义确有差异，合并会改行为。
+- 顺带修一个潜伏缺陷：`kb_claim` 换用共享 `CJK` 后缺 import，测试未覆盖该路径，
+  直接调用 `_signature()` 才暴露 `NameError`，已修。
+
+### 🧪 开发测试环境（`tests/testenv.py`）
+- 新增可复现的验证场地：`build` / `check` / `status` / `clean`，产物在 `.testenv/`（gitignore）。
+  - `fresh/` 安装验收库（`create_vault` 装出来，`kb verify` 必须全过）
+  - `synth/` 合成库（300 篇有效笔记 + 黄金集 + 索引）→ 全链路冒烟
+  - `clone/`（`--from-vault`）真实库副本 + dev 代码 + 重建索引 → 检索**质量**与真实规模**性能**基线
+- **隔离铁律**：所有子进程经 `run()` 发起并强制 `KB_ROOT` 指向沙箱；构建目标落在保护路径
+  （`$KB_ROOT` / 现役库）内一律 abort。由 `tests/test_testenv.py` 守卫。
+- `check --perf` 一次给出：单测 + 安装验收 + 合成库链路 + 真实库质量 + 两档性能基线。
+
+### ✅ 验收器（`kb verify`）
+- **修 P0 级缺陷：验收错了对象。** 三项检查以裸 `kb` 作命令（PATH 符号链接指向另一个库）
+  且不传 `--root` —— `kb verify --root <A>` 实际测量的是另一个知识库 B 的数据。
+  改为用**目标库自己的** `pipeline/kb_launcher.py` + 显式 `--root`；目标不是 kb-kit 库时明确报错。
+- 活库必然失败的两项改为非阻断：缺 `tests/` → **SKIP**（新增 `--strict` 供 CI）；
+  结晶产出类断言在**从未启用结晶**时 → **N/A**（真跑过却无产出仍 FAIL）。
+- 效果：`create_vault` 出的新库从「3 项失败」变为**全部通过**；模板库自带内容问题也已修
+  （孤儿 `如何使用.md` 接进首页；管理方案文档压缩到自身颗粒度上限内，未改阈值）。
+
+### 🩺 巡检
+- **死链检测不再把代码示例当链接**：写文档讲双链语法时的 `` `[[名]]` `` 曾被判死链。
+  根因修法（先剥掉代码块与行内 code span），而不是继续往噪声词表里补特例。
+
+### 📖 文档
+- README：插件清单 24 → **32**（实测 4 agent + 32 模块）、命令参考补 13 个已实现工具、
+  测试条数 66 → 168、补 `--no-record` / `eval_retrieval_gold.py` 等说明；
+  上述两处一致性由 `test_readme_plugin_list.py` 守卫。
+
+### ⚠️ 已知未决（需人工拍板）
+- `kb_adaptretrieve` 的 `boost` 是否要真正影响检索（要先有评测支持）。
+- 状态文件 5 套约定未统一；`json.loads` 186 ms 与 `_bm25_scores` 76 ms 的索引编码优化未做。
 
 ---
 

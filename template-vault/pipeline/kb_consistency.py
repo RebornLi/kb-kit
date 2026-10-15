@@ -32,6 +32,10 @@ from kb_common import parse_frontmatter, tokenize
 LEDGER_NAME = "promotions.jsonl"
 DEFAULT_COV_THR = 0.30  # Jaccard 召回率阈值：< 此值判 coverage-drop（High）
 LLM_TIMEOUT = 15        # 可选 LLM 调用超时
+# 逐条 LLM 忠实度检查的**总次数预算**：以前对 ledger 里每条记录都无条件调一次
+# （串行、每条最长 15s），大 ledger 下审计会慢到不可用。预算用完后只走 Tier1。
+# 设 KB_CONSISTENCY_LLM_MAX=0 可完全关闭 LLM 检查。
+LLM_RECORD_BUDGET = int(os.environ.get("KB_CONSISTENCY_LLM_MAX", "40") or 0)
 
 
 def _tokens(text):
@@ -123,7 +127,21 @@ def _check_faithfulness(root, original_text, note_body, timeout=LLM_TIMEOUT):
     if box.get("ans") is None:
         return {"ok": False, "verdict": None, "hint": box.get("hint", "LLM 未作答（降级到 Tier1）")}
     v = box["ans"].strip().lower()
-    verdict = "unfaithful" if "unfaithful" in v else ("partial" if "partial" in v else "faithful")
+    # 只认明确的判定词：模型（尤其中文提示下）可能回「不忠实 / 部分忠实」，
+    # 以前所有非英文回答都落到 else → 默认判「忠实」，把 Critical/High 全漏掉；
+    # 无法识别时返回 ok=False（降级），绝不默认放行。
+    NT = ("unfaithful", "not faithful", "不忠实", "不忠实于", "背离", "不符")
+    PT = ("partial", "partially", "部分忠实", "部分符合", "部分一致")
+    FTI = ("faithful", "忠实", "符合", "一致")
+    if any(k in v for k in NT):
+        verdict = "unfaithful"
+    elif any(k in v for k in PT):
+        verdict = "partial"
+    elif any(k in v for k in FTI):
+        verdict = "faithful"
+    else:
+        return {"ok": False, "verdict": None,
+                "hint": f"LLM 回答无法解析为判定（{v[:40]!r}），降级到 Tier1"}
     return {"ok": True, "verdict": verdict, "hint": ""}
 
 
@@ -143,8 +161,8 @@ def _severity(reasons):
     return best or "Info"
 
 
-def audit_record(rec, root, cov_thr):
-    """对单条晋升记录做 Tier1 + 可选 Tier2 审计，返回 dict。"""
+def audit_record(rec, root, cov_thr, use_llm=True):
+    """对单条晋升记录做 Tier1 + 可选 Tier2 审计，返回 dict。use_llm=False 时跳过 LLM。"""
     target_rel = rec.get("target_note", "")
     target_path = Path(root) / target_rel if target_rel else Path()
     result = {
@@ -187,8 +205,9 @@ def audit_record(rec, root, cov_thr):
     if orig_toks and rec_val < cov_thr:
         result["reasons"].append("coverage-drop(召回 %.2f<%.2f)" % (rec_val, cov_thr))
 
-    # T2 语义忠实（可选，自动降级）
-    llm = _check_faithfulness(root, original_text, current_body)
+    # T2 语义忠实（可选，自动降级；受总次数预算约束）
+    llm = _check_faithfulness(root, original_text, current_body) if use_llm else {
+        "ok": False, "verdict": None, "hint": "本轮 LLM 预算已用尽（只走 Tier1）"}
     if llm["ok"]:
         result["faithfulness"] = llm["verdict"]
         if llm["verdict"] in ("unfaithful", "partial"):
@@ -211,8 +230,10 @@ def main():
     args = ap.parse_args()
     root = Path(args.root).resolve() if args.root else Path.cwd()
 
-    ledger_path = root / ".kb" / LEDGER_NAME
-    if not ledger_path.exists():
+    # 规范位置 .kb/state/，旧位置 .kb/<name> 只读回退
+    from state_manager import read_state_path
+    ledger_path = read_state_path(root, LEDGER_NAME, legacy=(".kb/" + LEDGER_NAME,))
+    if ledger_path is None or not ledger_path.exists():
         print("🔍 一致性审计 · 暂无 ledger（%s 不存在，可忽略）" % LEDGER_NAME)
         return 0
 
@@ -226,7 +247,16 @@ def main():
         print("⚠️ 读取 ledger 失败: %s" % e)
         return 1
 
-    results = [audit_record(rec, root, args.cov_thr) for rec in records]
+    budget = max(0, LLM_RECORD_BUDGET)
+    results = []
+    for rec in records:
+        use = budget > 0
+        if use:
+            budget -= 1
+        results.append(audit_record(rec, root, args.cov_thr, use_llm=use))
+    if LLM_RECORD_BUDGET and budget <= 0 and records:
+        print(f"ℹ️ LLM 忠实度检查已达本轮预算 {LLM_RECORD_BUDGET} 条（其余记录只走 Tier1）；"
+              f"可用 KB_CONSISTENCY_LLM_MAX 调整，设 0 关闭。")
 
     # 汇总计数
     counts = {"Critical": 0, "High": 0, "Medium": 0, "Info": 0}
@@ -240,15 +270,11 @@ def main():
     print("\n🔍 一致性审计 · 共 %d 条 · Critical %d / High %d / Medium %d / Info %d" % (
         len(results), counts["Critical"], counts["High"], counts["Medium"], counts["Info"]))
 
-    if _has_git(root):
-        try:
-            from subprocess import run, DEVNULL
-            res = run(["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
-                      stdout=DEVNULL, stderr=DEVNULL, timeout=10)
-            if res.returncode == 0:
-                print("· 已确认仅读审计，未改动任何 live 笔记（报告写入 .kb/，被 gitignore）")
-        except Exception:
-            pass
+    # 以前这里只跑一次 `git rev-parse` 就打印「已确认仅读审计，未改动任何 live 笔记」——
+    # 该断言没有任何依据（一次 rev-parse 证明不了「未改动」），反而给人虚假安全感。
+    # 改为陈述可核查的事实：本命令自身只写 .kb/。
+    print("· 本命令只读笔记；产物写入 .kb/（被 gitignore）。"
+          "是否发生过改动请用 `git -C <vault> status` 自行核对。")
 
     # --json
     if args.json:

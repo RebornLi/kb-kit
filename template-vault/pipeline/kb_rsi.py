@@ -18,7 +18,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import norm, parse_date, char_vec, build_inverted_index, candidate_pairs
+from kb_common import (norm, parse_date, char_vec, build_inverted_index,
+                        candidate_pairs, parse_importance)
 from kb_constants import (
     DUP_SIM,
     EXTERNAL_MIN_CROSS,
@@ -113,9 +114,10 @@ def cos(a: Union[Dict[str, float], List[float]], b: Union[Dict[str, float], List
     #   嵌入可用性可能在同一次运行中变化（如配置热加载），此时**降级为字面余弦**，
     #   而不是崩在 b.get() 上（此前 embedding 首次启用就会静默炸掉整个 RSI）。
     if isinstance(a, dict) and isinstance(b, dict):
-        if len(a) > len(b):
-            a, b = b, a
-        return sum(av * b.get(k, 0) for k, av in a.items())
+        # dict 分支委托 kb_common.cos（实测 200 组随机向量逐位一致）——
+        # 本地只保留 embedding list 分支，那才是本函数存在的理由。
+        from kb_common import cos as _common_cos
+        return _common_cos(a, b)
     if isinstance(a, list) and isinstance(b, list):
         return sum(x * y for x, y in zip(a, b))
     # 混合类型：长度不同无法对齐 → 返回 0（保守，不伪造相似度）
@@ -125,6 +127,12 @@ def cos(a: Union[Dict[str, float], List[float]], b: Union[Dict[str, float], List
 
 
 def parse_f(v: Any, default: float = 0.0) -> float:
+    """浮点解析。**委托 kb_common.parse_importance**（实测 300 组抽样逐例相同）。
+
+    以前这里是第二份正则实现 —— 与 kb_common 的那份一旦有人改口径就会静默分叉。
+    """
+    if default == 0.0:
+        return parse_importance(v)
     m = re.search(r"[-+]?\d*\.?\d+", str(v))
     return float(m.group()) if m else default
 
@@ -444,7 +452,8 @@ def main() -> int:
     }
     logdir = Path(root) / "pipeline"
     logdir.mkdir(parents=True, exist_ok=True)
-    logp = logdir / ".kb_rsi_proposals.jsonl"
+    from state_manager import state_path
+    logp = state_path(root, "kb_rsi_proposals.jsonl")   # 统一 .kb/state/（旧位置 pipeline/ 只读回退）
     with open(logp, "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
 

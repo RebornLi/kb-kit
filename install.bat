@@ -63,7 +63,10 @@ if not defined VAULT (
 echo.
 echo 开始搭建……
 "%PY%" "%SELF_DIR%\create_vault.py" --vault "%VAULT%"!FLAGS!
-if %ERRORLEVEL% NEQ 0 ( echo 安装返回非 0 退出码: %ERRORLEVEL% )
+rem 立刻定格退出码：以前只 echo 不 exit /b，脚本最终恒返回 0，
+rem 批处理/无人值守调用永远看到「成功」，kb.cmd 的缺陷也因此长期没被发现。
+set "RC=%ERRORLEVEL%"
+if not "%RC%"=="0" echo 安装返回非 0 退出码: %RC%
 echo.
 pause
-goto :eof
+exit /b %RC%

@@ -43,7 +43,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import kb_rsi            # 复用 collect/metrics/tokenize/is_raw/is_archive/in_inbox 守卫
-from kb_common import tokenize
+from kb_common import tokenize, atomic_write_text
+from state_manager import state_path, read_state_path
 from kb_constants import (
     EXTERNAL_MIN_CROSS, EXTERNAL_FRESH_MIN_PCT,
     L0_GAP_TOKEN_MIN_LEN, L0_MIN_IDF, L0_NOTE_MAX_TAGS,
@@ -52,9 +53,15 @@ from kb_constants import (
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 
-PROPOSAL_FILE = ".kb_retriage_proposals.jsonl"          # 瞬态提议（gitignore）
-APPLIED_FILE = ".kb_retriage_applied.json"              # 累计写回账本（gitignore，写前 force-add 作回滚锚）
-PROP_L1_FILE = ".kb_adaptretrieve_proposals.jsonl"      # L1 漏检缺口（kb_adaptretrieve 产出）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+PROPOSAL_FILE = "kb_retriage_proposals.jsonl"          # 瞬态提议（gitignore）
+APPLIED_FILE = "kb_retriage_applied.json"              # 累计写回账本（gitignore，写前 force-add 作回滚锚）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {PROPOSAL_FILE: "pipeline/.kb_retriage_proposals.jsonl",
+           APPLIED_FILE: "pipeline/.kb_retriage_applied.json"}
+PROP_L1_FILE = "kb_adaptretrieve_proposals.jsonl"       # L1 漏检缺口（kb_adaptretrieve 产出）
+#   这是**别的模块**的状态：写死旧 pipeline 路径会在它迁移后读不到 → 走解析器
+_PROP_L1_LEGACY = "pipeline/.kb_adaptretrieve_proposals.jsonl"
 
 # 中英高频停词：缺口 token 过滤，避免给检索表层灌噪声（单字 CJK/短拉丁已由 len≥2 兜底）
 _L0_STOP = {
@@ -82,16 +89,21 @@ def _is_knowledge_note(rel: str) -> bool:
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
 def _prop_path(root: Union[str, Path]) -> Path:
-    return Path(root) / "pipeline" / PROPOSAL_FILE
+    return state_path(root, PROPOSAL_FILE)
 
 
 def _applied_path(root: Union[str, Path]) -> Path:
-    return Path(root) / "pipeline" / APPLIED_FILE
+    return state_path(root, APPLIED_FILE)
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """读路径：规范优先，回退旧位置（旧库升级后账本不会凭空消失）。"""
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 
 def _read_applied(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _applied_path(root)
-    if not p.exists():
+    p = _read_path(root, APPLIED_FILE)
+    if p is None:
         return {"applied": {}}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -119,10 +131,13 @@ def grounding(root: Union[str, Path]) -> Tuple[bool, str, Dict[str, Any]]:
 
 # ── rag 词表 idf（缺口 token 区分度滤波的权威来源，与 rag.py 同构）──────────
 def _rag_idf(root: Union[str, Path]) -> Optional[Dict[str, float]]:
-    p = Path(root) / "vector index" / "df_idf.json"
+    # 经 rag.load_index：v6 起索引是 pickle（旧的 .json 仍可读）
     try:
-        payload = json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        import rag
+        payload, _ver = rag.load_index(Path(root) / "vector index")
+    except ImportError:                       # pragma: no cover
+        return None
+    if payload is None:
         return None
     return payload.get("idf") if isinstance(payload.get("idf"), dict) else None
 
@@ -146,7 +161,10 @@ def _gap_tokens(query: str, surface_tokens: Set[str],
 def _l1_missed(root: Union[str, Path]) -> List[Dict[str, Any]]:
     """读取 kb_adaptretrieve 漏检缺口文件 (query/note/sim/issue)；缺失则触发一次
     L1.propose 取最新（best-effort，绝报错）。"""
-    p = Path(root) / "pipeline" / PROP_L1_FILE
+    from state_manager import read_state_path
+    p = read_state_path(root, PROP_L1_FILE, legacy=(_PROP_L1_LEGACY,))
+    if p is None:
+        return []
     recs: List[Dict[str, Any]] = []
     if p.exists():
         try:
@@ -195,7 +213,7 @@ def _rewrite_tags_block(block: str, new_tags: List[str]) -> Tuple[str, bool]:
         block = _fmt_tags_line(new_tags) + "\n" + block
         return block, True
     # 解析既有 tags：行内取值（flow/逗号）+ 块列表续行（^\s*-\s）
-    existing = _parse_tags_value(lines[tag_idx])
+    existing = _parse_tags_line(lines[tag_idx])
     j = tag_idx + 1
     while j < len(lines) and re.match(r"^\s*-\s", lines[j]):
         existing.extend(_parse_block_item(lines[j]))
@@ -221,8 +239,12 @@ def _parse_block_item(line: str) -> List[str]:
     return [raw] if raw else []
 
 
-def _parse_tags_value(line: str) -> List[str]:
-    """解析 tags 行的既有取值（flow-list / 引号 / 逗号分隔 均有容错）。"""
+def _parse_tags_line(line: str) -> List[str]:
+    """解析**整条 tags 行**（不是 tags 值）—— 输入形如 `tags: [a, b]`。
+
+    与 `taxonomy.parse_tags(v)`（输入是**值**）不同：这里要连键名一起吃掉。
+    改名以免与值解析器混淆。
+    """
     m = re.match(r"^\s*tags\s*:\s*(.*)$", line, re.I)
     if not m:
         return []
@@ -352,7 +374,7 @@ def _parse_current_tags(fm: Dict[str, Any]) -> List[str]:
     if isinstance(t, list):
         return [str(x).strip() for x in t if str(x).strip()]
     if isinstance(t, str):
-        return _parse_tags_value("tags: " + t)
+        return _parse_tags_line("tags: " + t)
     return []
 
 
@@ -437,11 +459,10 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
                         "summary_enrich": bool(summary)})
 
     # 写累计账本（transient，force-add 作回滚锚点）+ 单次原子 checkpoint
-    ap_path = _applied_path(root)
-    ap_path.parent.mkdir(parents=True, exist_ok=True)
-    ap_path.write_text(json.dumps({"applied": applied, "ids": sorted(applied_ids),
-                                   "updated": datetime.now().isoformat(timespec="seconds")},
-                                  ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(_applied_path(root),
+                      json.dumps({"applied": applied, "ids": sorted(applied_ids),
+                                  "updated": datetime.now().isoformat(timespec="seconds")},
+                                 ensure_ascii=False, indent=2))
 
     if written:
         for rel in changed_rel:

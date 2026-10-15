@@ -103,9 +103,11 @@ class GrowthFixesTest(unittest.TestCase):
         write(self.root / "intake_triage.md", "# triage\n\n噪声报告\n")
         rag.cmd_index(self.root)
         import json as _json
-        p = _json.loads((self.root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))
-        self.assertIn("20-技术 Technology/keep.md", p["tf"])
-        self.assertNotIn("intake_triage.md", p["tf"], "报告产物不应入索引")
+        import sys as _sys; _sys.path.insert(0, str(PIPELINE))
+        import rag as _rag
+        p = _rag.load_index(self.root / "vector index")[0]
+        self.assertIn("20-技术 Technology/keep.md", _rag.indexed_docs(p))
+        self.assertNotIn("intake_triage.md", _rag.indexed_docs(p), "报告产物不应入索引")
 
     # 7. 补链去重：已有出链不再重复建议
     def test_link_apply_dedupes_existing_links(self):
@@ -118,9 +120,27 @@ class GrowthFixesTest(unittest.TestCase):
         link_engine.apply_links(self.root, 0.3, 50)
         ta = a.read_text(encoding="utf-8")
         self.assertIn("## 🔗 智能建议链接", ta)
-        self.assertIn("[[20-技术 Technology/c.md]]", ta, "未链的 c 应被建议")
-        self.assertNotIn("b.md", ta.split("## 🔗 智能建议链接")[1],
-                         "已链的 b 不应再出现在建议区块")
+        # 链接统一写 [[stem]]（与 _MOC 一致；路径式链接改名即失效）
+        self.assertIn("[[c]]", ta, "未链的 c 应被建议")
+        self.assertNotIn("[[20-技术 Technology/c.md]]", ta, "不应写路径式链接")
+        block = ta.split("## 🔗 智能建议链接")[1]
+        self.assertNotIn("[[b]]", block, "已链的 b 不应再出现在建议区块")
+
+    def test_link_apply_dedupes_path_style_existing_links(self):
+        """笔记里已有**路径式**链接时也必须判为已存在。
+
+        以前 outbound() 返回带扩展名的 basename（"b.md"），而调用方用
+        `Path(t).stem`（"b"）比对 → 永远不相等 → 「排除已存在出链」完全失效。
+        """
+        a = self.root / "20-技术 Technology/a.md"
+        b = self.root / "20-技术 Technology/b.md"
+        c = self.root / "20-技术 Technology/c.md"
+        write(a, f"---\n{NOTE_FM}---\n本地检索 余弦 方案 [[20-技术 Technology/b.md]]\n")
+        write(b, f"---\n{NOTE_FM}---\n本地检索 余弦 方案\n")
+        write(c, f"---\n{NOTE_FM}---\n本地检索 余弦 方案\n")
+        link_engine.apply_links(self.root, 0.3, 50)
+        block = a.read_text(encoding="utf-8").split("## 🔗 智能建议链接")[1]
+        self.assertNotIn("[[b]]", block, "已有的路径式链接没有被识别为已存在")
 
     # 8. recall 状态改用 StateStore（原子写，.kb/state/）
     def test_recall_state_uses_statestore(self):

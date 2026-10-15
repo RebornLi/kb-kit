@@ -16,10 +16,10 @@
 #   本文件已被 RSI 引擎取代：知识同步/校验/收敛由 kb_engine（T1/T2/T3 编排）/ kb_rsi 接管。
 #   今后 kb-kit 同步动作默认走 RSI CLI，不再直接调本文件 CLI。保留原因：既有调用方（如 sync.py
 #   内部 import clean、回滚/摄入兼容链路）仍需其函数，故不删，仅标 superseded 停用。
-import argparse, os, sys, json, subprocess, datetime
+import argparse, os, sys, json, shutil, subprocess, datetime
 from pathlib import Path
 
-from kb_common import ROOT_DEFAULT, parse_frontmatter
+from kb_common import ROOT_DEFAULT, parse_frontmatter, fmt_value
 # domain → (PARA 区, 子目录)，与 memory_sync.py FOLDER_TARGET 一致
 DOMAIN_TARGET = {
     "运维": ("20-技术 Technology", "基础设施"),
@@ -106,12 +106,87 @@ def cmd_apply(args, note_path):
     body = body or f"# {fm.get('title', note.stem)}\n\n{fm.get('kb_summary', note.name)}"
     header = f"# {fm.get('title', note.stem)}\n\n> 同步自 {note.name} @ {datetime.datetime.now():%F %T}\n"
     fname = f"{datetime.date.today()}-{note.stem}.md"
-    (target / fname).write_text(header + body, encoding="utf-8")
+    # 必须写 frontmatter：以前只写 header+body，产物当场被自家 validate 判「缺少 frontmatter」
+    # 硬错误，后续 sync/dry-run 会被安全闸拦死。
+    fm_out = {
+        "tags": fm.get("tags") or "综合",
+        "status": fm.get("status") or "active",
+        "domain": fm.get("domain") or "综合",
+        "category": fm.get("category") or "reference",
+        "created": str(fm.get("created") or datetime.date.today()),
+        "updated": datetime.date.today().isoformat(),
+        "importance": fm.get("importance") or 0.5,
+        "kb_target": f"{para_area}/{subdir}",
+        "kb_action": "new",
+        "kb_summary": str(fm.get("kb_summary") or f"同步自 {note.name}"),
+    }
+    block = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm_out.items()) + "\n---\n\n"
+    out_path = _unique_path(target / fname)   # 同日重跑不再同名静默覆盖
+    out_path.write_text(block + header + body, encoding="utf-8")
     # 只 add 刚写入的笔记文件，不 sweep Obsidian 运行时态
-    sub(["add", "--", str(target.relative_to(args.root) / fname)], args.root)
+    rel_out = str(out_path.relative_to(args.root))
+    sub(["add", "--", rel_out], args.root)
     sub(["commit", "-q", "-m", f"kb: sync {note.stem} (domain={fm.get('domain', '综合')}) via sync.py"], args.root)
-    print(f"✅ 已写入 {target / fname}  提交: {sub(['rev-parse', '--short', 'HEAD'], args.root).stdout.strip()}")
+    print(f"✅ 已写入 {out_path}  提交: {sub(['rev-parse', '--short', 'HEAD'], args.root).stdout.strip()}")
     return 0
+
+
+PURGE_AREAS = ("20-技术 Technology", "10-项目 Projects", "40-资源库 Resources")
+
+
+def _unique_path(p: Path) -> Path:
+    """同名撞车时避让（绝不静默覆盖既有笔记）。"""
+    if not p.exists():
+        return p
+    for i in range(1, 100):
+        cand = p.with_name(f"{p.stem}-{i}{p.suffix}")
+        if not cand.exists():
+            return cand
+    return p
+
+
+def _untracked_under(root, areas):
+    """列出 `git clean -fd` 会删除的未跟踪文件（相对 root）。
+
+    用 `ls-files --others -z` 而不是解析 `clean -n` 的输出，原因有两条：
+      · `clean -n` 的文案随 git 语言变（本机中文输出「将删除 …」），无法稳定匹配；
+      · 非 ASCII 路径会被引号 + 八进制转义，拿不到可直接操作的文件系统路径。
+    `-z` 用 NUL 分隔且不做转义，是机器可读的稳定接口。
+    """
+    out = []
+    for area in areas:
+        r = sub(["ls-files", "--others", "--exclude-standard", "-z", "--", area], root)
+        for rel in r.stdout.split("\0"):
+            rel = rel.strip()
+            if rel:
+                out.append(rel)
+    return out
+
+
+def _backup_before_purge(root, rels):
+    """删除前把即将被清理的未跟踪路径备份到 backups/rollback-<ts>/。
+
+    返回 (备份目录, 份数)；任何一项备份失败即返回 None —— 宁可不清，也不丢数据。
+    """
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = Path(root) / "backups" / f"rollback-{stamp}"
+    n = 0
+    for rel in rels:
+        src = Path(root) / rel.rstrip("/")
+        if not src.exists():
+            continue
+        tgt = dst / rel.rstrip("/")
+        try:
+            if src.is_dir():
+                shutil.copytree(src, tgt, dirs_exist_ok=True)
+            else:
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, tgt)
+            n += 1
+        except OSError as e:
+            print(f"  ⚠️ 备份失败：{rel}（{e}）")
+            return None
+    return dst, n
 
 
 def cmd_rollback(args):
@@ -124,10 +199,26 @@ def cmd_rollback(args):
     after = sub(["rev-parse", "HEAD"], args.root).stdout.strip()
     print(f"↩ 已回滚 HEAD {before[:8]} → {after[:8]}（回到写前 checkpoint）")
     if not args.no_purge:
-        # sync 可能写到多个 PARA 区，清理所有同步目标下的未跟踪笔记
-        for area in ("20-技术 Technology", "10-项目 Projects", "40-资源库 Resources"):
+        # sync 可能写到多个 PARA 区，清理所有同步目标下的未跟踪笔记。
+        # 注意：`git clean -fd` 会连同「用户自己写了但还没提交的笔记」一起删，
+        # 所以必须先列出清单并备份，备份不成功就整体放弃清理（P0-4）。
+        victims = _untracked_under(args.root, PURGE_AREAS)
+        if not victims:
+            print("  🧹 无未跟踪文件需要清理")
+            return 0
+        res = _backup_before_purge(args.root, victims)
+        if res is None:
+            print("  ⛔ 备份不完整 → 已跳过清理，未删除任何未跟踪文件。"
+                  "请先手工处理这些文件，或用 --no-purge 重新执行。")
+            return 1
+        dst, n = res
+        print(f"  🧹 清理 {n} 个未跟踪路径（已先备份到 backups/{dst.name}/，可恢复）：")
+        for v in victims[:20]:
+            print(f"     - {v}")
+        if len(victims) > 20:
+            print(f"     … 其余 {len(victims) - 20} 项")
+        for area in PURGE_AREAS:
             sub(["clean", "-fdq", "--", area], args.root)
-        print("  🧹 已清理 apply 留下的未跟踪笔记")
     return 0
 
 
@@ -154,11 +245,19 @@ def cmd_ingest_any(args):
         return 1
 
     # ① 格式归一化
+    #    真实入口是 `ingest_convert.convert(file, mirror_dir) -> ConvertResult`；
+    #    以前 import 的 `convert_to_markdown` 根本不存在 → ImportError 被吞 →
+    #    归一化整体失效，且非文本文件走无 errors= 的 read_text 会 UnicodeDecodeError 崩溃。
+    body = ""
     try:
-        from ingest_convert import convert_to_markdown
-        body = convert_to_markdown(src)
-    except ImportError:
-        body = src.read_text(encoding="utf-8")
+        from ingest_convert import convert
+        conv = convert(src, root / "raw" / "_mirror")
+        if getattr(conv, "success", False) and getattr(conv, "markdown", None):
+            body = conv.markdown
+    except (ImportError, OSError, ValueError, UnicodeDecodeError) as e:
+        print(f"⚠️ 格式归一化不可用（{e}），按纯文本读取", file=sys.stderr)
+    if not body:
+        body = src.read_text(encoding="utf-8", errors="replace")
 
     # ② 内容分类 + 质量门禁
     from classify import classify, classify_quality
@@ -172,8 +271,10 @@ def cmd_ingest_any(args):
 
     # ③ 路由决策
     from intake_triage import triage_by_content_type
-    from kb_common import domain_primary
-    raw_domain = getattr(cr, 'domain', '综合')
+    from kb_common import domain_primary, infer_domain
+    # ClassifyResult 没有 domain 字段；以前 getattr(cr, 'domain', '综合') 恒为「综合」，
+    # 路由永远走兜底。这里用与其它模块一致的推断函数。
+    raw_domain = infer_domain(src.name, {}, src.stem, body)
     fm = {"domain": domain_primary(raw_domain)}  # P2: 按一级 domain 路由
     route = triage_by_content_type(str(root), src.name, fm, body, qr.content_type)
 
@@ -186,9 +287,18 @@ def cmd_ingest_any(args):
         print(f"✗ 丢弃: {route['reason']}")
         return 0
 
+    # 写前 checkpoint（write-side-protocol 约定 3）：ingest-any 以前全程没有 git 锚，
+    # 写错了无法回滚。非 git 仓库则跳过（best-effort，不阻断摄取）。
+    in_git = sub(["rev-parse", "--is-inside-work-tree"], root).stdout.strip() == "true"
+    if in_git:
+        checkpoint(str(root))
+
     if route["action"] == "aggregate":
         rel = aggregate_bucket(str(root), body, qr.content_type, author=args.author)
         print(f"✅ 聚合桶: {rel}")
+        if in_git and rel:
+            sub(["add", "--", str(rel)], root)
+            sub(["commit", "-q", "-m", f"kb: ingest-any 聚合 {rel}"], root)
         return 0
 
     # direct: 写入目标目录
@@ -215,6 +325,10 @@ def cmd_ingest_any(args):
 
     header = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2.items()) + "\n---\n\n"
     out_path.write_text(header + f"# {stem}\n\n" + body, encoding="utf-8")
+    if in_git:
+        rel_out = str(out_path.relative_to(root))
+        sub(["add", "--", rel_out], root)
+        sub(["commit", "-q", "-m", f"kb: ingest-any {out_path.name}"], root)
 
     # P2: 自动标注 related_to（FR-3.3.1）
     try:

@@ -11,9 +11,9 @@
     - 日期解析: parse_date / parse_date_safe
     - 重要性解析: parse_importance
     - 倒排索引: build_inverted_index / candidate_pairs
+    - 原子写入: atomic_write_text
     - 配置加载: load_config / load_domain_taxonomy / load_tag_taxonomy / load_dedup_config
     - 关系管理: extract_relations / add_relation
-    - 去重检查: dedup_check
 """
 import os, re, math, json, hashlib
 from pathlib import Path
@@ -27,7 +27,11 @@ ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents
 # ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
 EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
            ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer",
-           "_curate"}
+           "_curate",
+           # `.kb` 是**运行态目录**（状态文件 + 报告），永远不是笔记。
+           # 漏排的实测后果：consolidate 把报告写成 `.kb/state/consolidate_report.md` 后，
+           # `kb validate` 把它当笔记扫进去 → 报「缺少 frontmatter」硬错误。
+           ".kb"}
 
 # ── domain 白名单（frontmatter domain 字段合法取值，clean/validate 共用）──
 DOMAIN_WHITELIST = {"运维", "开发", "安全", "产品", "数据", "管理", "综合"}
@@ -38,6 +42,31 @@ FM = re.compile(r"^---\s*$", re.M)
 # ── 分词正则（CJK unigram+bigram + 拉丁词）────────────────────
 CJK = re.compile(r"[\u4e00-\u9fff]")
 LAT = re.compile(r"[A-Za-z0-9]+")
+
+
+def atomic_write_text(path, text: str) -> None:
+    """原子写入文本：先写同目录临时文件，再 os.replace 覆盖目标。
+
+    为什么必须这样写：直接 `p.write_text(...)` 在写到一半时崩溃/断电会留下**半截文件**，
+    而状态文件（旋钮、用户表、agent 注册表、反馈状态）一旦半截就无法解析，
+    轻则配置回退默认、重则整表丢失。
+    为什么用 os.replace 而不是 Path.rename：Windows 上 rename 在目标已存在时会抛
+    FileExistsError，导致第二次起写入静默失败（调用方多吞异常）。
+    os.replace 在 POSIX/Windows 均为原子覆盖；失败时清理残留临时文件。
+    顺带确保父目录存在（原先多处调用方各自 mkdir，漏一处就写失败）。
+    """
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_name(p.name + ".tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def tokenize(s):
@@ -379,6 +408,12 @@ LAYER_MULTIPLIER = {
     "page": 1.00,
     "raw": 0.72,
     "index": 0.60,
+    # ⚠️ "noise" 这一项**按契约永远不可达**，别据此以为噪声笔记"降权可检索"：
+    #   `kb_schema` 强制 noise 层必须带 `kb_index: false`（curate 判定噪声时就写入
+    #   `{"kb_layer": "noise", "kb_index": "false"}`），而 `index_excluded` 见到
+    #   `kb_index:false` 直接不入索引 —— 于是 rag.py 里 `layer in ("index","noise")`
+    #   的降权分支对 noise 永远不会触发。保留仅为防御性默认值（万一有人手写
+    #   `kb_layer: noise` 却忘了 `kb_index: false`）。
     "noise": 0.60,
 }
 DEFAULT_LAYER = "page"
@@ -612,67 +647,6 @@ def add_relation(fm, field, target_rel):
 
 
 # ── P2: 三级去重阈值校准（FR-3.3.11）──────────────────────────
-def dedup_check(body, existing_notes, root=None):
-    """三级去重检查。
-
-    Args:
-        body: 新内容正文
-        existing_notes: [(rel, fm, body), ...] 现有笔记列表
-        root: vault 根路径（用于加载配置）
-
-    Returns:
-        dict: {
-            "action": "skip" | "mark_related" | "new",
-            "reason": str,
-            "matched_rel": str | None,
-            "similarity": float,
-        }
-    """
-    config = load_dedup_config(root)
-    exact_method = config.get("exact_dedup", {}).get("method", "sha256")
-    sem_threshold = config.get("semantic_dedup", {}).get("threshold", 0.92)
-    rel_min = config.get("semantic_related", {}).get("threshold_min", 0.70)
-    rel_max = config.get("semantic_related", {}).get("threshold_max", 0.92)
-
-    # ① 精确去重：sha256
-    new_hash = content_fingerprint(body)
-    for rel, fm_ex, body_ex in existing_notes:
-        if content_fingerprint(body_ex) == new_hash:
-            return {"action": "skip", "reason": "精确重复(sha256一致)",
-                    "matched_rel": rel, "similarity": 1.0}
-
-    # ② 语义去重 + ③ 语义相关：TF-IDF 余弦
-    from collections import Counter
-    import math
-    new_toks = Counter(tokenize(body))
-    if not new_toks:
-        return {"action": "new", "reason": "无有效 token", "matched_rel": None, "similarity": 0.0}
-    new_vec = {t: c for t, c in new_toks.items()}
-    new_norm = math.sqrt(sum(v * v for v in new_vec.values())) or 1.0
-    new_vec = {k: v / new_norm for k, v in new_vec.items()}
-
-    best_sim, best_rel = 0.0, None
-    for rel, fm_ex, body_ex in existing_notes:
-        ex_toks = Counter(tokenize(body_ex))
-        if not ex_toks:
-            continue
-        ex_vec = {t: c for t, c in ex_toks.items()}
-        ex_norm = math.sqrt(sum(v * v for v in ex_vec.values())) or 1.0
-        ex_vec = {k: v / ex_norm for k, v in ex_vec.items()}
-        dot = sum(new_vec.get(t, 0) * ex_vec.get(t, 0) for t in new_vec if t in ex_vec)
-        if dot > best_sim:
-            best_sim, best_rel = dot, rel
-
-    if best_sim >= sem_threshold:
-        return {"action": "skip", "reason": f"语义重复(TF-IDF={best_sim:.3f}≥{sem_threshold})",
-                "matched_rel": best_rel, "similarity": best_sim}
-    if rel_min <= best_sim < rel_max:
-        return {"action": "mark_related", "reason": f"语义相关(TF-IDF={best_sim:.3f})",
-                "matched_rel": best_rel, "similarity": best_sim}
-    return {"action": "new", "reason": "新内容", "matched_rel": None, "similarity": best_sim}
-
-
-# ── 向量运算（norm / cos / char_vec）──────────────────────────
 def norm(vec: Dict[str, float]) -> Dict[str, float]:
     """L2 归一化稀疏向量。
 
@@ -979,7 +953,6 @@ KEYWORD_DOMAIN = {"test": "开发", "deploy": "运维", "database": "数据",
 
 # frontmatter 边界正则（clean.py 本地版本，与 FM 同义但保留独立引用）
 _FM_RE = re.compile(r"^---\s*$", re.M)
-_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _LAT_RE = re.compile(r"[A-Za-z0-9]+")
 
 # status 白名单
@@ -988,7 +961,7 @@ STATUS_SET = {"draft", "active", "stable", "legacy", "archived"}
 
 def _tokens(s: str) -> List[str]:
     """拉丁词 lower + 中文字符 unigram（clean.py infer_domain 用）。"""
-    return [m.lower() for m in _LAT_RE.findall(s)] + _CJK_RE.findall(s)
+    return [m.lower() for m in _LAT_RE.findall(s)] + CJK.findall(s)
 
 
 def fmt_value(v: Any) -> str:
@@ -1042,15 +1015,65 @@ def load_note_full(path: Union[str, Path]) -> Tuple[Dict[str, Any], str, str, st
         line = line.strip()
         if not line or line.startswith("#") or line in ("{", "}"):
             continue
+        # YAML 块列表续行：`tags:` 换行后的 `  - 开发` / `  - kb-kit`
+        # 以前这类行被直接丢弃 → tags 恒为 None → clean 回退成目录名派生标签，
+        # 而 validate 判「缺必填字段: tags」：同一份合法 YAML 两个模块两种结论。
+        if cur and (line == "-" or line.startswith("- ")):
+            item = line[1:].strip().strip('"\'')
+            if not isinstance(fm.get(cur), list):
+                fm[cur] = []
+            if item:
+                fm[cur].append(item)
+            continue
         if line.endswith(":"):
             cur = line[:-1].strip().strip('"\''); fm[cur] = None; continue
         if ":" in line:
             k, _, v = line.partition(":"); v = v.strip()
+            cur = None
             if v.startswith("[") and v.endswith("]"):
-                fm[k.strip()] = [x.strip().strip('"\'') for x in v[1:-1].split(",") if x.strip()]
+                # source_ref 元素（如 openclaw/USER.md::… 片段名）可合法含逗号，
+                # 必须按引号分块，不能无脑 split(",") 切成碎片；其余字段经全库比对，
+                # 元素内从不含逗号，沿用旧 split 以保证行为零偏移。
+                if k == "source_ref":
+                    fm[k.strip()] = _split_bracket_aware(v[1:-1])
+                else:
+                    fm[k.strip()] = [x.strip().strip('"\'') for x in v[1:-1].split(",") if x.strip()]
             else:
                 fm[k.strip()] = v.strip().strip('"\'')
     return fm, text, block, body
+
+
+def _split_bracket_aware(inner: str) -> List[str]:
+    """把 [..] 块内内容按逗号分块，但引号内的逗号不计（保留为同一元素）。
+
+    source_ref 元素形如 `openclaw/USER.md::Keep stable communication style,
+    relationships, …`，逗号是其内容而非分隔符；无脑 split(",") 会把一条 ID
+    切成碎片，导致 kb_raw 追溯解析全部失败（P2 追溯闭环 FAIL）。
+    """
+    toks, buf, i, n = [], [], 0, len(inner)
+    in_q = False
+    while i < n:
+        c = inner[i]
+        if in_q:
+            buf.append(c)
+            if c in ('"', "'"):
+                in_q = False
+            i += 1
+        else:
+            if c in ('"', "'"):
+                in_q = True
+                buf.append(c)
+                i += 1
+            elif c == ",":
+                toks.append("".join(buf).strip())
+                buf = []
+                i += 1
+            else:
+                buf.append(c)
+                i += 1
+    if any(x.strip() for x in buf):
+        toks.append("".join(buf).strip().strip('\"\''))
+    return toks
 
 
 def infer_domain(rel: str, fm: Dict[str, Any], title: str, body: str) -> str:

@@ -8,7 +8,7 @@
 用法:
   python3 scripts/verify_curate.py [--root /path/to/vault] [--json]
 
-退出码：全部 PASS → 0；有 FAIL → 1（WARN 不阻断）。
+退出码：无 FAIL → 0；有 FAIL → 1（WARN / N/A 不阻断）。\nN/A = 该能力尚未启用（如从未跑过知识结晶），无从度量，不算失败。
 """
 import argparse, json, subprocess, sys
 from pathlib import Path
@@ -29,8 +29,15 @@ def main() -> int:
                            is_pointer_page, kb_layer_of, is_generated_report)
 
     checks = []
-    def check(name, ok, detail, warn=False):
-        checks.append({"check": name, "status": "WARN" if (warn and not ok) else ("PASS" if ok else "FAIL"),
+    def check(name, ok, detail, warn=False, na=False):
+        """na=True → 记为 N/A（该能力尚未启用，无从度量），不计入失败。
+
+        为什么需要：这些断言度量的是「知识结晶的产出」（正典篇数/覆盖率/追溯闭环），
+        而**从未跑过结晶**的库（新装的活库、模板库）正典必为 0 → 4 条断言必然 FAIL。
+        那会让一条刚建好的库报告「验收失败」，是误导而不是保护。
+        """
+        checks.append({"check": name,
+                       "status": "N/A" if na else ("WARN" if (warn and not ok) else ("PASS" if ok else "FAIL")),
                        "detail": detail})
 
     # ── 采集 ─────────────────────────────────────────────
@@ -52,25 +59,36 @@ def main() -> int:
         if L == "canon":
             canon.append((rel, fm))
 
-    idx_path = root / "vector index" / "df_idf.json"
-    idx = json.loads(idx_path.read_text(encoding="utf-8")) if idx_path.exists() else {}
+    # v6 起索引主格式是 pickle → 统一走 rag 的加载器（兼容旧 .json）
+    import rag as _rag
+    idx = _rag.load_index(root / "vector index")[0] or {}
     meta = idx.get("meta", {}) or {}
     idx_n = idx.get("n_docs", 0)
     idx_stub = sum(1 for m in meta.values() if str(m.get("layer")) == "index")
     idx_noise = sum(1 for m in meta.values() if str(m.get("layer")) == "noise")
-    idx_raw = sum(1 for r in (idx.get("tf") or {}) if str(r).startswith("raw/"))
+    idx_raw = sum(1 for r in _rag.indexed_docs(idx) if str(r).startswith("raw/"))
+
+    # 结晶是否**启用过**：有正典，或存在 curate 的运行痕迹（state/ledger）。
+    #   两者都没有 = 这台库从未跑过结晶 → 与结晶产出相关的断言记 N/A，而不是 FAIL。
+    curate_enabled = (n_canon0 := len(canon)) > 0 or (root / ".kb" / "curate_state.json").exists() \
+        or (root / ".kb" / "curate_ledger.jsonl").exists()
+    NA_DETAIL = "（未启用知识结晶，无从度量；跑 `kb curate run --apply` 后本项才有意义）"
 
     # ── P0：止血 ─────────────────────────────────────────
     check("P0 占位符残留为 0（生成物除外）", ph == 0, f"残留 {ph} 处")
     check("P0 分块索引页不入索引", idx_stub == 0, f"索引含 index 层 {idx_stub} 篇")
     check("P0 判定为 noise 的笔记不入索引", idx_noise == 0, f"索引含 noise 层 {idx_noise} 篇")
-    check("P0 分层统计可见（page/raw/index/canon）", len(layers) >= 3, f"{layers}")
+    check("P0 分层统计可见（page/raw/index/canon）", len(layers) >= 3,
+          f"{layers}" if curate_enabled else f"{layers} " + NA_DETAIL, na=not curate_enabled)
 
     # ── P1：结晶骨架跑通 ─────────────────────────────────
     n_canon = len(canon)
-    check("P1 正典篇数 ≥ 20（试点达标）", n_canon >= 20, f"canon {n_canon} 篇")
-    check("P1 正典覆盖率（知识层）≥ 1%", (n_canon / max(n - layers.get("raw", 0) - stub_kb, 1)) >= 0.01,
-          f"{n_canon / max(n - layers.get('raw', 0) - stub_kb, 1):.2%}")
+    check("P1 正典篇数 ≥ 20（试点达标）", n_canon >= 20,
+          f"canon {n_canon} 篇" if curate_enabled else f"canon {n_canon} 篇 " + NA_DETAIL,
+          na=not curate_enabled)
+    _cov = n_canon / max(n - layers.get("raw", 0) - stub_kb, 1)
+    check("P1 正典覆盖率（知识层）≥ 1%", _cov >= 0.01,
+          f"{_cov:.2%}" if curate_enabled else f"{_cov:.2%} " + NA_DETAIL, na=not curate_enabled)
     # 压缩比**按保号原文现算**，不信 frontmatter 里存的 canon_ratio。
     #   为什么：结晶会覆盖原文件，此时存下来的 canon_ratio 用的是"覆盖前"的 source_chars，
     #   与保号原文对不上（实测出现过 1.59 这种失真值）。现算才可信。
@@ -118,8 +136,9 @@ def main() -> int:
         good = any(_raw_ok(root, s) for s in sids)
         if good and (root / str(fm.get("archived_original", ""))).exists():
             ok_trace += 1
-    check("P2 追溯闭环 100%（source_ref + 原文保号）", n_canon > 0 and ok_trace == n_canon,
-          f"{ok_trace}/{n_canon}")
+    check("P2 追溯闭环 100%（source_ref + 原文保号）", ok_trace == n_canon and (n_canon > 0 or not curate_enabled),
+          f"{ok_trace}/{n_canon}" if curate_enabled else f"{ok_trace}/{n_canon} " + NA_DETAIL,
+          na=not curate_enabled)
 
     # ── P3：人工闸门 ─────────────────────────────────────
     try:
@@ -137,19 +156,22 @@ def main() -> int:
     # ── 汇总 ─────────────────────────────────────────────
     n_fail = sum(1 for c in checks if c["status"] == "FAIL")
     n_warn = sum(1 for c in checks if c["status"] == "WARN")
+    n_na = sum(1 for c in checks if c["status"] == "N/A")
     if args.as_json:
         print(json.dumps({"root": str(root), "checks": checks, "fail": n_fail, "warn": n_warn,
+                          "na": n_na, "curate_enabled": curate_enabled,
                           "layers": layers, "index_docs": idx_n}, ensure_ascii=False, indent=2))
     else:
         print(f"🧪 结晶层验收探针  root={root}")
         print(f"   笔记 {n} · 索引 {idx_n} 篇（含 raw {idx_raw}）· 分层 {layers}")
         print("")
-        icon = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌"}
+        icon = {"PASS": "✅", "WARN": "⚠️", "FAIL": "❌", "N/A": "⏭️"}
         for c in checks:
             print(f"   {icon[c['status']]} {c['check']}")
             print(f"        {c['detail']}")
         print("")
-        print(f"   结果：PASS {len(checks) - n_fail - n_warn} · WARN {n_warn} · FAIL {n_fail}")
+        print(f"   结果：PASS {len(checks) - n_fail - n_warn - n_na} · WARN {n_warn} · FAIL {n_fail}"
+              + (f" · N/A {n_na}" if n_na else ""))
     return 1 if n_fail else 0
 
 

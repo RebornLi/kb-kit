@@ -360,11 +360,134 @@ def mark_policy_stale(root: Union[str, Path]) -> int:
     return marked
 
 
+def kpi(root: Union[str, Path]) -> Dict[str, Any]:
+    """**抗 Goodhart 的 5 个指标** —— 推荐的仪表盘集合。
+
+    为什么另开一个而不是用 `metrics()`：后者算的多是**易刷量**（笔记数、链接总数、
+    孤立数、跨域边数）—— "加动作就能变好"，只适合诊断，当 KPI 会被 Goodhart 化
+    （把指标做上去，而不是把事情做好）。本函数只算**难刷**的：
+
+      ① two_hop_reach   从任一入口页（MOC/首页/索引）**≤2 跳**可达的笔记占比
+                        —— 直接测"可检索性"，比"链接总数"难刷得多。
+      ② first_hit_rate  历史问题里 **top-3 一次命中**的比例（黄金集；无则 N/A）
+                        —— 直接测"找得到"，是"第二大脑"的核心效用。
+      ③ calibration     recall 的**预测校准**（Brier）；越准越难作弊。无复习数据则 N/A。
+      ④ staleness       高 importance(≥0.7) 且超期未复核的占比
+                        —— 防"重要知识默默腐烂"。
+      ⑤ reuse           被**其他笔记引用**的比例（入链覆盖）
+                        —— 与"产出物里真的用到了"最接近的可算代理。
+
+    反指标（必须一起看）：每次复习后发生编辑/新增链接的比例；若复习很多次而笔记零变更，
+    说明在刷量而不是在用。
+    """
+    from collections import deque
+    notes = list(iter_notes(root))
+    info, stem2rel, inbound = {}, {}, {}
+    now = datetime_now()
+    for p in notes:
+        rel = str(p.relative_to(root))
+        fm, text, body = load(p)
+        rels_out = outbound_links(text)
+        info[rel] = {"fm": fm, "links": rels_out, "stem": p.stem}
+        stem2rel[p.stem] = rel
+        for tgt in rels_out:
+            inbound.setdefault(tgt.split("/")[-1].split(os.sep)[-1], set()).add(rel)
+    # 反向邻接（用于可达性 BFS）：谁指向了 rel
+    pred = {rel: set() for rel in info}
+    for rel, i in info.items():
+        for tgt in i["links"]:
+            t = tgt.split("/")[-1].split(os.sep)[-1]
+            if t in stem2rel:
+                pred.setdefault(stem2rel[t], set()).add(rel)
+
+    # ① 两跳可达：从入口页（MOC/首页/索引）出发，沿**出链**走 ≤2 跳
+    entries = [rel for rel in info if is_moc_name(rel) or "MOC" in rel or "_INDEX" in rel]
+    seen, frontier = set(entries), list(entries)
+    for _ in range(2):
+        nxt = []
+        for rel in frontier:
+            for tgt in info.get(rel, {}).get("links", []):
+                t = tgt.split("/")[-1].split(os.sep)[-1]
+                r = stem2rel.get(t)
+                if r and r not in seen:
+                    seen.add(r); nxt.append(r)
+        frontier = nxt
+    two_hop = len(seen) / len(info) if info else 0.0
+
+    # ④ 陈旧率（高 importance）
+    stale_hi = 0; hi = 0
+    for rel, i in info.items():
+        try:
+            imp = float(i["fm"].get("importance") or 0)
+        except (TypeError, ValueError):
+            imp = 0.0
+        if imp >= 0.7:
+            hi += 1
+            upd = parse_date(i["fm"].get("updated"), None)
+            ref = upd or datetime.fromtimestamp((Path(root) / rel).stat().st_mtime)
+            if (now - ref).days > ARCHIVE_DAYS:
+                stale_hi += 1
+
+    # ⑤ 入链覆盖（复用率代理）
+    reused = sum(1 for rel in info if rel in pred and pred[rel])
+
+    # ③ 预测校准（Brier）：需要复习结果，没有就 N/A
+    calib = None
+    try:
+        from state_manager import read_json
+        st = read_json(root, "recall_state.json", legacy=(".recall_state.json",)) or {}
+        pairs = []
+        for _rel, s in (st or {}).items():
+            if isinstance(s, dict) and s.get("reps") and s.get("interval"):
+                # 预测：到期时的可提取性 ≈ 0.9（FSRS 定义）；实际：是否还记得（lapses 少）
+                pred_r = 0.9
+                actual = 0.0 if int(s.get("lapses") or 0) > 0 else 1.0
+                pairs.append((pred_r - actual) ** 2)
+        if pairs:
+            calib = round(sum(pairs) / len(pairs), 4)
+    except (OSError, ImportError, TypeError, ValueError):
+        calib = None
+
+    return {
+        "two_hop_reach": round(two_hop, 4),
+        "two_hop_note": f"{len(seen)}/{len(info)} 篇可从入口页 ≤2 跳到达",
+        "first_hit_rate": None,     # 由调用方按需注入（跑黄金集较慢）
+        "calibration_brier": calib,
+        "staleness": round(stale_hi / hi, 4) if hi else None,
+        "staleness_note": f"高 importance 笔记 {hi} 篇 · 其中 {stale_hi} 篇超 {ARCHIVE_DAYS} 天未复核",
+        "reuse": round(reused / len(info), 4) if info else 0.0,
+        "reuse_note": f"{reused}/{len(info)} 篇被其他笔记引用",
+        # 易刷量只作对照，明确标注"仅诊断，勿当 KPI"
+        "_diagnostics_only": {"n_notes": len(info),
+                              "n_links": sum(len(i["links"]) for i in info.values()),
+                              "_warn": "这些是易刷量：加动作就能变好，只用于诊断，不要当 KPI"},
+    }
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=ROOT_DEFAULT)
     ap.add_argument("--json", action="store_true")
+    ap.add_argument("--kpi", action="store_true",
+                    help="只算抗 Goodhart 的 5 个指标（难刷），而非易刷的诊断量")
     args = ap.parse_args()
+    if args.kpi:
+        k = kpi(args.root)
+        if args.json:
+            print(json.dumps(k, ensure_ascii=False))
+        else:
+            print("📐 健康 KPI（抗 Goodhart · 只算难刷的量）")
+            print(f"   ① 两跳可达覆盖率   {k['two_hop_reach']:.1%}  {k['two_hop_note']}")
+            fh = k.get("first_hit_rate")
+            print(f"   ② 检索一次命中率   {'N/A（需跑黄金集：kb eval gold）' if fh is None else f'{fh:.1%}'}")
+            cb = k.get("calibration_brier")
+            print(f"   ③ 预测校准 Brier   {'N/A（无复习数据：kb recall mark）' if cb is None else cb}")
+            st = k.get("staleness")
+            print(f"   ④ 陈旧率(高重要)   {'N/A' if st is None else f'{st:.1%}'}  {k['staleness_note']}")
+            print(f"   ⑤ 复用率(入链覆盖) {k['reuse']:.1%}  {k['reuse_note']}")
+            d = k["_diagnostics_only"]
+            print(f"\n   ⚠️ 仅诊断、勿当 KPI：{d['n_notes']} 篇 · {d['n_links']} 条出链（易刷）")
+        return 0
     m = metrics(args.root)
     if args.json:
         # label 含 emoji，单独吐给 dashboard

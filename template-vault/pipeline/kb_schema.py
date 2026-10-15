@@ -19,7 +19,9 @@
   python3 pipeline/kb_schema.py check  [--root R] [--json] [--limit N]
   python3 pipeline/kb_schema.py fields [--root R]     # 统计字段使用率（看契约实际覆盖）
 """
-import argparse, json, re, sys
+import argparse
+import os
+import subprocess, json, re, sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -173,6 +175,96 @@ def cmd_fields(root: Path) -> int:
     return 0
 
 
+# ── 双时态迁移（P1#5）─────────────────────────────────────────
+#   为什么做：2025–2026 的时序知识图谱研究（Zep/Graphiti 等）指出，「事实随时间变化」与
+#   「同一时刻的冲突说法」是两件事，必须靠 **事件时间 vs 事务时间** 分开才能区分。
+#   而拿到这个语义**不需要图数据库** —— frontmatter 加字段即可（零依赖）。
+#   本命令把存量笔记补上 valid_from / recorded_at（用 created / updated 作为最佳代理），
+#   valid_to / superseded_by / conflict_with 留空（只在真的发生取代/冲突时写）。
+#
+#   **默认 dry-run**：要改几百篇笔记 frontmatter，必须先让人看到清单。
+def cmd_bitemporal(root: Path, apply: bool, limit: int) -> int:
+    from kb_common import iter_notes, load_meta, kb_layer_of
+    import kb_schema_migrate as mig
+    try:
+        from rag import is_generated_report
+    except ImportError:
+        def is_generated_report(_rel):      # 退化：导入失败就不过滤
+            return False
+    cands, total, already = [], 0, 0
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue        # 运行期报告产物（feedback_hits.md / recall_deck.md 等）会重新生成，
+                            #   给它们写字段毫无意义，还会被下一次运行覆盖掉。
+        try:
+            fm, _body = load_meta(p)
+        except OSError:
+            continue
+        total += 1
+        if fm.get("valid_from") and fm.get("recorded_at"):
+            already += 1
+            continue
+        # 只迁移"编译态"笔记（canon/page）：raw 证据层保持原样（不可变原则）
+        layer = kb_layer_of(fm, rel)
+        if layer not in ("canon", "page"):
+            continue
+        cands.append((rel, str(fm.get("created") or fm.get("updated") or "")[:10],
+                      str(fm.get("updated") or fm.get("created") or "")[:10]))
+
+    print(f"🕰  双时态字段迁移 · {root}")
+    print(f"   扫描 {total} 篇 · 已有字段 {already} 篇 · 待迁移 {len(cands)} 篇"
+          f"（canon/page 层；raw 证据层不动）")
+    if not cands:
+        print("   无需迁移。")
+        return 0
+    print(f"\n   样例（valid_from←created · recorded_at←updated）：")
+    for rel, vf, ra in cands[:8]:
+        print(f"     {rel[:60]:62} {vf or '（缺日期）':12} {ra}")
+    if not apply:
+        print(f"\n   预演模式（默认）：未写入任何文件。")
+        print(f"   确认后执行：kb schema bitemporal --apply --limit {len(cands)}")
+        return 0
+    # checkpoint **只登记本次要写的文件** —— 不要用 `git add -A`：
+    #   生产库里通常躺着使用者自己的未提交改动（实测 66 个已修改 + 47 个未跟踪），
+    #   `-A` 会把它们一起卷进这次自动提交，等于替使用者做了一次语义不明的提交。
+    targets = [rel for rel, _vf, _ra in cands[:limit]]
+    rollback_sha, dirty_committed = None, False
+    if (root / ".git").exists() and targets:
+        # ⚠️ 关键：回滚点就是**当前 HEAD** —— 别想着"先 git add 再 commit"，
+        #   那一刻文件相对 HEAD 还没有任何变化，提交必然 nothing to commit
+        #   （本文件初版就踩了这个坑：写完 842 篇后才发现根本没建回滚点）。
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
+                           capture_output=True, text=True)
+        rollback_sha = r.stdout.strip() or None
+        # 只有当目标文件**本来就有**未提交改动时，才需要先提交它们，
+        #   好让回滚点包含使用者的既有改动（否则回滚会连带丢掉它们）。
+        d = subprocess.run(["git", "-C", str(root), "status", "--porcelain", "--"] + targets,
+                           capture_output=True, text=True)
+        if d.stdout.strip():
+            subprocess.run(["git", "-C", str(root), "add", "--"] + targets, capture_output=True)
+            subprocess.run(["git", "-C", str(root), "commit", "-m",
+                            f"kb: 双时态迁移前 checkpoint（{len(targets)} 篇）", "--no-verify"],
+                           capture_output=True, text=True)
+            dirty_committed = True
+    written = 0
+    for rel, vf, ra in cands[:limit]:
+        p = root / rel
+        if vf and mig.set_fm(p, "valid_from", vf):
+            written += 1
+        if ra:
+            mig.set_fm(p, "recorded_at", ra)
+    if rollback_sha:
+        print(f"\n   ✅ 已写入 {written} 篇")
+        print(f"   回滚点：{rollback_sha[:10]}"
+              + ("（含本次先提交的既有改动）" if dirty_committed else "（改动前的状态本就在 HEAD）"))
+        print(f"   回滚命令：git -C {root} checkout {rollback_sha[:10]} -- <要回滚的文件>")
+    else:
+        print(f"\n   ✅ 已写入 {written} 篇（非 git 库 → 无 git 回滚点，请自行备份）")
+    print(f"   提示：valid_to / superseded_by / conflict_with 交由冲突检测按需写入，不在本次批量填充。")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="知识契约检查（只读）")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -180,12 +272,18 @@ def main() -> int:
     c.add_argument("--json", action="store_true", dest="as_json")
     c.add_argument("--limit", type=int, default=40)
     f = sub.add_parser("fields"); f.add_argument("--root", default=ROOT_DEFAULT)
+    bt = sub.add_parser("bitemporal", help="补双时态字段（默认 dry-run）")
+    bt.add_argument("--root", default=ROOT_DEFAULT)
+    bt.add_argument("--apply", action="store_true")
+    bt.add_argument("--limit", type=int, default=100000)
     args = ap.parse_args()
     root = Path(args.root)
     if args.cmd == "check":
         return check(root, args.limit, args.as_json)
     if args.cmd == "fields":
         return cmd_fields(root)
+    if args.cmd == "bitemporal":
+        return cmd_bitemporal(root, args.apply, args.limit)
     return 1
 
 

@@ -116,7 +116,9 @@ def _events_from_agent_hits(agent_hits):
                     "n_hits": len(paths), "ts": ts,
                     "epoch": ts.timestamp() if ts else None})
     evs.sort(key=lambda e: (e["epoch"] is None, e["epoch"] or 0.0))
-    return evs[:_MAX_EVENTS]
+    # 取**最新**的 N 条：evs 是升序，evs[:N] 会一直分析最老的一批事件，
+    # 让再问率/成功率代理长期停留在历史窗口，不反映现状。
+    return evs[-_MAX_EVENTS:]
 
 
 # ── embedding（best-effort）─────────────────────────────────
@@ -147,7 +149,8 @@ def _vec(text):
     return None
 
 
-def _cos(a, b):
+def _cos_vec(a, b):
+    """**embedding 列表**余弦（与稀疏 dict 的 kb_common.cos 不同口径）。"""
     if a is None or b is None:
         return None
     dot = sum(x * y for x, y in zip(a, b))
@@ -158,7 +161,8 @@ def _cos(a, b):
     return dot / (na * nb)
 
 
-def _norm(q):
+def _norm_query(q):
+    """**查询串**归一化（去标点+小写）。注意与向量 `kb_common.norm` 无关 —— 改名以免混淆。"""
     return re.sub(_Q_NORM, "", q).lower()
 
 
@@ -295,7 +299,7 @@ def analyze(root: Union[str, Path], window: int = _WINDOW_SECONDS,
         }
 
     use_emb = kb_embed.available() if use_embedding else False
-    queries = [_norm(e["query"]) for e in events if e["query"]]
+    queries = [_norm_query(e["query"]) for e in events if e["query"]]
     distinct = len(set(queries)) if queries else 0
 
     suspect = []
@@ -307,10 +311,10 @@ def analyze(root: Union[str, Path], window: int = _WINDOW_SECONDS,
             o = events[j]["epoch"]
             if o is None or o - e["epoch"] > window:
                 break
-            same_q = bool(e["query"]) and _norm(e["query"]) == _norm(events[j]["query"])
+            same_q = bool(e["query"]) and _norm_query(e["query"]) == _norm_query(events[j]["query"])
             sim = None
             if not same_q and use_emb:
-                sim = _cos(_vec(e["query"]), _vec(events[j]["query"]))
+                sim = _cos_vec(_vec(e["query"]), _vec(events[j]["query"]))
             if same_q or (sim is not None and sim >= sim_threshold):
                 n_requeries += 1
                 at = e["ts"].isoformat() if isinstance(e["ts"], datetime) else None

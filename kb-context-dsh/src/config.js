@@ -70,9 +70,9 @@ export function loadConfig(env = process.env) {
     minScore,
     // Hard byte cap on the injected block (byte length, not chars) so a runaway
     // hit list can never blow up the prompt cache.
-    maxBytes: Math.max(64, Math.floor(num(env.KB_MAX_BYTES, 700))),
+    maxBytes: Math.max(64, Math.floor(num(env.KB_MAX_BYTES, 900))),
     // Per-hit snippet truncation (chars) shown inline in the reference block.
-    snippetMax: Math.max(8, Math.floor(num(env.KB_SNIPPET_MAX, 40))),
+    snippetMax: Math.max(8, Math.floor(num(env.KB_SNIPPET_MAX, 140))),
     // Ceiling for on-demand full-note / original-memory reads (chars).
     contentMax: Math.max(200, Math.floor(num(env.KB_CONTENT_MAX, 6000))),
     queryTimeoutMs: Math.max(1000, Math.floor(num(env.KB_TIMEOUT_MS, 12000))),

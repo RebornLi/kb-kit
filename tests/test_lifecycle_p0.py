@@ -26,6 +26,15 @@ sys.path.insert(0, str(PIPELINE))
 import rag  # noqa: E402
 from kb_common import freshness, is_stale, retrievable_status, index_excluded  # noqa: E402
 
+def _load_idx(root):
+    """读索引：统一走 rag.load_index（v6 起是 pickle，旧库仍是 json）。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "template-vault" / "pipeline"))
+    import rag
+    return rag.load_index(Path(root) / "vector index")[0] or {}
+
+
+
 
 def write(path: Path, fm: str, body: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,7 +66,7 @@ class LifecycleP0Test(unittest.TestCase):
         write(self.root / "20-技术 Technology/arch.md",
               "status: archived\ndomain: 开发\nimportance: 0.6\n", "备份 检索 知识")
         rag.cmd_index(self.root)
-        tf = json.loads((self.root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))["tf"]
+        tf = rag.tf_from_postings(_load_idx(self.root))
         self.assertIn("20-技术 Technology/active.md", tf)
         self.assertNotIn("20-技术 Technology/draft.md", tf)
         self.assertNotIn("20-技术 Technology/arch.md", tf)

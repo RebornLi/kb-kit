@@ -12,14 +12,15 @@ from plugins._subprocess_plugin import SubprocessPlugin
 
 class SchemaPlugin(SubprocessPlugin):
     SCRIPT_NAME = "kb_schema.py"
-    ACTION_MAP = {"check": "check", "fields": "fields"}
+    ACTION_MAP = {"check": "check", "fields": "fields", "bitemporal": "bitemporal"}
+    IN_PROCESS_ACTIONS = {"check", "fields"}  # bitemporal 是写，走 subprocess
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="schema",
             version="1.0",
             plugin_type="kb_module",
-            actions=["check", "fields"],
+            actions=["check", "fields", "bitemporal"],
             cli_aliases={"schema": "check"},
             description="知识契约检查（reference/kb-schema.json）：只读对照，产出偏差清单",
         )

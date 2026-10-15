@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi  # 复用 collect/metrics（接地阀 P0-1）
+from state_manager import state_path, read_state_path, append_jsonl
 
 # 常量单一事实源，收敛在 kb_constants（与 L0/L2/L3 常量同中心）
 from kb_constants import (
@@ -60,39 +61,57 @@ from kb_constants import (
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 
-VERDICT_FILE = ".kb_l4_verdicts.jsonl"      # 宪法裁决账本（gitignore，人工逐条写）
-STATE_FILE = ".kb_l4_state.json"            # 逐 rung 信任尾部状态（gitignore）
-CONFIG_FILE = ".kb_l4_config.json"          # 冻结配置（人工 freeze/unfreeze 写，gitignore）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+VERDICT_FILE = "kb_l4_verdicts.jsonl"      # 宪法裁决账本（gitignore，人工逐条写）
+STATE_FILE = "kb_l4_state.json"            # 逐 rung 信任尾部状态（gitignore）
+CONFIG_FILE = "kb_l4_config.json"          # 冻结配置（人工 freeze/unfreeze 写，gitignore）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {
+    VERDICT_FILE: ".kb_l4_verdicts.jsonl",
+    STATE_FILE: ".kb_l4_state.json",
+    CONFIG_FILE: ".kb_l4_config.json",
+}
 
 # 各 rung 的应用账本（L4 docket 的只读来源，best-effort，缺一 rung 不爆炸）。
-#   注意：账本在 vault/<rel>，读者必须相对 root 解析（非 CWD），否则跨目录跑会读错。
-_L0_LEDGER = "pipeline/.kb_retriage_applied.json"    # {applied:{rel:_}}
-_L1_LEDGER = "pipeline/.kb_retrieval_adjust.json"    # {adjustments:[{action,note,...}]}
-_L2_LEDGER = "pipeline/.kb_selfweight_applied.json"  # {applied:{rel:_}}
-_L3_LEDGER = "pipeline/.kb_meta_config.json"         # {knovals:{knob:_}}
-_LC_REVIEW  = ".kb/curate_review.jsonl"              # 知识结晶低置信提案（kb curate）
+#   这些是**别的模块**的状态，以前写死 vault 相对路径 —— 它们一迁移就读不到了。
+#   现在统一「规范名 + 旧位置回退」解析（读者按 root 解析，非 CWD）。
+_LEDGERS = {
+    "l0": ("kb_retriage_applied.json", "pipeline/.kb_retriage_applied.json"),
+    "l1": ("kb_retrieval_adjust.json", "pipeline/.kb_retrieval_adjust.json"),
+    "l2": ("kb_selfweight_applied.json", "pipeline/.kb_selfweight_applied.json"),
+    "l3": ("kb_meta_config.json", ".kb_meta_config.json"),
+    "lc": ("curate_review.jsonl", ".kb/curate_review.jsonl"),
+}
 
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
-def _p(rel_file: str) -> Path:
-    return Path(rel_file)
-
-
 def _verdict_path(root: Union[str, Path]) -> Path:
-    return Path(root) / VERDICT_FILE
+    """**写**路径（规范）。读请用 `_read_path`。"""
+    return state_path(root, VERDICT_FILE)
 
 
 def _state_path(root: Union[str, Path]) -> Path:
-    return Path(root) / STATE_FILE
+    return state_path(root, STATE_FILE)
 
 
 def _config_path(root: Union[str, Path]) -> Path:
-    return Path(root) / CONFIG_FILE
+    return state_path(root, CONFIG_FILE)
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """读路径：规范优先，回退旧位置。"""
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
+
+
+def _ledger_path(root: Union[str, Path], rung: str):
+    """读别的 rung 的账本（规范优先、旧位置回退）。"""
+    name, legacy = _LEDGERS[rung]
+    return read_state_path(root, name, legacy=(legacy,))
 
 
 def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _state_path(root)
-    if not p.exists():
+    p = _read_path(root, STATE_FILE)
+    if p is None:
         return {"trust": {}, "consec_wrong": {}}
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
@@ -109,8 +128,8 @@ def _write_state(root: Union[str, Path], state: Dict[str, Any]) -> None:
 
 
 def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _config_path(root)
-    if not p.exists():
+    p = _read_path(root, CONFIG_FILE)
+    if p is None:
         return {"frozen": {r: False for r in L4_RUNGS}}
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
@@ -156,27 +175,41 @@ def grounding(root: Union[str, Path]) -> Tuple[bool, str, Dict[str, Any]]:
 
 # ── 裁决账本（只增，真人逐条写）─────────────────────────────────────
 def _read_verdicts(root: Union[str, Path]) -> List[Dict[str, Any]]:
-    p = _verdict_path(root)
-    if not p.exists():
+    p = _read_path(root, VERDICT_FILE)
+    if p is None:
         return []
     try:
-        return [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
-    except (OSError, json.JSONDecodeError):
+        text = p.read_text(encoding="utf-8")
+    except OSError:
         return []
+    # 逐行容错：以前一行 JSON 损坏就整体返回 []，裁决历史「凭空消失」、信任度归零。
+    out: List[Dict[str, Any]] = []
+    bad = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            bad += 1
+    if bad:
+        print(f"⚠️ 裁决账本有 {bad} 行无法解析（已跳过，其余 {len(out)} 行照常生效）", file=sys.stderr)
+    return out
 
 
 def _write_verdict(root: Union[str, Path], rec: Dict[str, Any]) -> None:
-    p = _verdict_path(root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    with p.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    append_jsonl(root, VERDICT_FILE, rec)
 
 
 # ── docket：只读汇编各 rung “已应用·待裁决”清单（best-effort）───────────────────
 #   每个 rung 读者独立 try/except，缺/损坏账本 → 该 rung 贡献 0 条，绝不爆炸。
 def _docket_l0(root: Union[str, Path]) -> List[Dict[str, Any]]:
     try:
-        d = json.loads((Path(root) / _L0_LEDGER).read_text(encoding="utf-8"))
+        _p = _ledger_path(root, "l0")
+        if _p is None:
+            return []
+        d = json.loads(_p.read_text(encoding="utf-8"))
         return [{"rung": "l0", "key": rel, "kind": "tags/summary", "rel": rel}
                 for rel in (d.get("applied") or {}) if rel]
     except (OSError, json.JSONDecodeError, AttributeError):
@@ -185,7 +218,10 @@ def _docket_l0(root: Union[str, Path]) -> List[Dict[str, Any]]:
 
 def _docket_l1(root: Union[str, Path]) -> List[Dict[str, Any]]:
     try:
-        d = json.loads((Path(root) / _L1_LEDGER).read_text(encoding="utf-8"))
+        _p = _ledger_path(root, "l1")
+        if _p is None:
+            return []
+        d = json.loads(_p.read_text(encoding="utf-8"))
         out = []
         for a in (d.get("adjustments") or []):
             rel = a.get("note")
@@ -200,7 +236,10 @@ def _docket_l1(root: Union[str, Path]) -> List[Dict[str, Any]]:
 
 def _docket_l2(root: Union[str, Path]) -> List[Dict[str, Any]]:
     try:
-        d = json.loads((Path(root) / _L2_LEDGER).read_text(encoding="utf-8"))
+        _p = _ledger_path(root, "l2")
+        if _p is None:
+            return []
+        d = json.loads(_p.read_text(encoding="utf-8"))
         return [{"rung": "l2", "key": rel, "kind": "importance", "rel": rel}
                 for rel in (d.get("applied") or {}) if rel]
     except (OSError, json.JSONDecodeError, AttributeError):
@@ -209,7 +248,10 @@ def _docket_l2(root: Union[str, Path]) -> List[Dict[str, Any]]:
 
 def _docket_l3(root: Union[str, Path]) -> List[Dict[str, Any]]:
     try:
-        d = json.loads((Path(root) / _L3_LEDGER).read_text(encoding="utf-8"))
+        _p = _ledger_path(root, "l3")
+        if _p is None:
+            return []
+        d = json.loads(_p.read_text(encoding="utf-8"))
         return [{"rung": "l3", "key": k, "kind": "knob", "rel": None}
                 for k in (d.get("knovals") or {})]
     except (OSError, json.JSONDecodeError, AttributeError):
@@ -222,8 +264,10 @@ def _docket_lc(root: Union[str, Path]) -> List[Dict[str, Any]]:
     与 l0/l2 同构：key = 笔记相对路径。correct = 认可；wrong = 否决。
     连续判错达阈值 → 冻结 lc（kb curate 停止自动写回，退化为只出提案）。
     """
+    p = _ledger_path(root, "lc")
+    if p is None:
+        return []
     try:
-        p = Path(root) / _LC_REVIEW
         items = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     except (OSError, json.JSONDecodeError):
         return []
@@ -338,22 +382,27 @@ def freeze(root: Union[str, Path]) -> Dict[str, Any]:
     consec = _tail_consecutive_wrong(per_rung_list)
 
     newly: List[Dict[str, Any]] = []
+    frozen_next = dict(frozen)      # 候选冻结态：只有真正落盘时才提交
     for r in L4_RUNGS:
         st = per_rung.get(r, {"correct": 0, "wrong": 0})
         n = st["correct"] + st["wrong"]
         should = (consec.get(r, 0) >= L4_FREEZE_CONSEC) and (n >= L4_MIN_SAMPLE)
         # 只在“该冻而当前未冻”时记录一次（避免每次重复合并）
         if should and not frozen.get(r):
-            frozen[r] = True
+            frozen_next[r] = True
             newly.append({"rung": r, "consecutive_wrong": consec.get(r, 0),
                           "n_verdicts": n, "trust": round(st["correct"] / n, 3) if n else None})
     if newly and grounded:
+        frozen = frozen_next
         cfg = {"frozen": frozen, "updated": datetime.now().isoformat(timespec="seconds"),
                "reason": f"连续负裁决冻结 {len(newly)} 个 rung（{', '.join(x['rung'] for x in newly)}）"}
         _write_config(root, cfg)
         _checkpoint(root, f"kb: L4 宪法冻结 {', '.join(x['rung'] for x in newly)} 个 rung（连续负裁决）",
                     [_config_path(root), _state_path(root)])
     else:
+        # 注意：这里必须写**原始** frozen。以前循环里先把 frozen[r]=True 改掉了，
+        # 未接地时 else 分支照样把变异后的 dict 落盘 → 恰好是文档警告的
+        # 「未接地却把闭锁系统更锁死」。
         cfg = {"frozen": frozen, "updated": datetime.now().isoformat(timespec="seconds"),
                "note": "无新增冻结（" + ("接地不足·不自动冻" if not grounded else "未达连续/样本门槛") + ")"}
         _write_config(root, cfg)
@@ -424,7 +473,9 @@ def status(root: Union[str, Path]) -> Dict[str, Any]:
 
 
 def render(root: Union[str, Path], summary: Optional[Dict[str, Any]] = None) -> str:
-    s = status(root)
+    # 用调用方传进来的 summary：以前忽略它并内部再算一次 status(root)，
+    # 而 status→grounding→kb_rsi.collect 是全库扫描，等于每次 report 扫两遍。
+    s = summary if summary is not None else status(root)
     L = ["# ⚖️ L4 宪法（反馈阶梯 · 人工裁判层）", "",
          f"> 接地阀: **{s['grounded']}** — {s['ground_note']}",
          f"> 真人裁决 {s['n_verdicts']} 条 · 待裁 {s['n_pending']} 条（docket）"

@@ -8,6 +8,7 @@
 # 角色：admin / editor / reader
 # ============================================================
 import argparse, sys, json, os
+from kb_common import atomic_write_text
 from pathlib import Path
 import datetime
 
@@ -40,8 +41,8 @@ def load_users(root):
 
 def save_users(root, data):
     p = _users_path(root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写：半截用户表会让所有权限判定失效
+    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
 
 
 def cmd_add(args):

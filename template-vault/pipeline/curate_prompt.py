@@ -54,10 +54,9 @@ LENGTH_RULES = """## 长度纪律（硬约束：超长会被截断而整篇作�
 
 # ── L1 契约层 ────────────────────────────────────────────────
 def load_schema(root: Path) -> Optional[dict]:
-    try:
-        return json.loads((root / "reference" / "kb-schema.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    """读知识契约。**委托 curate.load_schema**（此前是逐字相同的一份副本）。"""
+    from curate import load_schema as _cs
+    return _cs(root)
 
 
 def guess_page_type(body: str, fm: Dict[str, Any]) -> str:

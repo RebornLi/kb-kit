@@ -22,9 +22,8 @@ SCRIPTS = REPO / "template-vault" / "scripts"
 # 内部研究层/库：不提供 CLI 入口，或被其它模块作为库 import。
 # 新增条目必须写明理由。
 INTERNAL_MODULES: dict[str, str] = {
-    "kb_adaptretrieve.py": "检索自适应研究层（被 kb_retriage 引用）",
+    "kb_adaptretrieve.py": "反馈阶梯 L1（**已由 kb ladder 提供入口**；此处仅因 ladder 用动态 __import__ 而未被静态分析捕获）",
     "kb_calibrate.py": "RSI 校准（合成/拟合），无稳定 CLI",
-    "kb_claim.py": "知识主张校验库（被 kb_eval/kb_usage 引用）",
     "kb_consistency.py": "一致性审计，研究层",
     "kb_contradiction.py": "矛盾检测（被 kb_fitness 引用）",
     "kb_drift.py": "漂移度量，研究层",
@@ -32,15 +31,15 @@ INTERNAL_MODULES: dict[str, str] = {
     "kb_eval.py": "RSI 评测，研究层",
     "kb_fitness.py": "适应度函数库（被 RSI 层引用）",
     "kb_ingest.py": "外部资料抓取（--url/--file），无稳定 CLI 契约",
-    "kb_l4.py": "反馈阶梯 L4（人工裁判层），研究层",
-    "kb_l5.py": "反馈阶梯 L5（训练层），研究层",
-    "kb_meta.py": "反馈阶梯 L3 元调参，研究层",
-    "kb_retriage.py": "再分诊研究层（与 kb_adaptretrieve 关联）",
+    "kb_l4.py": "反馈阶梯 L4 宪法裁决（**已由 kb ladder 提供入口**，动态导入故此处仍列）",
+    "kb_l5.py": "反馈阶梯 L5 元策略（**已由 kb ladder 提供入口**，动态导入故此处仍列）",
+    "kb_meta.py": "反馈阶梯 L3 元调参（**已由 kb ladder 提供入口**，动态导入故此处仍列）",
+    "kb_retriage.py": "反馈阶梯 L0 再分诊（**已由 kb ladder 提供入口**，动态导入故此处仍列）",
     "kb_scale.py": "规模压测，开发工具",
-    "kb_schema_migrate.py": "schema 迁移一次性脚本",
-    "kb_selfweight.py": "反馈阶梯 L2 自我加权，研究层",
+    "kb_selfweight.py": "反馈阶梯 L2 自权重（**已由 kb ladder 提供入口**，动态导入故此处仍列）",
     "kb_types.py": "类型定义库",
     "kb_usage.py": "使用度量库（被 RSI 层引用）",
+    "kb_worker.py": "常驻查询 worker（kb-context-dsh / kb-context-hook 经 stdin JSON-lines 调用，非 kb CLI 入口）",
 }
 
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+([A-Za-z_][A-Za-z0-9_]*)", re.M)

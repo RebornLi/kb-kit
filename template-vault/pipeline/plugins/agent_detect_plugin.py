@@ -42,9 +42,14 @@ class AgentDetectPlugin(PluginBase):
         elif action == "setup":
             r = ar.cmd_setup(root, out)
         elif action == "ingest":
-            name = params.get("name")
-            dry_run = params.get("dry_run", False)
-            r = ar.cmd_ingest(root, name, dry_run, out)
+            if params.get("list"):
+                # `--list` 在 agent_registry 的 ingest 子命令上注册了，但 cmd_ingest 从不检查它，
+                # 且默认 dry_run=False → 以前 `kb ingest agent --list` 不列清单而是**直接写库**。
+                r = ar.cmd_list(root, out)
+            else:
+                name = params.get("name")
+                dry_run = params.get("dry_run", False)
+                r = ar.cmd_ingest(root, name, dry_run, out)
         elif action == "add":
             name = params.get("name")
             agent_type = params.get("type")
@@ -52,8 +57,14 @@ class AgentDetectPlugin(PluginBase):
                 print("❌ add 需要 --name 和 --type 参数", file=sys.stderr)
                 return 1
             fields = {}
-            if params.get("json_path") or params.get("json"):
-                fields["sources"] = {"json": params.get("json_path") or params.get("json")}
+            json_path = self._json_path(params)
+            if json_path is None and (params.get("json_path") or params.get("json") is True):
+                print("❌ --json 需要路径，但它的值被当成位置参数了。"
+                      "本命令请改用 `--json-path <文件>`（`--json` 是全局布尔旗标）。",
+                      file=sys.stderr)
+                return 1
+            if json_path:
+                fields["sources"] = {"json": json_path}
             if params.get("daily_src"):
                 fields.setdefault("sources", {})["daily_src"] = params["daily_src"]
             if params.get("root_src"):
@@ -72,7 +83,12 @@ class AgentDetectPlugin(PluginBase):
                 print("❌ enable 需要 --name 参数", file=sys.stderr)
                 return 1
             enabled_str = params.get("enable", "true")
-            enabled = enabled_str.lower() not in ("false", "0", "no")
+            if enabled_str is True:           # `--enable` 裸布尔（launcher 会解析成 True）
+                enabled = True
+            elif enabled_str is False:
+                enabled = False
+            else:
+                enabled = str(enabled_str).lower() not in ("false", "0", "no")
             r = ar.cmd_enable(root, name, enabled, out)
         else:
             print(f"❓ 未知动作: {action}", file=sys.stderr)
@@ -81,3 +97,23 @@ class AgentDetectPlugin(PluginBase):
         if out:
             print("\n".join(out))
         return r
+
+    @staticmethod
+    def _json_path(params: dict):
+        """解析 JSON 记忆源路径。
+
+        `--json` 在 BOOL_FLAGS 里（全局布尔旗标），所以 `kb agent add --json <path>`
+        会被解析成 `json=True`，真正的路径落到 `_positional`。这里把它回收回来；
+        取不到就返回 None，由调用方给出可读报错 —— 绝不写出 `sources.json = true`。
+        """
+        v = params.get("json_path")
+        if isinstance(v, str) and v:
+            return v
+        v = params.get("json")
+        if isinstance(v, str) and v:
+            return v
+        if v is True:
+            rest = params.get("_positional") or []
+            if rest:
+                return rest[0]
+        return None

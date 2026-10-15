@@ -235,6 +235,28 @@ def _is_raw_rel(rel: str) -> bool:
         return False
 
 
+_FM_BLOCK_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.S)
+
+
+def _set_kb_target(text: str, new_target: str) -> str:
+    """把 frontmatter 里的 kb_target 改成 new_target（缺失则补一行）。
+
+    笔记挪到新 PARA 区后 kb_target 必须同步：否则 kb_scale / 巡检 / 下一轮 triage
+    仍按旧区判据，直到下一次 `kb clean apply` 才被纠正。
+    """
+    m = _FM_BLOCK_RE.match(text)
+    if not m:
+        return text
+    lines = m.group(1).split("\n")
+    for i, ln in enumerate(lines):
+        if re.match(r"^kb_target\s*:", ln):
+            lines[i] = f"kb_target: {new_target}"
+            break
+    else:
+        lines.append(f"kb_target: {new_target}")
+    return text[:m.start(1)] + "\n".join(lines) + text[m.end(1):]
+
+
 def _git_stage(root: Union[str, Path], paths: List[str]) -> List[str]:
     """暂存变更，容忍被移动后已不存在的源路径。
 
@@ -296,7 +318,8 @@ def apply_moves(root: Union[str, Path], results: List[Dict[str, Any]],
                 continue
             dest_dir = Path(root) / r["route_to"]
             dest_dir.mkdir(parents=True, exist_ok=True)
-            dest, kind = _safe_place(dest_dir, rel.split("/")[-1], src.read_text(encoding="utf-8"))
+            content = _set_kb_target(src.read_text(encoding="utf-8"), r["route_to"])
+            dest, kind = _safe_place(dest_dir, rel.split("/")[-1], content)
             src.unlink()
             touched += [str(dest.relative_to(root)), rel]
             moved += 1
@@ -411,11 +434,14 @@ def main() -> int:
 
 # ── 按内容类型分桶（FR-3.3.13）──────────────────────────────
 CONTENT_TYPE_ROUTES = {
-    "policy":     "30-资源 Resources/政策",
-    "decision":   "10-项目 Projects/决策",
+    # 目标必须是**库里真实存在的 PARA 目录**：以前写成 `30-资源 Resources`，
+    # 而模板与现役库都只有 `40-资源库 Resources` → `kb ingest apply` 会凭空造出
+    # 一个顶层目录，笔记落到 PARA 体系之外（索引/巡检/图谱都按预定义顶层目录走）。
+    "policy":     "40-资源库 Resources/政策",
+    "decision":   "30-决策日志 Decisions",
     "lesson":     "20-技术 Technology/教训",
     "knowledge":  "20-技术 Technology",
-    "reference":  "30-资源 Resources",
+    "reference":  "40-资源库 Resources",
     "chat":       None,  # 聚合桶
     "chat_todo":  None,  # 聚合桶
     "noise":      None,  # 丢弃
@@ -423,17 +449,28 @@ CONTENT_TYPE_ROUTES = {
 
 
 def _domain_to_para(domain):
-    """domain → PARA 顶层目录映射。"""
+    """domain → PARA 顶层目录映射（必须落在真实存在的顶层目录内）。
+
+    本表已与 memory_sync / sync / memory_ingest 三张表**完全对齐**，
+    一致性由 `tests/test_route_consistency.py` 守卫（出现分歧即红）。
+    对齐依据：现役库知识层实测分布（如 产品 85% 落 40-资源库、管理 48% 落 10-项目）。
+    另：本函数原漏配 `运维`/`数据` → 落到默认 `40-资源库`，而另三套都放 `20-技术`，已补齐。
+    """
     mapping = {
         "开发": "20-技术 Technology",
         "安全": "20-技术 Technology",
-        "产品": "10-项目 Projects",
+        "运维": "20-技术 Technology",   # 补：原先漏配 → 被默认值丢进 40-资源库
+        "数据": "20-技术 Technology",   # 补：同上
+        # 实测语料：产品域知识层笔记 11/13(85%) 落在 40-资源库 Resources，
+        # memory_sync / sync 两张表也一致 → 原 10-项目 是异类，已对齐。
+        "产品": "40-资源库 Resources",
         "运营": "10-项目 Projects",
         "管理": "10-项目 Projects",
-        "综合": "30-资源 Resources",
-        "生活": "40-领域 Areas",
+        "综合": "40-资源库 Resources",
+        # 原先还有一条 "生活" → 40-资源库：但它不在 DOMAIN_WHITELIST / taxonomy.json /
+        # domain-taxonomy.json 任何一处，且取值与默认值相同 → 纯冗余死配置，已删。
     }
-    return mapping.get(domain, "30-资源 Resources")
+    return mapping.get(domain, "40-资源库 Resources")
 
 
 def triage_by_content_type(root: Union[str, Path], rel: str, fm: Dict[str, Any],

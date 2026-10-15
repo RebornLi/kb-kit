@@ -253,7 +253,7 @@ def cmd_audit(root: Path, limit: int, as_json: bool) -> int:
 
 
 def cmd_apply(root: Path, dry: bool, limit: int) -> int:
-    """把算出的置信分写回 frontmatter（默认干跑）。"""
+    """把算出的置信分写回 frontmatter；dry=True 时只统计不落盘（`apply --dry-run`）。"""
     changed = 0
     p10, p3 = population_cutoffs(root)
     for p in iter_notes(root):
@@ -322,8 +322,11 @@ def decay_verdict(root: Path, rel: str, fm: Dict[str, Any], body: str,
 
 def _read_hits(root: Path) -> Dict[str, int]:
     """读反馈账本里的命中次数（kb feedback 写的 .kb/state/feedback_state.json）。"""
-    for cand in (root / ".kb" / "state" / "feedback_state.json",
-                 root / "pipeline" / ".feedback_state.json"):
+    from state_manager import read_state_path
+    cands = [read_state_path(root, "feedback_state.json",
+                             legacy=("pipeline/.feedback_state.json",
+                                     ".feedback_state.json"))]
+    for cand in [c for c in cands if c is not None]:
         try:
             d = json.loads(cand.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):

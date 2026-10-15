@@ -24,7 +24,9 @@ from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
 MIN_CHARS_DEFAULT = 80
 # DUP_SIM / NOVEL_SIM 已改为动态加载（Task 3），见 grade() 中 get_dedup_thresholds()
 # 保留模块级常量作为默认值，供 memory_ingest.py 向后兼容 import
-DUP_SIM = 0.92    # 默认值（实际使用时通过 get_dedup_thresholds 动态获取）
+# ⚠️ 与 kb_constants.DUP_SIM(0.85) **不是同一个东西**：这个是"读不到阈值配置时的兜底"，
+#    那个是"去重判定阈值"。同名不同值极易误用 → 改名为 FALLBACK 显式区分。
+DUP_SIM_FALLBACK = 0.92
 NOVEL_SIM = 0.70  # 默认值
 DEFAULT_DENSITY = 0.15
 
@@ -54,10 +56,15 @@ FOLDER_TARGET = {
     "安全": "20-技术 Technology",
     "数据": "20-技术 Technology",
     "产品": "40-资源库 Resources",
-    "管理": "60-运营 Operations",
+    # 实测语料：管理域知识层笔记 25/52(48%) 落在 10-项目 Projects，60-运营 仅 3 篇(5.8%)，
+    # 且 sync / intake_triage / memory_ingest 三张表都取 10-项目 → 已对齐。
+    "管理": "10-项目 Projects",
     "综合": "40-资源库 Resources",
 }
-DEFAULT_TARGET = "00-收件箱 Inbox"
+# 未知 domain 的兜底落点必须是**终端 PARA 区**，不能回收件箱 ——
+# 落回收件箱会让下一轮 intake_triage 把刚晋升的笔记当低价值项 trash/route，
+# 形成「晋升 → 回收件箱 → 疑似垃圾」的回路。与「综合」的映射保持一致。
+DEFAULT_TARGET = "40-资源库 Resources"
 
 
 def signal_density(body):
@@ -81,19 +88,26 @@ def slug(name):
 
 
 def load_index(root):
-    idx_path = Path(root) / "vector index" / "df_idf.json"
-    if not idx_path.exists():
+    # 经 rag 的解析器取路径：v6 起主格式是 .pkl，写死 .json 会以为"没有索引"→每次全量重建
+    idx_path = rag.index_file(Path(root) / rag.IDX_DIR)
+    if idx_path is None:
         rag.cmd_index(root)
     else:
         # 增量检测：检查笔记是否有变更，有变更才重建
         try:
-            payload = json.loads(idx_path.read_text(encoding="utf-8"))
+            payload, _ver = rag.load_index(idx_path)
+            if payload is None:
+                rag.cmd_index(root)
+                return
             doc_hashes = payload.get("doc_hashes", {})
             changed = False
             for p in iter_notes(root):
                 rel = str(p.relative_to(root))
                 try:
-                    current_hash = content_fingerprint(p.read_text(encoding="utf-8"))
+                    # 指纹口径必须与 rag.py 一致：它写的是 content_fingerprint(**body**)，
+                    # 这里以前用整文件（含 frontmatter）→ 两者永不相等 → 每次调用都触发全量重建索引。
+                    _fm, _t, _b, body = load(p)
+                    current_hash = content_fingerprint(body)
                 except (OSError, UnicodeDecodeError):
                     continue
                 if doc_hashes.get(rel) != current_hash:
@@ -104,9 +118,20 @@ def load_index(root):
         except (OSError, json.JSONDecodeError, KeyError):
             # 索引文件损坏，重建
             rag.cmd_index(root)
-    payload = json.loads(idx_path.read_text(encoding="utf-8"))
-    vocab, idf, tf_all, meta_all = payload["vocab"], payload["idf"], payload["tf"], payload["meta"]
-    rel2vec = {r: rag._vec(tf_all[r], vocab, idf) for r in tf_all}
+    # 统一走 rag.load_index：它按扩展名选 pickle/JSON。
+    # 以前这里还有一处裸 `json.loads(idx_path.read_text())` —— 索引换成 pickle 后
+    # 会直接 UnicodeDecodeError（上一轮只改掉了前半段的读取，漏了这行）。
+    payload, _ver = rag.load_index(idx_path) if idx_path else (None, 0)
+    if payload is None:
+        rag.cmd_index(root)
+        payload, _ver = rag.load_index(Path(root) / rag.IDX_DIR)
+    if payload is None:
+        raise RuntimeError("索引重建后仍无法加载")
+    meta_all = payload["meta"]
+    idf = payload["idf"]
+    vocab = payload.get("vocab") or sorted(idf)
+    # 文档向量：由 rag 统一提供（v7 从 postings 一趟构建，v6 及更早逐篇 _vec）
+    rel2vec = rag.all_doc_vectors(payload)
     return vocab, idf, rel2vec, meta_all
 
 
@@ -115,24 +140,16 @@ def load_state(root):
     default = {"promoted": {}}
     try:
         from state_manager import StateStore
-        store = StateStore(root)
-        if store.exists("memory_sync_state.json"):
-            return store.load("memory_sync_state.json", default)
-        # 旧文件迁移
-        legacy = Path(root) / ".memory_sync_state.json"
-        if legacy.exists():
-            try:
-                data = json.loads(legacy.read_text(encoding="utf-8"))
-                store.save("memory_sync_state.json", data)
-                return data
-            except (OSError, json.JSONDecodeError):
-                pass
-        return default
+        # 旧位置（.memory_sync_state.json / pipeline/…）由 StateStore 的 legacy 回退读取，
+        # 不再手工搬运 —— 手工搬运会在中途失败时丢掉状态。
+        store = StateStore(root, legacy=("pipeline/.memory_sync_state.json",
+                                         ".memory_sync_state.json"))
+        return store.load("memory_sync_state.json", default)
     except ImportError:
-        try:
-            return json.loads((Path(root) / ".memory_sync_state.json").read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return default
+        from state_manager import read_json
+        return read_json(root, "memory_sync_state.json",
+                         legacy=("pipeline/.memory_sync_state.json",
+                                 ".memory_sync_state.json"), default=default)
 
 
 def save_state(root, state):
@@ -141,8 +158,8 @@ def save_state(root, state):
         from state_manager import StateStore
         StateStore(root).save("memory_sync_state.json", state)
     except ImportError:
-        (Path(root) / ".memory_sync_state.json").write_text(
-            json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        from state_manager import write_json
+        write_json(root, "memory_sync_state.json", state)
 
 
 def best_match(vocab, idf, rel2vec, meta_all, body, topk=2):
@@ -290,7 +307,9 @@ def ledger_append(root, entry):
     try:
         ledger_dir = Path(root) / ".kb"
         ledger_dir.mkdir(parents=True, exist_ok=True)
-        ledger_path = ledger_dir / "promotions.jsonl"
+        # 统一写 .kb/state/（旧位置 .kb/promotions.jsonl 由读取方回退兼容）
+        from state_manager import state_path
+        ledger_path = state_path(root, "promotions.jsonl")
         line = json.dumps(entry, ensure_ascii=False, separators=(",", ":"))
         with open(ledger_path, "a", encoding="utf-8") as f:
             f.write(line + "\n")

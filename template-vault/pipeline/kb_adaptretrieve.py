@@ -3,13 +3,20 @@
 # kb_adaptretrieve.py —— L1 查询即反馈（反馈阶梯 · 实时回路）
 # ------------------------------------------------------------
 # 使命：让"每一次查询"都变成一次对现实的评估，并据此*只提议*修正检索——
-#   把真实的"答不上/答错"信号喂回检索，而**擅自不改笔记**。这是反馈阶梯 Rungs
-#   的第一级（最紧的实时回路 L1）。
+#   把真实的"答不上/答错"信号挖成"检索缺口"清单，而**擅自不改笔记、也不改检索**。
 #
 #  三级能力：
 #    record_query  —— 一次 query → 信号落 feedback_state（与 rag.py agent_hits 同格式）
 #    propose       —— 从真实信号挖"检索缺口"：高相似却未命中的笔记 → 只产 *提议*
 #    apply         —— 人工确认后落 .kb_retrieval_adjust.json（检索修正契约），git checkpoint 可回滚
+#
+#  ✅ **闭环已接通（2026-10-16 起）**：`rag.py` 会读这份契约并在查询时消费它 ——
+#    `apply` 落下的 `{query, action:"boost", note}` 会让**同一查询**再次把该笔记拉回排序。
+#    黄金集实测（30 题）：契约正确时 top1 90.0%→96.7%、recall@4 82.5%→90.0%、
+#    recall@10 98.3%→100%、MRR 0.950→0.983。
+#    ⚠️ 反面同样显著：契约若指向无关笔记，top1 90.0%→76.7%、MRR→0.883。
+#    因此消费侧有三道护栏（见 rag.py）：置信地板 `ADJUST_MIN_SIM`、条数上限 `ADJUST_MAX`、
+#    逃生门 `KB_RETRIEVAL_ADJUST=0`；且 `apply` 必须人工确认。**别把 apply 做成自动的。**
 #
 #  铁律（与 kb_usage / kb_claim / rag.py 完全一致）：
 #    · 默认只提议：proposals 只写 jsonl，绝不自动改检索/笔记
@@ -32,14 +39,36 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi  # 复用 collect/is_raw（编译态笔记）+ tokenize
+from state_manager import state_path, append_jsonl
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)
 
-PROP_FILE = ".kb_adaptretrieve_proposals.jsonl"        # 瞬态提议（gitignore）
-ADJUST_FILE = ".kb_retrieval_adjust.json"              # 检索修正契约（人工 apply 写，gitignore）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+PROP_FILE = "kb_adaptretrieve_proposals.jsonl"         # 瞬态提议（gitignore）
+ADJUST_FILE = "kb_retrieval_adjust.json"               # 检索修正契约（人工 apply 写，gitignore）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {PROP_FILE: "pipeline/.kb_adaptretrieve_proposals.jsonl",
+           ADJUST_FILE: "pipeline/.kb_retrieval_adjust.json"}
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """读路径：规范优先、旧位置回退（旧库升级后提议/契约不会凭空消失）。"""
+    from state_manager import read_state_path
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 SIM_MIN = 0.50        # "高相似却未命中"的余弦下限（char-gram，与 kb_rsi 去重尺度同档）
 MAX_PROPOSALS = 50    # 单次 propose 最多产出提议数（有界）
+# ⚠️ 下面两组过滤是**裁决时发现必须加的**（生产库实测，2026-10-16）：
+#   首次 propose 产出的 50 条提案里，44 条"高优先级"全部来自**同一段 4788 字的
+#   系统提示词**（定时任务的 agent 提示被当成用户查询记进 agent_hits），
+#   而且 28/50 指向 `.agents/`、`.pytest_cache/`、`.codeartsdoer/` 这类**不该入索引**的路径；
+#   与此同时真正的高频用户问题（「知识结晶 正典 是什么」问了 73 次）**一条提案都没产出** ——
+#   名额被那段系统提示词占满了。直接 apply 这批契约会按实测方向**降低检索质量**
+#   （坏契约：top1 90.0%→76.7%），所以必须先修生成器。
+MAX_QUERY_LEN = 200   # 超过此长度的"查询"不是用户提问（实测占信号 8%，全为自动化提示词）
+# 不该出现在检索修正契约里的路径（隐藏目录 / 缓存 / 嵌套仓 / 治理工作区）
+_NOTE_PATH_DENY = (".agents/", ".pytest_cache/", ".codeartsdoer/", ".git/",
+                   "_curate/", "/raw/", ".obsidian/", "__pycache__/")
 REQUERY_WINDOW = 3600  # 重问窗口（秒），判定"同一 query 短期再问"=前次没答上
 _MAX_EVENTS = 500      # 状态内最多分析的事件数（有界）
 
@@ -122,9 +151,12 @@ def _agent_events(root: Union[str, Path]) -> List[Dict[str, Any]]:
         paths = [str(h) for h in (ev.get("hits") or []) if h]
         evs = {"session": str(sess), "query": q, "paths": paths,
                "satisfied": ev.get("satisfied"), "ts": ev.get("timestamp")}
-        if q:
+        if q and len(q) <= MAX_QUERY_LEN:
             events.append(evs)
-    return events[:_MAX_EVENTS]
+        # 超长"查询"是自动化提示词，不是用户提问（见文件头 MAX_QUERY_LEN 说明）
+    # agent_hits 是插入序（≈时间序）：取尾部 = 最新事件。
+    # 取头部会永久忽略新信号（超过上限后最新查询再也不参与挖缺口）。
+    return events[-_MAX_EVENTS:]
 
 
 # ── ② propose：挖检索缺口 → 只产提议─────────────────────────────
@@ -142,8 +174,15 @@ def _index_notes(root: Union[str, Path]) -> List[Tuple[str, str]]:
     """编译态笔记 (rel, body) 索引，排除 raw/归档收件箱MOC。"""
     out = []
     for n in kb_rsi.collect(root):
-        rel = n.get("rel")
+        rel = str(n.get("rel") or "")
         if not rel or kb_rsi.is_raw(rel) or kb_rsi.is_archive(rel) or kb_rsi.in_inbox(rel):
+            continue
+        # 路径过滤：隐藏目录/缓存/嵌套仓里的 .md 不是"笔记"，给它们建检索契约
+        # 只会把垃圾笔记永久顶到检索前面（实测 28/50 提案曾是这类）。
+        low = "/" + rel.replace("\\", "/")
+        if any(d in low for d in _NOTE_PATH_DENY):
+            continue
+        if any(seg.startswith(".") for seg in Path(rel).parts[:-1]):
             continue
         body = (n.get("body") or "").strip()
         if body:
@@ -224,18 +263,25 @@ def propose(root: Union[str, Path], sim_min: float = SIM_MIN,
         if stop:
             break  # 已达上限 → 停止扫描后续事件
 
-    # 确定性排序(先重问失败、再 sim 降序、最后 note 路径) → id 跨运行稳定
-    proposals.sort(key=lambda p: (0 if p["issue"].startswith("requery") else 1, -p["sim"], p["note"]))
+    # 排序：先重问失败 → **再按该 query 在信号里出现的次数降序** → 再 sim → 再路径。
+    # 为什么加"出现次数"：L1 的设计前提就是"同一 query 反复再问 = 上次没答上"，
+    # 所以问过 73 次的问题必须排在只出现 1 次的之前。此前只按 sim 排序，
+    # 导致名额被"语义上和很多笔记都像"的长提示词占满（实测见文件头）。
+    _freq: Dict[str, int] = {}
+    for ev in events:
+        k = _norm_q(ev.get("query", ""))
+        _freq[k] = _freq.get(k, 0) + 1
+    proposals.sort(key=lambda p: (0 if p["issue"].startswith("requery") else 1,
+                                  -_freq.get(_norm_q(p["query"]), 1), -p["sim"], p["note"]))
     for i, p in enumerate(proposals, 1):
         p["id"] = i
         p["severity"] = "high" if p["issue"].startswith("requery") else "medium"
 
     # 写提案文件（全量重写，使 apply 看到最新）
-    logdir = Path(root) / "pipeline"
-    logdir.mkdir(parents=True, exist_ok=True)
-    (logdir / PROP_FILE).write_text(
-        "\n".join(json.dumps(p, ensure_ascii=False) for p in proposals) + ("\n" if proposals else ""),
-        encoding="utf-8")
+    from kb_common import atomic_write_text
+    atomic_write_text(state_path(root, PROP_FILE),
+                      "\n".join(json.dumps(p, ensure_ascii=False) for p in proposals)
+                      + ("\n" if proposals else ""))
 
     req = sum(1 for p in proposals if p["issue"].startswith("requery"))
     return {"n_events": len(events), "n_notes": len(notes),
@@ -257,19 +303,20 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
           force: bool = False) -> Dict[str, Any]:
     """人工确认后，把选定提案合并进 .kb_retrieval_adjust.json（检索修正契约）。
     跳过 raw/ 与不存在的笔记；整次 apply 只做一次（原子）git checkpoint，可回滚。"""
-    p = Path(root) / "pipeline" / PROP_FILE
-    if not p.exists():
+    p = _read_path(root, PROP_FILE)
+    if p is None:
         return {"written": [], "skipped": [], "note": "无待审提议；先 run propose"}
     recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     want = {str(i) for i in (ids or set())}  # 提案 id 落盘为 int，CLI 传串 → 统一转串比
     pick = recs if (ids is None and force) else [r for r in recs if str(r.get("id")) in want]
 
     written, skipped = [], []
-    apath = Path(root) / "pipeline" / ADJUST_FILE
+    apath_read = _read_path(root, ADJUST_FILE)
+    apath = state_path(root, ADJUST_FILE)          # 写永远写规范路径
     existing, seen_keys = [], set()
-    if apath.exists():
+    if apath_read is not None:
         try:
-            for a in json.loads(apath.read_text(encoding="utf-8")).get("adjustments", []):
+            for a in json.loads(apath_read.read_text(encoding="utf-8")).get("adjustments", []):
                 existing.append(a); seen_keys.add((a.get("action"), a.get("note")))
         except (OSError, json.JSONDecodeError):
             existing = []
@@ -286,15 +333,18 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
             skipped.append({"id": r.get("id"), "note": rel, "reason": "契约已含该项"}); continue
         rec = {"query": q, "action": r.get("suggested", "boost"), "note": rel,
                "sim": r.get("sim"), "issue": r.get("issue"), "reason": r.get("reason"),
-               "from_proposal_id": r.get("id"), "captured": _now_iso()}
+               "from_proposal_id": r.get("id"), "captured": _now_iso(),
+               # 明确声明：该条目会被 rag.py 消费并改变排序（可审计）
+               "consumed_by": "rag.cmd_query", "affects_retrieval": True}
         existing.append(rec); seen_keys.add(key)
         written.append({"id": r.get("id"), "note": rel})
 
     if written:
         # 契约本身 gitignore → force-add 以便 checkpoint 可回滚；整次 apply 一次提交
-        apath.write_text(json.dumps({"adjustments": existing, "updated": _now_iso()},
-                                    ensure_ascii=False, indent=2), encoding="utf-8")
-        _git_checkpoint_force(root, str(Path("pipeline") / ADJUST_FILE),
+        from kb_common import atomic_write_text
+        atomic_write_text(apath, json.dumps({"adjustments": existing, "updated": _now_iso()},
+                                            ensure_ascii=False, indent=2))
+        _git_checkpoint_force(root, str(apath.relative_to(root)),
                               f"kb: 检索修正入库 {len(written)} 条 [{','.join(str(w['id']) for w in written)}] boost")
 
     try:
@@ -311,8 +361,8 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
 
 # ── status / render──────────────────────────────────────────────
 def status(root: Union[str, Path]) -> Dict[str, Any]:
-    p = Path(root) / "pipeline" / PROP_FILE
-    if not p.exists():
+    p = _read_path(root, PROP_FILE)
+    if p is None:
         return {"count": 0, "proposals": []}
     recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     return {"count": len(recs), "proposals": recs}
@@ -322,16 +372,21 @@ def render(root: Union[str, Path], summary: Optional[Dict[str, Any]] = None) -> 
     st = status(root)
     L = ["# 🔎 L1 查询即反馈 —— 检索修正提议（只读 · 交人工）", "",
          f"> 基于真实查询信号(agent_hits)挖出的检索缺口：**{st['count']}** 条。"
-         "`apply --id N` 或 `apply --all` 确认后落检索修正契约。"]
+         "`apply --id N` 或 `apply --all` 确认后落检索修正契约。",
+         "> ✅ 该契约**已被检索消费**：apply 后同一查询会把这些笔记拉回排序"
+         "（有置信地板/条数上限，可用 `KB_RETRIEVAL_ADJUST=0` 关闭）。"]
     if not st["proposals"]:
         L += ["", "✅ 无检索缺口提议（或暂无使用信号：先 capture 灌信号 / 跑 rag query）。"]
         return "\n".join(L) + "\n"
     L += ["", "## ⚠️ 待人工复核（按优先级：重问失败 > sim 降序）", ""]
     for p in st["proposals"]:
-        tag = "重问" if p["issue"].startswith("requery") else "漏检"
-        L += [f"### {p['id']}. [{tag}/{p.get('severity')}] sim={p['sim']} — `{p['note']}`",
-              f"   - query: {p['query']}",
-              f"   - 说明: {p['reason']}", ""]
+        # 这份 jsonl 是运行时产物（可被手改/旧版本写入）：缺字段不能让整条 status 崩掉。
+        issue = str(p.get("issue") or "")
+        tag = "重问" if issue.startswith("requery") else "漏检"
+        L += [f"### {p.get('id', '?')}. [{tag}/{p.get('severity')}] "
+              f"sim={p.get('sim', '—')} — `{p.get('note', '?')}`",
+              f"   - query: {p.get('query', '—')}",
+              f"   - 说明: {p.get('reason', '—')}", ""]
     L += ["> 注：相似度为离线 char-gram 余弦，代理“该笔记是否该被此 query 命中”；供人审。"]
     return "\n".join(L) + "\n"
 
@@ -370,12 +425,12 @@ def main() -> int:
             print(json.dumps(summary, ensure_ascii=False, indent=2))
         else:
             print(render(root, summary))
-            print(f"📝 检索修正提议 → {Path(root)/'pipeline'/PROP_FILE}  ·  "
+            print(f"📝 检索修正提议 → {state_path(root, PROP_FILE)}  ·  "
                   f"应用: apply --id N | apply --all")
     elif args.cmd == "apply":
         res = apply(root, ids=args.id, force=getattr(args, "all", False) or args.force)
         print(json.dumps(res, ensure_ascii=False, indent=2) if args.json
-              else f"✅ {res['note']}  → {Path(root)/'pipeline'/ADJUST_FILE}")
+              else f"✅ {res['note']}  → {state_path(root, ADJUST_FILE)}")
     else:
         stt = status(root)
         print(json.dumps(stt, ensure_ascii=False, indent=2) if args.json else render(root))

@@ -63,7 +63,7 @@ GOLD = [
 def run_query(root: Path, q: str, top: int, no_layer: bool, no_rerank: bool = False) -> dict:
     cmd = [sys.executable, str(root / "pipeline" / "rag.py"), "query", q,
            "--root", str(root), "--top", str(top), "--json", "--context", "400",
-           "--exclude-stale"]
+           "--exclude-stale", "--no-record"]   # 评测不得污染使用信号
     if no_layer:
         cmd += ["--include-raw", "--include-stubs"]
     env = dict(**__import__("os").environ)
@@ -88,8 +88,23 @@ def classify(root: Path, rel: str, meta: dict) -> str:
     return "page"
 
 
+def _body_len(p: Path) -> int:
+    """命中笔记的**真实正文**长度（去掉 frontmatter）。读不到返回 0。"""
+    try:
+        text = p.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return 0
+    if text.startswith("---"):
+        end = text.find("\n---", 3)
+        if end != -1:
+            text = text[end + 4:]
+    return len(text.strip())
+
+
 def measure(root: Path, top: int, no_layer: bool, no_rerank: bool = False) -> dict:
-    idx = json.loads((root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))
+    sys.path.insert(0, str(Path(root) / "pipeline"))
+    import rag as _rag
+    idx = _rag.load_index(root / "vector index")[0] or {}
     meta_all = idx.get("meta", {})
     per_q, agg = [], {"canon": 0, "stub": 0, "raw": 0, "page": 0}
     body_lens, snip_lens, n_hits = [], [], 0
@@ -111,7 +126,11 @@ def measure(root: Path, top: int, no_layer: bool, no_rerank: bool = False) -> di
                     row["stub"] += 1
                 else:
                     row["page"] += 1
-            body_lens.append(len(str(h.get("snippet") or "")))
+            # 正文长度必须是**笔记真实正文**，不能拿 snippet 充数：
+            # 以前 body_lens 和 snip_lens 都取 len(snippet)，
+            # 于是「平均正文字数」其实是被 --context 截断后的片段长度，
+            # 无法支撑「空壳顶替真内容」的论证。
+            body_lens.append(_body_len(root / rel))
             snip_lens.append(len(str(h.get("snippet") or "")))
             n_hits += 1
         kinds = []

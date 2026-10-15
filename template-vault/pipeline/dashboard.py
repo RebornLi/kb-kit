@@ -7,7 +7,7 @@
 #   python3 pipeline/dashboard.py [--root R] [--out 70-知识治理/_INDEX.md]
 #   每周 cron 跑一次即可，或手动跑。
 # ============================================================
-import argparse, os, sys, json, subprocess, glob, datetime
+import argparse, os, re, sys, json, subprocess, glob, datetime
 from pathlib import Path
 
 from kb_common import ROOT_DEFAULT
@@ -73,11 +73,35 @@ def check_healthcheck(root):
                            capture_output=True, text=True)
         for line in (r.stdout or "").splitlines():
             # 解析 "🔗 死链检测: N/M 死链 (X%)" / "📏 超长未分块: N 个(...)"
-            if "死链检测:" in line and "0 死链" not in line:
-                alerts.append(f"🔗 {line.strip()}")
-            elif "超长未分块:" in line and " 0 个" not in line:
-                alerts.append(f"📏 {line.strip()}")
+            # 必须按数字判定，不能用 `"0 死链" not in line` 这类子串匹配：
+            # 真实输出是 `0/2146 死链`，子串不匹配 → 死链为 0 时也被列成告警
+            # （生产日志 logs/growth-2026-10-15.log 已实证该假告警）。
+            m = re.search(r"死链检测:\s*(\d+)", line)
+            if m:
+                if int(m.group(1)) > 0:
+                    alerts.append(line.strip())   # 行首本身已带 🔗，不再重复加图标
+                continue
+            m = re.search(r"超长未分块:\s*(\d+)", line)
+            if m and int(m.group(1)) > 0:
+                alerts.append(line.strip())
     return alerts
+
+def check_l1_gaps(root):
+    """L1 检索缺口提案数（kb_adaptretrieve 的待人工确认清单）。读不到返回 0。
+
+    直接读 jsonl 而**不 import** kb_adaptretrieve：那会把 kb_rsi/kb_usage/kb_claim
+    整条 RSI 研究层拖进每次 `kb dashboard`（依赖也变复杂）。格式就是一行一条 JSON。
+    """
+    from state_manager import read_state_path
+    p = read_state_path(root, "kb_adaptretrieve_proposals.jsonl",
+                        legacy=("pipeline/.kb_adaptretrieve_proposals.jsonl",))
+    if p is None:
+        return 0
+    try:
+        return len([l for l in p.read_text(encoding="utf-8").splitlines() if l.strip()])
+    except (OSError, UnicodeDecodeError):
+        return 0
+
 
 def check_freshness(root):
     """新鲜度统计：陈旧数 + 非可检索状态数（生命周期治理）。"""
@@ -137,6 +161,13 @@ def main():
         alerts.append(f"🕒 {fresh['stale']} 条陈旧（review_after 到期 / updated 超龄）")
     if fresh["blocked"]:
         alerts.append(f"🔒 {fresh['blocked']} 条非可检索状态（draft/archived/legacy）")
+    # L1 检索缺口：kb_adaptretrieve 只会产提案 / 写审计契约，**没有运行时消费者**
+    # （见 pipeline/kb_adaptretrieve.py 头部）。以前它没有任何可见入口，等于不存在；
+    # 这里让它至少出现在治理视野里。
+    l1_pending = check_l1_gaps(root)
+    if l1_pending:
+        alerts.append(f"🔎 L1 检索缺口 {l1_pending} 条待人工确认"
+                      "（`kb adaptretrieve status`；注意：写契约也不会改变检索）")
     if not alerts: alerts.append("✅ 知识库运行正常")
 
     # 状态分布条

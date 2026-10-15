@@ -76,10 +76,10 @@ def _evidence_files(root: Path) -> List[Path]:
 
 def _agent_roots(root: Path) -> List[Tuple[str, Path]]:
     """从 kb-agent.json 读出已注册 Agent 的源根目录（只读，缺失则空）。"""
-    cfg = root / "kb-agent.json"
-    if not cfg.exists():
-        cfg = root / ".kb-agent.json"
-    if not cfg.exists():
+    from state_manager import read_state_path
+    cfg = read_state_path(root, "kb-agent.json",
+                          legacy=("kb-agent.json", ".kb-agent.json"))
+    if cfg is None:
         return []
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))

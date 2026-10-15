@@ -14,7 +14,9 @@
 产出与纪律：
   · 只**标注**，绝不自动删改：写 `conflicts_with` frontmatter + 正文 `> ⚠️ 与 [[X]] 冲突` callout；
   · 同时进人工队列 `.kb/contradiction_queue.jsonl`（与 kb_curate review 同一套人工在环机制）；
-  · 默认 dry-run；`--apply` 才写。可 `--root` 指定库。
+  · `scan` 天然只读；`apply` 子命令才写（先 `apply --dry-run` 看清单）。
+    （原文写「默认 dry-run；`--apply` 才写」，但本模块**没有** `--apply` 这个旗标，
+     按字面理解会以为 `apply` 是安全预览，实际直接落盘。）
 
 用法:
   python3 pipeline/kb_contradiction2.py scan  [--root R] [--threshold 0.25] [--json]
@@ -99,7 +101,9 @@ def scan(root: Path, threshold: float = OVERLAP_MIN, limit: int = 0) -> Dict[str
                      "src": str(fm.get("source_ref") or ""),
                      "domain": str(fm.get("domain", "") or "")})
     pairs = []
-    thr = max(threshold, OVERLAP_STRICT)
+    # 不再静默抬高阈值：以前 `max(threshold, OVERLAP_STRICT)` 会把 CLI 默认
+    # --threshold 0.25 悄悄变成 0.35，用户调到 0.25 完全无效且无从察觉。
+    thr = threshold
     for a, b in combinations(rows, 2):
         if a["domain"] and b["domain"] and a["domain"] != b["domain"]:
             continue
@@ -137,6 +141,35 @@ def _callout_text(other_rel: str, day: str) -> str:
             f"两条正典在讲同一主题但结论不同，请人工确认哪条为准。\n")
 
 
+def _merge_conflicts(text: str, other: str) -> str:
+    """把 other 并入已有的 conflicts_with 列表（去重），不丢历史冲突对象。"""
+    items = []
+    # 行内列表：conflicts_with: ["a.md", "b.md"]
+    m = re.search(r"^conflicts_with\s*:\s*\[(.*?)\]\s*$", text, re.M)
+    if m:
+        items = [x.strip().strip('"\'') for x in m.group(1).split(",") if x.strip()]
+    else:
+        # 块列表：只在 frontmatter 块内找，且必须紧跟 `conflicts_with:` 之后
+        # （不能全文件扫 `^\s*-\s+`，那会把 frontmatter 的 `---` 分隔符也匹配进来）
+        fm = re.match(r"\A---\s*\n(.*?)\n---", text, re.S)
+        if fm:
+            collecting = False
+            for ln in fm.group(1).split("\n"):
+                if re.match(r"^conflicts_with\s*:\s*$", ln):
+                    collecting = True
+                    continue
+                if not collecting:
+                    continue
+                mm = re.match(r"^\s*-\s+(.+?)\s*$", ln)
+                if mm:
+                    items.append(mm.group(1).strip().strip('"\''))
+                else:
+                    break
+    if other not in items:
+        items.append(other)
+    return "[" + ", ".join('"%s"' % x for x in items) + "]"
+
+
 def _upsert_fm_simple(text: str, key: str, value: str) -> Optional[str]:
     if not text.startswith("---"):
         return None
@@ -169,7 +202,8 @@ def apply_marks(root: Path, pairs: List[Dict[str, Any]], dry: bool, limit: int) 
             text = p.read_text(encoding="utf-8")
             if f"[[{Path(other).stem}]]" in text and "存在冲突" in text:
                 continue                                  # 幂等
-            new = _upsert_fm_simple(text, "conflicts_with", f'["{other}"]')
+            # 合并而不是覆盖：以前直接写 f'["{other}"]'，一篇与多方冲突时只剩最后一条。
+            new = _upsert_fm_simple(text, "conflicts_with", _merge_conflicts(text, other))
             if new is None:
                 continue
             new = new.rstrip() + "\n" + _callout_text(other, today)
@@ -186,7 +220,13 @@ def apply_marks(root: Path, pairs: List[Dict[str, Any]], dry: bool, limit: int) 
                                    ensure_ascii=False) + "\n")
         if touched:
             import subprocess
+            # add 之后必须 commit：以前只 add，改动长期停在暂存区，
+            # 会被后续 cron 的 git add 卷进不相干的提交。
             subprocess.run(["git", "-C", str(root), "add", "--", *touched], capture_output=True)
+            if subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                              capture_output=True, text=True).stdout.strip():
+                subprocess.run(["git", "-C", str(root), "commit", "-q",
+                                "-m", f"kb: contradict 标注 {len(pairs)} 对冲突"], capture_output=True)
     return done
 
 

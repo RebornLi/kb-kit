@@ -15,11 +15,13 @@ import argparse, os, re, sys, json, math, datetime
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import ROOT_DEFAULT, load_note, parse_importance as _parse_importance, is_generated_report
+from kb_common import (ROOT_DEFAULT, load_note, parse_importance as _parse_importance,
+                       is_generated_report, CJK)
 from kb_constants import MIN_HITS, BUMP_CAP, MIN_BUMP
 import kb_rsi  # P1-B: 复用其 load_note/vec（多样性感知所需的候选向量与领域）
 
-STATE = ".feedback_state.json"
+# 旧位置（只读回退）；规范位置 <vault>/.kb/state/feedback_state.json
+_LEGACY_PATHS = ("pipeline/.feedback_state.json", ".feedback_state.json")
 IDX_DIR = "vector index"
 # MIN_HITS / BUMP_CAP / MIN_BUMP 已迁移至 kb_constants.py（单一权威源）
 
@@ -72,12 +74,14 @@ except (ImportError, ModuleNotFoundError, OSError):
 
 
 def load_index(root: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    idx = Path(root) / IDX_DIR / "df_idf.json"
-    if not idx.exists() or rag is None:
+    # 以前这里绕过 rag.load_index 自己 json.loads(写死的 .json)：
+    # 索引格式一改（v6 起是 .pkl）它就会崩/读不到 —— 统一走 rag 的加载器。
+    if rag is None:
         return None
-    payload = json.loads(idx.read_text(encoding="utf-8"))
-    rel2vec = {r: rag._vec(payload["tf"][r], payload["vocab"], payload["idf"])
-               for r in payload["tf"]}
+    payload, _ver = rag.load_index(Path(root) / IDX_DIR)
+    if payload is None:
+        return None
+    rel2vec = rag.all_doc_vectors(payload)
     return {"rel2vec": rel2vec, "vocab": payload["vocab"], "idf": payload["idf"]}
 
 
@@ -98,8 +102,9 @@ def load_state(root: Union[str, Path]) -> Dict[str, Any]:
         from state_manager import StateStore
         return StateStore(root).load("feedback_state.json", {"hits": {}})
     except ImportError:
-        sp = Path(root) / "pipeline" / STATE
-        return json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {"hits": {}}
+        from state_manager import read_json
+        return read_json(root, "feedback_state.json", legacy=_LEGACY_PATHS,
+                         default={"hits": {}})
 
 
 def save_state(root: Union[str, Path], st: Dict[str, Any]) -> None:
@@ -107,9 +112,8 @@ def save_state(root: Union[str, Path], st: Dict[str, Any]) -> None:
         from state_manager import StateStore
         StateStore(root).save("feedback_state.json", st)
     except ImportError:
-        sp = Path(root) / "pipeline" / STATE
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        from state_manager import write_json
+        write_json(root, "feedback_state.json", st)
 
 
 def ingest(root: Union[str, Path]) -> Tuple[Dict[str, int], int]:
@@ -217,7 +221,6 @@ def bumps(signals: Dict[str, float], external_count: Dict[str, int],
 
 # 中文按字符单字、英文按词建向量（kb_rsi.vec 把整段中文当单一 token，致中文笔记间余弦恒近 0，
 # 故相似度/相关判定用本地 _char_vec/_rcos，与 kb_contradiction 同约定）。
-_CN_CHARS = re.compile(r"[\u4e00-\u9fff]")
 _LAT = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -225,7 +228,7 @@ def _char_vec(s):
     c = Counter()
     for w in _LAT.findall(s or ""):
         c[w.lower()] += 1
-    for ch in _CN_CHARS.findall(s or ""):
+    for ch in CJK.findall(s or ""):
         c[ch] += 1
     n = math.sqrt(sum(v * v for v in c.values())) or 1.0
     return {k: v / n for k, v in c.items()}
@@ -353,7 +356,7 @@ def apply_bumps(root: Union[str, Path]) -> int:
                capture_output=True)
     for c in changed:
         print(f"✅ {c['rel']}  importance {c['old']:.2f} → {c['new']:.2f} (+{c['delta']})")
-    print(f"✅ 已提升 {len(changed)} 篇(累计提升记于 pipeline/{STATE},可手改/删除回滚)")
+    print(f"✅ 已提升 {len(changed)} 篇(累计提升记于 .kb/state/feedback_state.json,可手改/删除回滚)")
     return 0
 
 

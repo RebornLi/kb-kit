@@ -9,10 +9,11 @@
 #   python3 pipeline/rag.py index  [--root R]
 #   python3 pipeline/rag.py query  "<问题>" [--top 3] [--root R] [--answer]
 # ============================================================
-import argparse, os, re, sys, json, math, time, datetime, hashlib, uuid
+import argparse, os, pickle, re, sys, json, math, time, datetime, hashlib, uuid
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
+from kb_common import cos as _common_cos
 from kb_common import ROOT_DEFAULT, EXCLUDE, FM, load_meta, iter_notes, tokenize, count_tokens, content_fingerprint, index_excluded, is_generated_report, is_stale, retrievable_status, kb_layer_of, layer_multiplier, is_index_stub, LAYER_MULTIPLIER, parent_of, root_of
 
 try:                       # 上下文强化（P2）：缺失/异常都不影响索引可用
@@ -21,28 +22,115 @@ except Exception:          # pragma: no cover
     def _cch(rel, fm, body):
         return ""
 
-CONTEXT_IN_INDEX = True    # 是否把上下文串拼进索引文本（默认开）
+# 是否把上下文字符串（CCH）拼进索引文本。默认开；`KB_CONTEXT_IN_INDEX=0` 可关闭。
+# 开关存在的意义是**可量化**：Anthropic 的 Contextual Retrieval 报告失败率 −35%/−49%/−67%，
+# 但那是他们语料上的数字。本库的增益此前**从未单独测量**（代码注释里只有"默认开"），
+# 于是留下一处"看起来有依据、实际没测过"的配置。见 tests/../docs/EVOLUTION-REVIEW.md 实测记录。
+CONTEXT_IN_INDEX = os.environ.get("KB_CONTEXT_IN_INDEX", "1") not in ("0", "false", "no")
 
 IDX_DIR = "vector index"
-IDX_VERSION = 4  # v2 doc_hashes/doc_mtimes/inverted_index；v3 layer/chunk_of；
+IDX_STEM = "df_idf"
+IDX_PICKLE = IDX_STEM + ".pkl"    # 主格式：pickle 加载 70ms vs json 161ms（2.3×），体积还小 20%
+IDX_JSON = IDX_STEM + ".json"      # 兼容旧库读取 / 可读导出
+IDX_VERSION = 8  # v8 + dense（稀疏随机投影后的语义向量，用于补召回）
+                  # v7 + postings（词→[doc,tf,...] 扁平表）：打分只访问命中文档，
+                  #    并可从长度导出 df、免掉 6.7MB 的文档主序 tf
+                  # v6 + df（BM25 免每查询重算词频文档数：71.3ms→1.2ms，分数逐位一致）
+                  #    + docs/倒排 postings 改存整数 doc id（省 3 MB 重复路径文本）；
+                  # v5 + norms/dl/avgdl（查询期免物化全库向量）；
+                 # v2 doc_hashes/doc_mtimes/inverted_index；v3 layer/chunk_of；
                  # v4 context（上下文强化，只进索引）+ parent/root（父子块：查子块、返回父块）
 
 
-def load_index(idx_path: Path) -> Tuple[Optional[Dict[str, Any]], int]:
-    """加载 df_idf.json 索引，兼容无 version 字段的旧索引。
+# pickle 白名单：索引 payload 实际用到的非内置（但仍属纯数据）类型。
+# 注意 Counter 是 dict 子类，用 isinstance 检查会被漏过 —— 必须显式列出。
+_SAFE_PICKLE_GLOBALS = {
+    ("collections", "Counter"),
+    # v8 起索引里存稠密向量（array('f')）。**加任何新类型都必须登记到这里**，
+    # 否则 unpickle 会抛 UnpicklingError → load_index 当"索引损坏"静默吞掉 →
+    # 查询报 "index not found"（这正是本轮踩到的坑：v8 加 array 后忘了登记）。
+    # tests/test_p0_fixes.py::IndexPayloadRoundTripTest 会拦住这类遗漏。
+    ("array", "_array_reconstructor"),
+    ("array", "array"),
+}
+
+
+class _SafeUnpickler(pickle.Unpickler):
+    """只允许内置容器/标量与白名单内的纯数据类型，其余一律拒绝。
+
+    索引是本地派生缓存（`vector index/` 被 gitignore、`kb rag index` 随时重建），
+    但「一个可写文件 = 任意代码执行」是不必要的风险面：payload 全是纯数据，
+    所以把 find_class 收紧到白名单 —— 速度不变（每个全局只查一次），风险归零。
+    """
+
+    def find_class(self, module, name):
+        if (module, name) in _SAFE_PICKLE_GLOBALS:
+            return super().find_class(module, name)
+        raise pickle.UnpicklingError(f"索引里出现非白名单对象：{module}.{name}")
+
+
+def index_file(idx_dir: Union[str, Path]) -> Optional[Path]:
+    """返回该目录下可用的索引文件：优先 pickle，回退 JSON（旧库）。"""
+    d = Path(idx_dir)
+    for name in (IDX_PICKLE, IDX_JSON):
+        p = d / name
+        if p.exists():
+            return p
+    return None
+
+
+def load_index(idx_path: Union[str, Path]) -> Tuple[Optional[Dict[str, Any]], int]:
+    """加载索引。`idx_path` 可以是 `vector index/` 目录，也可以是具体文件。
+
     返回 (payload, version)：
       - (None, 0)  → 文件不存在或损坏
       - (dict, 0)  → 旧索引（无 version 字段），可正常读取，建议重建
       - (dict, N)  → 版本 N 索引
-    向后兼容：旧索引无 version 字段时读作 0，不破坏原有 key 结构。
-    向前兼容：新索引的 version 字段被旧代码忽略（新增字段不影响原有解析）。"""
-    if not idx_path.exists():
+
+    格式：v6 起写 `df_idf.pkl`（受限 unpickle，见 `_SafeUnpickler`），
+    仍能读旧的 `df_idf.json`（向后兼容，不强制迁移；重建后才拿到 pickle 的速度）。
+    """
+    p = Path(idx_path)
+    if p.is_dir():
+        found = index_file(p)
+        if found is None:
+            return None, 0
+        p = found
+    if not p.exists():
         return None, 0
     try:
-        payload = json.loads(idx_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        if p.suffix == ".pkl":
+            with p.open("rb") as f:
+                payload = _SafeUnpickler(f).load()
+        else:
+            payload = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:      # noqa: BLE001  损坏的缓存一律当"无索引"，让调用方重建
+        return None, 0
+    if not isinstance(payload, dict):
         return None, 0
     return payload, payload.get("version", 0)
+
+
+def save_index(idx_dir: Union[str, Path], payload: Dict[str, Any]) -> Path:
+    """写索引：主格式 pickle（快 2.3×、小 20%），写成功后清掉遗留的旧 JSON。
+
+    顺序很关键：先原子写 pickle，确认落盘再删旧文件 —— 中途失败时旧索引仍在，
+    下一个查询照常可用（不会出现「既没有 pkl 也没有 json」的空窗）。
+    """
+    d = Path(idx_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    pkl = d / IDX_PICKLE
+    tmp = d / (IDX_PICKLE + ".tmp")
+    with tmp.open("wb") as f:
+        pickle.dump(payload, f, protocol=4)   # 协议 4：Python 3.4+ 可读，性能与 5 持平
+    os.replace(tmp, pkl)
+    stale = d / IDX_JSON
+    if stale.exists():
+        try:
+            stale.unlink()
+        except OSError:
+            pass
+    return pkl
 
 def strip_body(text: str) -> str:
     m = FM.search(text)
@@ -80,6 +168,9 @@ def main() -> int:
                    help="不降级 raw/ 证据层（默认降级排序，仍可召回）")
     q.add_argument("--include-stubs", action="store_true", dest="include_stubs",
                    help="不降级分块索引页/空壳页（默认降级排序）")
+    q.add_argument("--no-record", action="store_true", dest="no_record",
+                   help="不写入使用信号（agent_hits）；评测/探针/脚本调用必须带它，"
+                        "否则会把「评测流量」灌进再问率、反过来压低 fitness")
     args = ap.parse_args()
 
     if args.cmd == "index":
@@ -93,7 +184,8 @@ def main() -> int:
                          enforce_level=args.enforce_level, tags=args.tags,
                          date_from=args.date_from, date_to=args.date_to,
                          exclude_stale=args.exclude_stale,
-                         include_raw=args.include_raw, include_stubs=args.include_stubs)
+                         include_raw=args.include_raw, include_stubs=args.include_stubs,
+                         no_record=args.no_record)
     return 1
 
 _CHUNK_SUFFIX = re.compile(r"-(?:p|c)\d+$")   # 只剥一层：-p2-p2 → -p2 → 主文档
@@ -175,7 +267,9 @@ def _root_path(rel: str, fm: dict) -> str:
 def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
     idx = Path(root) / IDX_DIR
     idx.mkdir(parents=True, exist_ok=True)
-    idx_path = idx / "df_idf.json"
+    # 用解析器而不是写死 .json：v6 起主格式是 .pkl，写死会让增量以为"没有旧索引"
+    # 从而每次全量重建（正是之前修过的"假增量"的同类问题）。
+    idx_path = index_file(idx) or (idx / IDX_JSON)
 
     # 尝试增量
     if incremental:
@@ -187,9 +281,50 @@ def cmd_index(root: Union[str, Path], incremental: bool = True) -> int:
     return _full_rebuild(root, idx)
 
 
+def _build_dense(root, texts: Dict[str, str], hashes=None, old_dense=None,
+                 old_hashes=None):
+    """构建/更新稠密向量。任何不可用/失败 → 返回 `old_dense`（保持旧值，绝不弄坏索引）。
+
+    增量友好：正文指纹未变的文档**复用旧向量**（哈希一致 ⇒ 文本一致 ⇒ 向量一致），
+    只对新增/变更的文档调端点。这让人工改一篇笔记后的重索引只需 1 次嵌入调用。
+    """
+    if os.environ.get("KB_DENSE_INDEX", "") in ("0", "false", "no"):
+        return old_dense
+    try:
+        import dense as _dense
+    except ImportError:
+        return old_dense
+    if not _dense.available(root):
+        print("⚠️  embedding 端点不可用：本次不建语义向量（检索退回纯词法）", file=sys.stderr)
+        return old_dense
+    prev = (old_dense or {}).get("vecs") or {}
+    reuse = {}
+    if prev and hashes and old_hashes:
+        for rel, v in prev.items():
+            if rel in hashes and hashes[rel] == (old_hashes or {}).get(rel):
+                reuse[rel] = v
+    todo = {r: tx for r, tx in texts.items() if r not in reuse}
+    if todo:
+        print(f"🔎 建语义向量：复用 {len(reuse)} 篇 · 新算 {len(todo)} 篇 …", file=sys.stderr)
+    t0 = time.time()
+    got = _dense.build_vectors(root, todo) if todo else ({}, int((old_dense or {}).get("dim_in") or 0))
+    if got is None:
+        print("⚠️  语义向量构建中断：沿用旧向量", file=sys.stderr)
+        return old_dense
+    new_vecs, dim_in = got
+    vecs = dict(reuse)
+    vecs.update(new_vecs)
+    vecs = {r: v for r, v in vecs.items() if r in texts}    # 丢弃已移除的文档
+    if todo:
+        print(f"   语义向量就绪：{len(vecs)} 篇 · {time.time() - t0:.0f}s", file=sys.stderr)
+    return {"dim": _dense.DIM_OUT, "dim_in": dim_in,
+            "seed": int((old_dense or {}).get("seed") or 20261016), "vecs": vecs}
+
+
 def _full_rebuild(root, idx):
     docs, tf_all, meta_all = {}, {}, {}
     doc_hashes, doc_mtimes = {}, {}
+    dense_texts = {}
     df = Counter()
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
@@ -199,6 +334,7 @@ def _full_rebuild(root, idx):
         if index_excluded(fm):
             continue  # 归档/来源/显式退出：不入检索
         ctx = _cch(rel, fm, body) if CONTEXT_IN_INDEX else ""
+        dense_texts[rel] = (ctx + "\n" + body)[:2000]
         toks = tokenize((ctx + "\n" + body) + " " + " ".join(str(fm.get("tags", "")).split()))
         if not toks:
             continue
@@ -217,19 +353,38 @@ def _full_rebuild(root, idx):
                          "importance": _imp_of(fm),
                          "ctype": str(fm.get("content_type") or ""),
                          "updated_ts": _ts_of(fm),
+                         # author / kb_summary 只为倒排索引服务：存进 meta 后，
+                         # 重建倒排就不必再把整个库读一遍。
+                         "author": str(fm.get("author") or ""),
+                         "kb_summary": str(fm.get("kb_summary") or ""),
                          "title_text": _title_text(rel, fm)}
         doc_hashes[rel] = content_fingerprint(body)
         doc_mtimes[rel] = p.stat().st_mtime
     N = len(docs)
     vocab = sorted(df)
     idf = {t: math.log((N + 1) / (df[t] + 1)) + 1 for t in vocab}
-    inverted = _build_inverted_index(root, tf_all)
+    doc_list = sorted(tf_all)                       # 稳定顺序，便于跨重建比对
+    doc_ids = {rel: i for i, rel in enumerate(doc_list)}
+    postings = _build_postings(tf_all, doc_ids)
+    inverted = _build_inverted_index(root, tf_all, meta_all, doc_ids)
+    norms = _build_norms(tf_all, idf)
+    dl = {r: sum(c.values()) for r, c in tf_all.items()}
+    avgdl = round((sum(dl.values()) / N), 4) if N else 0.0
     payload = {"version": IDX_VERSION, "n_docs": N, "vocab": vocab, "idf": idf,
-               "tf": tf_all, "meta": meta_all,
+               "meta": meta_all,   # 注意：v7 起不再写 tf（由 postings 取代）
+               "postings": postings,      # 词 → [doc_id, tf, ...]（扁平；df = 长度/2）
+               "docs": doc_list,          # doc id → rel 还原表（postings/倒排共用）
                "doc_hashes": doc_hashes, "doc_mtimes": doc_mtimes,
+               "norms": norms, "dl": dl, "avgdl": avgdl,
+               # 不再写 df：`len(postings[t]) // 2` 就是（v7 起）
                "inverted_index": inverted}
-    (idx / "df_idf.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-    print(f"✅ 全量索引就绪  文档 {N}  词表 {len(vocab)}  → {idx}/df_idf.json")
+    dense = _build_dense(root, dense_texts, hashes=doc_hashes)
+    if dense:
+        payload["dense"] = dense
+    save_index(idx, payload)
+    print(f"✅ 全量索引就绪  文档 {N}  词表 {len(vocab)}"
+          + (f"  语义向量 {len(dense['vecs'])}" if dense else "（无语义向量）")
+          + f"  → {idx}/{IDX_PICKLE}")
     return 0
 
 
@@ -246,17 +401,22 @@ def _incremental_update(root, idx, old):
         if is_generated_report(rel):
             retired.add(rel)  # 报告产物：从索引移除（若曾入过）
             continue
+        # mtime 快路径必须在**任何读盘之前**：以前先 load_meta(p) 再比 mtime，
+        # 于是「增量」也要把整个库读一遍（实测改 1 个文件读 65 个、无变更读 35 个）。
+        # 只有「上轮已入索引且 mtime 未变」才可安全跳过：文件内容没变，是否排除也就没变。
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        if old_mtimes.get(rel) == mtime and rel in old_hashes:
+            current_hashes[rel] = old_hashes.get(rel, "")
+            current_mtimes[rel] = mtime
+            continue
         fm, body = load_meta(p)
         if index_excluded(fm):
             # 归档/停用/来源：不入本次索引；同时确保旧索引里的同 rel 被清掉
             # （文件仍在 current_files 里，不会被“物理删除”分支捕获，故显式记录）
             retired.add(rel)
-            continue
-        mtime = p.stat().st_mtime
-        if old_mtimes.get(rel) == mtime:
-            # mtime 未变，跳过
-            current_hashes[rel] = old_hashes.get(rel, "")
-            current_mtimes[rel] = mtime
             continue
         h = content_fingerprint(body)
         current_hashes[rel] = h
@@ -272,10 +432,15 @@ def _incremental_update(root, idx, old):
         return 0
 
     # 增量更新 tf/meta
-    tf_all = dict(old.get("tf", {}))
+    # v7 起索引不再写 tf（由 postings 取代）→ 增量构建需要还原一次文档主序 tf
+    dense_texts = {}
+    tf_all = dict(old.get("tf") or {})
+    if not tf_all and old.get("postings"):
+        tf_all = tf_from_postings(old)
     meta_all = dict(old.get("meta", {}))
     for rel, p, fm, body in changed:
         ctx = _cch(rel, fm, body) if CONTEXT_IN_INDEX else ""
+        dense_texts[rel] = (ctx + "\n" + body)[:2000]
         toks = tokenize((ctx + "\n" + body) + " " + " ".join(str(fm.get("tags", "")).split()))
         if not toks:
             tf_all.pop(rel, None)
@@ -293,6 +458,8 @@ def _incremental_update(root, idx, old):
                          "importance": _imp_of(fm),
                          "ctype": str(fm.get("content_type") or ""),
                          "updated_ts": _ts_of(fm),
+                         "author": str(fm.get("author") or ""),
+                         "kb_summary": str(fm.get("kb_summary") or ""),
                          "title_text": _title_text(rel, fm)}
     for rel in deleted:
         tf_all.pop(rel, None)
@@ -306,83 +473,395 @@ def _incremental_update(root, idx, old):
     N = len(tf_all)
     vocab = sorted(df)
     idf = {t: math.log((N + 1) / (df[t] + 1)) + 1 for t in vocab}
-    inverted = _build_inverted_index(root, tf_all)
+    doc_list = sorted(tf_all)
+    doc_ids = {rel: i for i, rel in enumerate(doc_list)}
+    postings = _build_postings(tf_all, doc_ids)
+    inverted = _build_inverted_index(root, tf_all, meta_all, doc_ids)
+    norms = _build_norms(tf_all, idf)
+    dl = {r: sum(c.values()) for r, c in tf_all.items()}
+    avgdl = round((sum(dl.values()) / N), 4) if N else 0.0
     payload = {"version": IDX_VERSION, "n_docs": N, "vocab": vocab, "idf": idf,
-               "tf": tf_all, "meta": meta_all,
+               "meta": meta_all,   # 注意：v7 起不再写 tf（由 postings 取代）
+               "postings": postings,
+               "docs": doc_list,
                "doc_hashes": current_hashes, "doc_mtimes": current_mtimes,
+               "norms": norms, "dl": dl, "avgdl": avgdl,
+               # 不再写 df：`len(postings[t]) // 2` 就是（v7 起）
                "inverted_index": inverted}
-    (idx / "df_idf.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+    dense = _build_dense(root, dense_texts, hashes=current_hashes,
+                         old_dense=old.get("dense"), old_hashes=old_hashes)
+    if dense:
+        payload["dense"] = dense
+    save_index(idx, payload)
     print(f"✅ 增量索引完成  变更 {len(changed)}  删除 {len(deleted)}  总文档 {N}")
     return 0
 
+def _doc_norm(counter, idf):
+    """文档向量（乘 idf 后）的 L2 范数。口径必须与 _vec 完全一致：不在 idf 里的词不计入。
+
+    **按词排序后求和**：累加顺序会影响浮点末位，而词的插入顺序在不同建索引路径下不同
+    （全量按分词顺序、增量从 postings 还原后按词序）。不排序的话，同一篇笔记在
+    「增量索引」与「全量重建」后范数会差 1 ULP，进而在并列项上翻转名次 —— 基线不可复现。
+    排序后三条路径（全量 / 增量 / all_doc_vectors）的范数**逐位一致**。
+    """
+    terms = sorted(t for t in counter if t in idf)
+    s = 0.0
+    for t in terms:
+        w = counter[t] * idf[t]
+        s += w * w
+    return math.sqrt(s) or 1.0
+
+
+def _build_norms(tf_all, idf):
+    """为每篇文档预算 L2 范数（存进索引，供查询期免物化）。"""
+    return {r: _doc_norm(c, idf) for r, c in tf_all.items()}
+
+
+def _build_postings(tf_all, doc_ids):
+    """文档主序 tf → 词主序 postings：{term: [doc_id, tf, doc_id, tf, ...]}（扁平）。
+
+    为什么扁平而不是 [[doc, tf], ...]：每个 pair 都建一个小 list 会让 pickle 对象数
+    翻倍（35 万个 2 元素 list），既更大也更慢。扁平化只用一个 list。
+    df 不必单独存 —— `len(postings[t]) // 2` 就是。
+    """
+    post = {}
+    # 按 `doc_ids`（= 排序后的文档序）迭代，而不是 tf_all 的插入顺序：
+    # 全量构建按文件扫描序、增量构建从 postings 还原后按排序序 —— 不统一的话
+    # 同一份语料在「增量」与「全量」后得到**不同字节**的 postings（结果等价但不可复现）。
+    for rel in doc_ids:
+        c = tf_all[rel]
+        did = doc_ids[rel]
+        for t, f in c.items():
+            lst = post.get(t)
+            if lst is None:
+                post[t] = [did, f]
+            else:
+                lst.append(did)
+                lst.append(f)
+    return post
+
+
+def indexed_docs(payload):
+    """已索引文档的集合（rel）。v7 从 `docs` 取，v6 及更早从 `tf` 键取。
+
+    统一入口：调用方不该再自己决定"看 tf 还是看 docs"（改格式时必崩）。
+    """
+    if payload.get("docs"):
+        return set(payload["docs"])
+    return set(payload.get("tf") or {})
+
+
+def tf_from_postings(payload):
+    """从 postings 还原文档主序 tf（{rel: {term: count}}）。
+
+    只给**索引构建**用（增量更新需要把旧索引的 tf 读回来再改）：查询路径不需要它，
+    打分已改走 postings。构建不是延迟敏感路径，多这一趟可接受。
+    """
+    docs = payload.get("docs") or []
+    out = {rel: {} for rel in docs}
+    for t, p in (payload.get("postings") or {}).items():
+        for i in range(0, len(p), 2):
+            out[docs[p[i]]][t] = p[i + 1]
+    return out
+
+
+def all_doc_vectors(payload):
+    """{rel: 归一化稀疏向量}，与 `{r: _vec(tf[r], vocab, idf)}` 等价。
+
+    有 postings 就**一趟扫完**（词主序）；没有（v6 及更早）回退逐篇 `_vec`。
+    这是 recall_schedule / feedback_loop / memory_sync 共用的唯一入口 ——
+    以前它们各自 `_vec(tf_all[r], ...)`，索引格式一换就得跟着改。
+    """
+    idf = payload.get("idf") or {}
+    postings = payload.get("postings")
+    if not postings:
+        tf_all = payload.get("tf") or {}
+        return {r: _vec(c, payload.get("vocab"), idf) for r, c in tf_all.items()}
+    docs = payload.get("docs") or []
+    acc = {rel: {} for rel in docs}
+    for t, p in postings.items():
+        w = idf.get(t)
+        if w is None:                      # 与 _vec 的 `if t in idf` 过滤一致
+            continue
+        for i in range(0, len(p), 2):
+            d = acc.get(docs[p[i]])
+            if d is not None:
+                d[t] = p[i + 1] * w
+    out = {}
+    for rel, v in acc.items():
+        # 与 _doc_norm 同一口径：排序后求和，保证与索引里存的 norms 逐位一致
+        n = math.sqrt(sum(x * x for x in sorted(v.values()))) or 1.0
+        out[rel] = {k: x / n for k, x in v.items()}
+    return out
+
+
+def _score_cosine_postings(postings, docs, idf, qv, norms):
+    """postings 版余弦：只遍历查询词命中的文档。与 `_score_cosine_fast` 数学等价。"""
+    acc = {}
+    for t, w in qv.items():
+        p = postings.get(t)
+        if not p:
+            continue
+        iw = idf.get(t, 1.0)
+        for i in range(0, len(p), 2):
+            r = docs[p[i]]
+            # 写成 `f * idf * w`（左结合）与 `_score_cosine_fast` **逐位一致**；
+            # 先把 idf*w 预乘会改变浮点结合律，在近平分上会翻转名次（测试实测抓到）。
+            acc[r] = acc.get(r, 0.0) + p[i + 1] * iw * w
+    out = []
+    for r, s in acc.items():
+        if s > 0:
+            out.append((r, s / norms.get(r, 1.0)))
+    return out
+
+
+def _bm25_postings(postings, docs, q_tokens, k1=1.5, b=0.75, dl=None, avgdl=None):
+    """postings 版 BM25：只遍历命中文档。与 `_bm25_scores` 数学等价。
+
+    postings 里存的是 doc id，而 `dl` 按 rel 索引 → 这里必须用 `docs` 还原。
+    """
+    postings = postings or {}
+    dl = dl or {}
+    N = len(dl) or 1
+    if avgdl is None:
+        avgdl = (sum(dl.values()) / N) or 1.0
+    k1p1 = k1 + 1
+    acc = {}
+    d0 = {}
+    for t in q_tokens:
+        p = postings.get(t)
+        if not p:
+            continue
+        n = len(p) // 2
+        idf_t = math.log((N - n + 0.5) / (n + 0.5) + 1)
+        for i in range(0, len(p), 2):
+            r = docs[p[i]]
+            f = p[i + 1]
+            den = d0.get(r)
+            if den is None:
+                den = d0[r] = k1 * (1 - b + b * dl[r] / avgdl)
+            acc[r] = acc.get(r, 0.0) + idf_t * (f * k1p1) / (f + den)
+    return acc
+
+
+def _score_cosine_fast(tf_all, idf, qv, norms):
+    """cos(d,q) = Σ_t tf_d[t]·idf_t·qv_t / ‖d‖ —— 不物化文档向量。
+
+    与 `{r:_vec(...)} + _cos` 数学等价；省掉「为全库每篇建归一化稀疏向量」这一趟
+    （现役库实测 147ms → 2ms）。累加顺序不同，末位有 1e-12 级差异，不影响排序
+    （已用真实索引 8 条查询验证 top-10 顺序完全一致）。
+    """
+    out = []
+    for r, c in tf_all.items():
+        s = 0.0
+        for t, w in qv.items():
+            f = c.get(t)
+            if f:
+                s += f * idf.get(t, 1.0) * w
+        if s > 0:
+            out.append((r, s / norms.get(r, 1.0)))
+    return out
+
+
 def _vec(counter, vocab, idf):
     v = {t: c * idf.get(t, 1.0) for t, c in counter.items() if t in idf}
-    n = math.sqrt(sum(x * x for x in v.values())) or 1.0
+    n = math.sqrt(sum(x * x for x in sorted(v.values()))) or 1.0
     return {k: x / n for k, x in v.items()}
 
 def _cos(a, b):
-    if len(a) > len(b): a, b = b, a
-    return sum(av * b[k] for k, av in a.items() if k in b)
+    """稀疏向量余弦。委托 kb_common.cos（唯一实现；实测 200 组逐位一致）。"""
+    return _common_cos(a, b)
 
 
 # ── P0 Stage3: 混合检索（TF-IDF 余弦 × BM25）──────────────
 HYBRID_ALPHA = 0.5   # 余弦权重；BM25 权重 = 1 - HYBRID_ALPHA
 
 
-def _bm25_scores(tf_all, q_tokens, k1=1.5, b=0.75):
-    """纯标准库 BM25（Okapi）。返回 {rel: score}（>0）。"""
-    df = Counter()
-    for c in tf_all.values():
-        for t in c:
-            df[t] += 1
+def _bm25_scores(tf_all, q_tokens, k1=1.5, b=0.75, dl=None, avgdl=None, df=None):
+    """纯标准库 BM25（Okapi）。返回 {rel: score}（>0）。
+
+    · dl/avgdl 可由索引传入（v5 起已预存），省掉每次查询重算文档长度。
+    · df 可由索引传入（v6 起已预存）：以前每次查询都要遍历全库「文档×词次」
+      （1530 篇 × 458 词 ≈ 70 万次）重算一遍，纯属浪费 —— df 只与 tf_all 有关。
+      实测 71.3 ms → 1.2 ms，且分数逐位一致（<1e-12）。旧索引无 df 时回退现场重算。
+
+    另把两个循环不变量提到外层：idf 只依赖查询词、文档归一因子只依赖文档。
+    """
     N = len(tf_all) or 1
-    dl = {r: sum(c.values()) for r, c in tf_all.items()}
-    avgdl = (sum(dl.values()) / N) or 1.0
+    if df is None:                      # 兼容 v5 及更早索引：没有 df 就现场算（慢但正确）
+        df = Counter()
+        for c in tf_all.values():
+            for t in c:
+                df[t] += 1
+    if dl is None:
+        dl = {r: sum(c.values()) for r, c in tf_all.items()}
+    if avgdl is None:
+        avgdl = (sum(dl.values()) / N) or 1.0
+    # 查询词的 idf：只与词有关，提到文档循环外（每个词只算一次 log）
+    q_idf = {}
+    for t in q_tokens:
+        if t in q_idf:
+            continue
+        n = df.get(t, 0)
+        if n:
+            q_idf[t] = math.log((N - n + 0.5) / (n + 0.5) + 1)
+    k1p1 = k1 + 1
     out = {}
     for r, c in tf_all.items():
-        L = dl[r]
+        # 文档长度归一因子：只与文档有关，也提到词循环外
+        d0 = k1 * (1 - b + b * dl[r] / avgdl)
         s = 0.0
         for t in q_tokens:
             f = c.get(t, 0)
             if not f:
                 continue
-            n = df[t]
-            idf_t = math.log((N - n + 0.5) / (n + 0.5) + 1)
-            s += idf_t * (f * (k1 + 1)) / (f + k1 * (1 - b + b * L / avgdl))
+            s += q_idf[t] * (f * k1p1) / (f + d0)
         if s > 0:
             out[r] = s
     return out
 
 
 # ── 倒排索引（FR-3!（3.2.2）──────────────────────────────────
+# 🔒 这个加成是**加性**的，量级（0.15×命中数，可达 ~1.8）远大于 RRF 融合分上限
+#    （2/61≈0.033）—— 也就是说最终排序主要由「查询词命中 tag / kb_summary」决定，
+#    BM25+RRF 更像粗筛。看起来像量纲缺陷，**但实测它是正确的**：
+#
+#    在 30 题 × 4 目标（共 120 个目标笔记，全部在索引内）的黄金候选集上实测：
+#      · 现状（本实现）            top1 90.0% · recall@10 98.3% · MRR 0.950
+#      · 改成乘性 + IDF 加权封顶    top1 60.0% · recall@10 55.0% · MRR 0.684   ← 腰斩
+#      · 干脆去掉加成              top1 56.7% · recall@10 45.8% · MRR 0.632
+#      · 加性 + IDF 加权（4 档 α）  top1 80.0% · recall@10 94.2% · MRR 0.892
+#      · 剔除单字 CJK token        top1 80.0% · recall@10 83.3% · MRR 0.883
+#      · 只认 tag 字段             top1 36.7% · recall@10 40.0% · MRR 0.469
+#
+#    原因：本库的 tag / kb_summary 是**人工标注的主题词**，命中它比命中正文里的
+#    普通词强得多；而 IDF 加权恰好会压掉那些「常见但正是主题词」的 token。
+#    → 结论：**不要**把它改成乘性/IDF 加权；真要改必须先用
+#      `scripts/eval_retrieval_gold.py` 在同一黄金集上复测（该脚本支持
+#      `--module` 指定另一份 rag 实现做 A/B 对照）。
 INVERTED_HIT_BOOST = 0.15
 
 
-def _build_inverted_index(root, tf_all):
-    """构建倒排索引：tag/domain/content_type/author/kb_summary_token → [rel]"""
+def _build_inverted_index(root, tf_all, meta_all=None, doc_ids=None):
+    """构建倒排索引：tag/domain/content_type/author/kb_summary_token → [rel 或 doc id]
+
+    若 `meta_all` 里已带 `tags/domain/ctype/author/kb_summary`（新版索引都会写），
+    就**零磁盘读**直接重建；缺字段的 rel（旧索引 / 兼容场景）才回落到读文件。
+    以前无脑对每个 rel 都 load_meta → 「增量」索引仍然把整个库读一遍。
+
+    `doc_ids`（v6 起）：{rel: 整数 id}。给了就写整数 id，省掉把同一条长路径
+    在 6 万条 postings 里重复一遍（实测 3.09 MB → 约 0.25 MB）。查询期用
+    `docs` 列表还原成 rel；没给就照旧写 rel（兼容/自测）。
+    """
     inv = {"tag": {}, "domain": {}, "content_type": {},
            "author": {}, "kb_summary_token": {}}
-    for rel in tf_all:
-        fm, body = load_meta(Path(root) / rel)
-        for t in _parse_tags(fm.get("tags", "")):
-            inv["tag"].setdefault(t, []).append(rel)
-        d = fm.get("domain")
-        if d: inv["domain"].setdefault(d, []).append(rel)
-        ct = fm.get("content_type")
-        if ct: inv["content_type"].setdefault(ct, []).append(rel)
-        a = fm.get("author")
-        if a: inv["author"].setdefault(a, []).append(rel)
-        for tok in tokenize(str(fm.get("kb_summary", ""))):
-            inv["kb_summary_token"].setdefault(tok, []).append(rel)
+    meta_all = meta_all or {}
+    # 同上：有 doc_ids 就按排序后的文档序迭代，保证与增量构建逐字节一致
+    for rel in (doc_ids if doc_ids is not None else tf_all):
+        m = meta_all.get(rel) or {}
+        if "author" in m and "kb_summary" in m:
+            tags_v, d, ct = m.get("tags", ""), m.get("domain"), m.get("ctype")
+            a, summ = m.get("author"), m.get("kb_summary")
+        else:
+            fm, _body = load_meta(Path(root) / rel)
+            tags_v, d, ct = fm.get("tags", ""), fm.get("domain"), fm.get("content_type")
+            a, summ = fm.get("author"), fm.get("kb_summary")
+        did = doc_ids[rel] if doc_ids is not None else rel
+        for t in _parse_tags(tags_v):
+            inv["tag"].setdefault(t, []).append(did)
+        if d: inv["domain"].setdefault(d, []).append(did)
+        if ct: inv["content_type"].setdefault(ct, []).append(did)
+        if a: inv["author"].setdefault(a, []).append(did)
+        for tok in tokenize(str(summ or "")):
+            inv["kb_summary_token"].setdefault(tok, []).append(did)
     return inv
 
 
-def _inverted_lookup(query_tokens, inverted_index):
-    """倒排索引精确命中。返回 {rel: hit_count}"""
+# ── L1 检索修正契约的运行时消费（kb adaptretrieve apply 产出）──────
+#   闭环缺失的那一跳就在这里：契约原本只被写成文件、没有任何代码读它。
+#   量级与 INVERTED_HIT_BOOST 同档（融合分上限只有 2/61≈0.033，加性小量根本推不动排序）。
+ADJUST_BOOST = 0.90     # 命中契约的笔记加多少分
+ADJUST_MAX = 20         # 单次查询最多应用几条契约（有界，防契约膨胀后拖慢查询）
+# 置信地板：契约里 sim 低于此值不予采信。契约由机器挖缺口产出、人工 apply，
+# 一旦指向无关笔记代价很大 —— 黄金集实测：
+#   · 契约正确（18 条来自真实缺口）：top1 90.0%→96.7% · recall@4 82.5%→90.0% · recall@10 98.3%→100%
+#   · 契约全指向无关笔记：        top1 90.0%→76.7% · MRR 0.950→0.883（**显著变差**）
+# 所以：机制有效，但**安全完全取决于契约质量** → 保留人工 apply + 置信地板 + 条数上限
+# + `KB_RETRIEVAL_ADJUST=0` 逃生门 + `--json` 里的 adjustments_applied 审计。
+ADJUST_MIN_SIM = 0.50   # 与 kb_adaptretrieve.SIM_MIN 同档
+
+
+def _adjust_key(q: str) -> str:
+    """查询归一化键：去空白/标点 + 小写。
+
+    契约里的 query 来自真实历史查询，用**精确（归一化后）匹配**而不是相似度阈值 ——
+    相似度匹配会让一条契约"泛化"到别的查询上，后果不可预测；归一化精确匹配是
+    L1 回路的原意（同一问题再问 → 上次漏掉的笔记这次要出现）。
+    """
+    return re.sub(r"[\s\W_]+", "", (q or "").lower())
+
+
+def load_retrieval_adjustments(root: Union[str, Path]) -> List[Dict[str, Any]]:
+    """读 L1 检索修正契约（规范位置 .kb/state/，回退旧 pipeline/ 位置）。缺/损坏 → []。"""
+    try:
+        from state_manager import read_state_path
+        p = read_state_path(root, "kb_retrieval_adjust.json",
+                            legacy=("pipeline/.kb_retrieval_adjust.json",))
+        if p is None:
+            return []
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, ImportError, ValueError):
+        return []
+    adjs = data.get("adjustments") if isinstance(data, dict) else None
+    return adjs if isinstance(adjs, list) else []
+
+
+def _apply_retrieval_adjustments(root: Union[str, Path], q: str,
+                                 scored: List[Tuple[str, float]],
+                                 indexed: Optional[set] = None) -> Tuple[List[Tuple[str, float]], List[str]]:
+    """按契约把「上次漏掉的笔记」拉回排序。返回 (新 scored, 本次应用的 rel 列表)。
+
+    安全约束：
+      · `KB_RETRIEVAL_ADJUST=0` 可全局关闭（实测出负增益时的逃生门）；
+      · 只针对**已索引**的笔记加成，绝不注入幽灵命中；
+      · 单次查询应用条数有界（ADJUST_MAX）；
+      · 应用到哪些笔记会进 `--json` 输出，可审计。
+    """
+    if os.environ.get("KB_RETRIEVAL_ADJUST", "") in ("0", "false", "no"):
+        return scored, []
+    adjs = load_retrieval_adjustments(root)
+    if not adjs:
+        return scored, []
+    key = _adjust_key(q)
+    d = dict(scored)
+    applied: List[str] = []
+    for a in adjs[:ADJUST_MAX]:
+        if not isinstance(a, dict) or _adjust_key(a.get("query")) != key:
+            continue
+        rel = a.get("note")
+        if not rel or (indexed is not None and rel not in indexed):
+            continue
+        sim = a.get("sim")
+        if isinstance(sim, (int, float)) and sim < ADJUST_MIN_SIM:
+            continue                    # 低置信契约不采信（见 ADJUST_MIN_SIM 的实测说明）
+        d[rel] = d.get(rel, 0.0) + ADJUST_BOOST
+        applied.append(rel)
+    if not applied:
+        return scored, []
+    return sorted(d.items(), key=lambda x: x[1], reverse=True), applied
+
+
+def _inverted_lookup(query_tokens, inverted_index, docs=None):
+    """倒排索引精确命中。返回 {rel: hit_count}。
+
+    v6 起 postings 存整数 doc id，用 `docs` 列表还原成 rel；
+    旧索引（或自测构造）postings 直接是 rel，`docs=None` 时原样使用。
+    """
     hits = {}
     for tok in query_tokens:
         for field in ("tag", "kb_summary_token"):
-            for rel in inverted_index.get(field, {}).get(tok, []):
+            for item in inverted_index.get(field, {}).get(tok, []):
+                rel = docs[item] if docs is not None else item
                 hits[rel] = hits.get(rel, 0) + 1
     return hits
 
@@ -391,6 +870,23 @@ def _inverted_lookup(query_tokens, inverted_index):
 CHUNK_FAMILY_MAX = 2   # 同一根文档最多保留几个命中（防"整篇碎片墙"顶掉其它主题）
 CONF_WEIGHT = 0.20     # P3：复合置信分对排序的影响幅度（×0.9 ~ ×1.1）
 RRF_K = 60             # RRF 平滑常数（行业惯用 60）
+
+# ── 稠密语义通道（补召回）────────────────────────────────────
+#   实测依据（tests/probe_semantic_gap.py，真实库 16 题改写式查询）：
+#     纯词法命中源笔记 6/16 = 38% · 稠密 15/16 = 94% · **仅稠密能找回 62%**
+#   但**绝不能**用它替换排序：KB_RERANK=embed 实测 top1 90.0%→86.7%、MRR 0.950→0.933。
+#   → 用**加权 RRF 融合**：词法名次不动，稠密通道只贡献增量名次。
+DENSE_M = 200          # 稠密通道取前 M 名候选
+# 尾部**预留槽位**比例：词法前 (1-FRAC)·k 名按构造完全不变，其余槽位给"稠密-only"笔记。
+# 为什么不直接用 RRF 融合（实测，2026-10-16，30 题黄金集）：
+#   w=0.3 → top1 90.0%→83.3%、rec@4 82.5%→65.0%
+#   w=0.5 → top1 76.7% · w=1.0 → top1 60.0%（单调变差）
+# 与"语义重排"同因：稠密名次混进头部会顶掉元数据强信号（分层/tags/kb_summary/标题）。
+# 预留槽位后 top1/rec@4 **不可能**回退（头部未动），而语义相近但用词不同的笔记
+# 仍能进入 top-k —— 这才是 probe_semantic_gap 测出的那 62% 缺口需要的通道。
+DENSE_SLOTS_FRAC = 0.4   # 默认 0.4：改写式查询 top-10 命中 37.5%→68.8%（+31.2pp），
+                         # 黄金集 rec@10 98.3%→97.5%（-0.8pp，n=30 噪声内），头部指标不变。
+                         # 想要"黄金集零变动"可设 KB_DENSE_FRAC=0.2（探针 +18.7pp）。
 RRF_CAP = 300          # 每路只取前 N 参与融合（控制复杂度）
 
 
@@ -401,6 +897,62 @@ def _rrf_fuse(list_a, list_b, k: int = RRF_K, cap: int = RRF_CAP):
         for rank, (rel, _sc) in enumerate(list(lst)[:cap], start=1):
             fused[rel] = fused.get(rel, 0.0) + 1.0 / (k + rank)
     return sorted(fused.items(), key=lambda x: x[1], reverse=True)
+
+
+def dense_rank(root, q: str, payload: dict, m: int = DENSE_M) -> List[Tuple[str, float]]:
+    """稠密语义通道：返回 [(rel, 余弦)] 按相似度降序；不可用/异常 → []。
+
+    best-effort：任何异常都只让语义通道缺席，绝不影响词法检索主流程。
+    """
+    if os.environ.get("KB_DENSE", "") in ("0", "false", "no"):
+        return []
+    d = payload.get("dense") or {}
+    vecs = d.get("vecs") or {}
+    if not vecs:
+        return []
+    t0 = time.time()
+    try:
+        import dense as _dense
+        qv = _dense.query_vector(root, q, int(d.get("dim_in") or 0),
+                                 int(d.get("dim") or 0), int(d.get("seed") or 0))
+        if qv is None or time.time() - t0 > _dense.BUDGET_S:
+            return []
+        return _dense.top_k(vecs, qv, m)
+    except Exception:       # noqa: BLE001  语义通道是增强项
+        return []
+
+
+def dense_fill_tail(ranked: List[Tuple[str, float]], dense: List[Tuple[str, float]],
+                    k: int, frac: float = DENSE_SLOTS_FRAC) -> List[Tuple[str, float]]:
+    """**尾部槽位填充**：词法前 (1-frac)·k 名原样保留，其余槽位给稠密-only 笔记。
+
+    与 RRF 融合的本质区别：头部名次**按构造不变**（不是"权重小所以影响小"），
+    所以 top1 / recall@4 这类头部指标不可能回退。稠密只回答一个问题：
+    「词法完全没找到、但语义相近的笔记，要不要给一个位置」。
+    """
+    try:                                    # 便于对槽位比例扫参做受控实验
+        frac = float(os.environ.get("KB_DENSE_FRAC", frac))
+    except (TypeError, ValueError):
+        pass
+    if not dense or not ranked or frac <= 0:
+        return ranked
+    n_keep = max(1, min(len(ranked), int(round(k * (1.0 - frac)))))
+    if n_keep >= len(ranked):
+        return ranked
+    head = list(ranked[:n_keep])
+    have = {r for r, _ in ranked}          # 词法已经覆盖的（含被截掉的）
+    floor = min((s for _r, s in head), default=1.0) * 0.5
+    slots = max(0, k - n_keep)
+    added = 0
+    for step, (rel, _cos) in enumerate(dense):
+        if added >= slots:
+            break
+        if rel in have:
+            continue
+        have.add(rel)
+        head.append((rel, floor * (1.0 - 1e-6 * (step + 1))))   # 保持稠密名次
+        added += 1
+    return head
 
 
 def _root_of(rel, meta_all):
@@ -483,11 +1035,19 @@ def _parse_importance(v):
 
 
 def _parse_tags(v):
-    """解析 tags 字段为列表。"""
+    """解析 tags 字段为列表。
+
+    契约里的 tags 有两种写法：`tags: [sop, metric]`（flow 列表）与裸值 `tags: sop, metric`。
+    `parse_frontmatter` 对前者返回字符串 `"[sop, metric]"`，不剥方括号就会被切成
+    `['[sop','metric]']` → `--tags metric` 静默返回空。
+    """
     if isinstance(v, list):
         return [str(x).strip() for x in v if str(x).strip()]
     if isinstance(v, str):
-        return [t.strip() for t in re.split(r"[,\s]+", v) if t.strip()]
+        s = v.strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1]
+        return [t.strip().strip('"\'') for t in re.split(r"[,\s]+", s) if t.strip()]
     return []
 
 
@@ -663,13 +1223,23 @@ def _build_hit(rel, score, fm, body, query, context, root=None, meta_all=None,
     }
 
 
-def _build_json_output(query, hits, n_indexed, latency_ms):
-    """构造完整 JSON 输出。"""
-    return {
+def _build_json_output(query, hits, n_indexed, latency_ms, adjustments=None,
+                       dense_candidates=0):
+    """构造完整 JSON 输出。
+
+    `adjustments` 是本次实际应用的检索修正契约条目（L1 回路），列出来是为了**可审计**：
+    谁被加成、因为哪条契约，一眼可查。
+    """
+    out = {
         "query": query,
         "hits": hits,
         "meta": {"n_indexed": n_indexed, "latency_ms": latency_ms},
     }
+    if dense_candidates:
+        out["meta"]["dense_candidates"] = dense_candidates
+    if adjustments:
+        out["adjustments_applied"] = adjustments
+    return out
 
 
 def _truncate_to_tokens(text, max_tokens):
@@ -739,10 +1309,15 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
               tags: Optional[str] = None,
               date_from: Optional[str] = None, date_to: Optional[str] = None,
               exclude_stale: bool = False,
-              include_raw: bool = False, include_stubs: bool = False) -> int:
+              include_raw: bool = False, include_stubs: bool = False,
+              no_record: bool = False) -> int:
     t0 = time.time()
+    # 是否记录使用信号。评测/探针（kb eval、kb_adaptretrieve、对照实验）必须关掉：
+    # 它们用 rag query 当 oracle，若照常写 agent_hits，一小时内的重跑会把再问率顶到 1、
+    # 成功率代理打到 0，直接压低 fitness —— 测量行为污染被测对象。
+    record = (not no_record) and os.environ.get("KB_NO_FEEDBACK", "") not in ("1", "true", "yes")
     # 捕获打通：无 session 时自动生成，确保每次查询都写 per-query 事件（供 kb_usage 量再问率）
-    if not session:
+    if not session and record:
         session = _gen_session()
     # P2: 检索缓存（FR-3.1.9）
     cache_key = hashlib.sha256(json.dumps({
@@ -750,8 +1325,10 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         "author": author, "min_importance": min_importance,
         "enforce_level": enforce_level, "tags": tags,
         "date_from": date_from, "date_to": date_to,
-        # context（片段长度）与 answer（是否调 LLM 作答）都会改变输出，必须入键
-        "context": context, "answer": bool(answer),
+        # context（片段长度）与 answer（是否调 LLM 作答）都会改变输出，必须入键；
+        # as_json 决定缓存里存的是 result 还是 text，不入键会导致「文本查一次、
+        # 5 分钟内同问题加 --json 查」命中错形状的条目 → KeyError: 'result'。
+        "context": context, "answer": bool(answer), "as_json": bool(as_json),
         "exclude_stale": bool(exclude_stale),
         "include_raw": bool(include_raw), "include_stubs": bool(include_stubs),
     }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
@@ -760,21 +1337,26 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         cache = StateStore(root).load("query_cache.json", {})
         entry = cache.get(cache_key)
         if entry and (time.time() - entry.get("ts", 0)) < 300:  # TTL 5 分钟
-            if as_json:
-                print(json.dumps(entry["result"], ensure_ascii=False, indent=2))
-            else:
-                print(entry["text"])
-            # 反馈闭环：命中缓存也要记录本次查询命中（供 kb_usage 量再问率），
-            # 不能被缓存短路，否则重复查询不再产生反馈信号。
-            paths = entry.get("paths") or []
-            if session and paths:
-                _record_hits(q, [{"path": p} for p in paths], session, root)
-            return 0
+            # 老条目可能只存了 text 或只存了 result（as_json 以前不在键里）：
+            # 取不到就跳过缓存走正常检索，绝不 KeyError。
+            cached_out = entry.get("result") if as_json else entry.get("text")
+            if cached_out is not None:
+                if as_json:
+                    print(json.dumps(cached_out, ensure_ascii=False, indent=2))
+                else:
+                    print(cached_out)
+                # 反馈闭环：命中缓存也要记录本次查询命中（供 kb_usage 量再问率），
+                # 不能被缓存短路，否则重复查询不再产生反馈信号。
+                paths = entry.get("paths") or []
+                if session and paths:
+                    if record:
+                        _record_hits(q, [{"path": p} for p in paths], session, root)
+                return 0
     except ImportError:
         cache = None
 
-    idx_path = Path(root) / IDX_DIR / "df_idf.json"
-    payload, ver = load_index(idx_path)
+    idx_path = index_file(Path(root) / IDX_DIR)     # pickle 优先，回退旧 json
+    payload, ver = load_index(idx_path) if idx_path else (None, 0)
     if payload is None:
         if as_json:
             print(json.dumps({"error": "index not found", "query": q}, ensure_ascii=False))
@@ -787,19 +1369,34 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     elif ver > IDX_VERSION:
         if not as_json:
             print(f"⚠️ 索引版本 {ver} 高于当前代码支持 {IDX_VERSION}，建议升级 kb-kit 或跑 `rag.py index` 重建；当前仍可查询。", file=sys.stderr)
-    vocab, idf, tf_all, meta_all = payload["vocab"], payload["idf"], payload["tf"], payload["meta"]
-    rel2vec = {r: _vec(tf_all[r], vocab, idf) for r in tf_all}
+    vocab, idf, meta_all = payload["vocab"], payload["idf"], payload["meta"]
+    tf_all = payload.get("tf")                 # v7 起不再写；仅在旧索引回退路径用到
+    postings = payload.get("postings")         # v7 主结构：词 → [doc_id, tf, ...]
+    docs = payload.get("docs") or []
     # 查询扩展（FR-3.2.4）
     q_expanded = _expand_query(q)
     qv = _vec(Counter(tokenize(q_expanded)), vocab, idf)
-    scored = [(r, _cos(v, qv)) for r, v in rel2vec.items()]
+    norms = payload.get("norms")
+    if postings and norms:
+        scored = _score_cosine_postings(postings, docs, idf, qv, norms)
+    elif norms and tf_all is not None:
+        scored = _score_cosine_fast(tf_all, idf, qv, norms)
+    else:
+        # 旧索引（v<5）没有预算范数：回退到物化全库向量，并提示重建
+        scored = [(r, _cos(v, qv)) for r, v in all_doc_vectors(payload).items()]
     scored.sort(key=lambda x: x[1], reverse=True)
     scored = [(r, s) for r, s in scored if s > 0]
 
     # P2: 混合检索 —— 余弦 + BM25 用 RRF（Reciprocal Rank Fusion）融合
     #   为什么换掉线性加权：两路打分量纲不同（余弦∈[0,1]、BM25 无上界），
     #   归一化系数对语料敏感；RRF 只看**排名**，对分数量纲免疫，是混合检索的行业标准。
-    bm25 = _bm25_scores(tf_all, tokenize(q_expanded))
+    if postings:
+        bm25 = _bm25_postings(postings, docs, tokenize(q_expanded),
+                              dl=payload.get("dl"), avgdl=payload.get("avgdl"))
+    else:
+        bm25 = _bm25_scores(tf_all, tokenize(q_expanded),
+                            dl=payload.get("dl"), avgdl=payload.get("avgdl"),
+                            df=payload.get("df"))
     if bm25:
         scored = _rrf_fuse(scored, sorted(bm25.items(), key=lambda x: x[1], reverse=True),
                            k=RRF_K, cap=RRF_CAP)
@@ -807,7 +1404,7 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     # 倒排索引命中加成（FR-3.2.2）
     inverted_index = payload.get("inverted_index", {})
     if inverted_index:
-        inv_hits = _inverted_lookup(tokenize(q), inverted_index)
+        inv_hits = _inverted_lookup(tokenize(q), inverted_index, docs=payload.get("docs"))
         scored_dict = dict(scored)
         for rel, count in inv_hits.items():
             if rel in scored_dict:
@@ -816,6 +1413,14 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
                 scored_dict[rel] = INVERTED_HIT_BOOST * count
         scored = list(scored_dict.items())
         scored.sort(key=lambda x: x[1], reverse=True)
+
+    # 稠密语义通道只做**尾部槽位填充**（见 dense_fill_tail 的实测说明），
+    # 不参与头部排序 —— 所以先算出来，等去重拿到 top-k 后再填。
+    _dense_hits = dense_rank(root, q, payload)
+
+    # L1 检索修正契约（kb adaptretrieve apply 产出）：同一 query 再问时把上次漏掉的笔记拉回来
+    scored, _adjust_applied = _apply_retrieval_adjustments(
+        root, q, scored, indexed=set(docs) if docs else None)
 
     # P5：标题/路径/摘要匹配加成 —— 修「自指问题」盲区
     #   原理：长文里关键词稀疏，纯 TF-IDF/BM25 会把高信号文档排到后面；
@@ -866,8 +1471,19 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
 
     # 检索结果去重（FR-3.1.8）
     deduped = _dedup_chunks(scored, top, meta_all)
+    if _dense_hits:
+        deduped = dense_fill_tail(deduped, _dense_hits, top)
     hits = [(item[0], item[1]) for item in deduped]
     chunk_siblings_map = {item[0]: item[2] for item in deduped if len(item) > 2}
+
+    # 索引过期守卫：索引只校验 version，笔记被删/改名后仍会以 #1 返回「幽灵命中」
+    # （snippet 空、domain "-"、退出码 0、零警告）。这里做一次存在性核对并剔除。
+    ghost = {rel for rel, _sc in hits if not (Path(root) / rel).exists()}
+    if ghost:
+        hits = [(rel, sc) for rel, sc in hits if rel not in ghost]
+        print(f"⚠️ 索引已过期：{len(ghost)} 条命中在磁盘上已不存在，已剔除"
+              f"（跑 `kb rag index` 重建索引）：{', '.join(sorted(ghost)[:3])}"
+              f"{' …' if len(ghost) > 3 else ''}", file=sys.stderr)
 
     # P2: 语义重排（本地嵌入）—— 只看 top-N，超预算/不可用即原样返回
     #   KB_NO_EMBED_RERANK=1 可关闭（对照实验 / 端点故障时手动降级）
@@ -918,7 +1534,10 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
             if rel in chunk_siblings_map:
                 h["chunk_siblings"] = chunk_siblings_map[rel]
             hit_list.append(h)
-        output = _build_json_output(q, hit_list, len(tf_all), latency_ms)
+        # 已索引篇数：v7 没有 tf → 用 docs（等价于原 len(tf_all)）
+        output = _build_json_output(q, hit_list, payload.get("n_docs") or len(docs), latency_ms,
+                                    adjustments=_adjust_applied,
+                                    dense_candidates=len(_dense_hits))
         if context_budget:
             output["context"] = _context_budget(hit_list, context_budget)
         print(json.dumps(output, ensure_ascii=False, indent=2))
@@ -963,7 +1582,7 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
                 print("\n💬 （未配置 ORNITH 凭证/地址，返回检索片段作为答案；设 ORNITH_API_KEY 与 ORNITH_BASE_URL 后可生成）")
 
     # 命中记录（auto_session，权重 0.3）
-    if session and hits:
+    if record and session and hits:
         hit_list_for_record = []
         for rel, sc in hits:
             fm, body = load_meta(Path(root) / rel)

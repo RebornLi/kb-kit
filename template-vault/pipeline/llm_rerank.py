@@ -218,7 +218,8 @@ def main() -> int:
     # 用真实检索结果试一次（走 rag 的进程内接口，避免缓存干扰）
     import subprocess
     out = subprocess.run([sys.executable, str(root / "pipeline" / "rag.py"), "query", args.query,
-                          "--root", str(root), "--top", str(args.top), "--json"],
+                          "--root", str(root), "--top", str(args.top), "--json",
+                          "--no-record"],   # 对照实验不得污染使用信号
                          capture_output=True, text=True, timeout=300)
     if out.returncode != 0:
         print(f"检索失败：{(out.stderr or '')[:200]}"); return 2

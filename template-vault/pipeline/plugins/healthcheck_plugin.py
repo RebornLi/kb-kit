@@ -12,6 +12,7 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class HealthcheckPlugin(SubprocessPlugin):
     SCRIPT_NAME = "kb-healthcheck.py"
     ACTION_MAP = {"check": None}  # kb-healthcheck.py 无子命令
+    IN_PROCESS_ACTIONS = {"check"}       # 只读
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

@@ -154,7 +154,9 @@ header = (
 footer = '    </root>\n  </mxGraphModel>\n</diagram>\n</mxfile>\n'
 
 out = header + "\n".join(cells) + footer
-path = str(Path(__file__).resolve().parent / "arch" / "kb-kit-pure-architecture.drawio")
+path = Path(__file__).resolve().parent / "arch" / "kb-kit-pure-architecture.drawio"
+# arch/ 被 .gitignore 忽略，新克隆里不存在 → 以前直接 open() 必 FileNotFoundError
+path.parent.mkdir(parents=True, exist_ok=True)
 with open(path, "w", encoding="utf-8") as f:
     f.write(out)
 print("wrote", path, "cells:", len(cells))

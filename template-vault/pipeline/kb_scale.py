@@ -15,8 +15,32 @@ import argparse, json, sys
 from pathlib import Path
 
 IDX_DIR = "vector index"
-IDX_FILE = "df_idf.json"
-EXPECTED_VERSION = 2  # 与 rag.IDX_VERSION 对齐；不同步则提示重建
+# 索引主格式 v6 起为 df_idf.pkl（旧库仍可能是 .json）→ 用 rag 的解析器
+try:
+    from rag import IDX_VERSION as EXPECTED_VERSION   # 单一事实源，别再手写（曾停在 2 而 rag 已是 4）
+except ImportError:                                   # pragma: no cover
+    EXPECTED_VERSION = 4
+
+
+def indexable_count(root: Path) -> int:
+    """「应入索引」的篇数——分母必须与 rag._full_rebuild 同源。
+
+    以前分母用 `kb_rsi.collect`（含 raw/、不排除生成物），分子是 RAG 索引篇数
+    （排除 raw/生成物）→ 两者不同源，覆盖率数字没有意义。
+    """
+    from kb_common import iter_notes, load_meta, is_generated_report, index_excluded, tokenize
+    n = 0
+    for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if is_generated_report(rel):
+            continue
+        fm, body = load_meta(p)
+        if index_excluded(fm):
+            continue
+        if not tokenize(body):
+            continue
+        n += 1
+    return n
 
 # 规模档位：笔记数 → 建议处理策略（未来 engine 据此 switch flat/indexed）
 BRACKET_RULES = (
@@ -35,14 +59,24 @@ def bracket(n):
             "note": "超大库；必须走双层检索，禁止全量 O(n²) 操作"}
 
 
+def _index_path(root):
+    """取当前可用的索引文件。v6 起主格式是 `df_idf.pkl`（旧库仍是 .json）。"""
+    try:
+        import rag
+        return rag.index_file(Path(root) / IDX_DIR)
+    except ImportError:                       # pragma: no cover - rag 必然存在
+        return None
+
+
 def _load_index(idx_path):
-    if not idx_path.exists():
+    """统一委托 rag.load_index：它能同时读 pickle（v6）与 JSON（旧库）。"""
+    if not idx_path:
         return None, 0
     try:
-        payload = json.loads(idx_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+        import rag
+        return rag.load_index(idx_path)
+    except ImportError:                       # pragma: no cover
         return None, 0
-    return payload, payload.get("version", 0)
 
 
 def _doc_hash_set(payload):
@@ -61,8 +95,8 @@ def fabric(root):
     """感知索引层：读 rag 索引，报告已索引篇数/总markdown篇数/覆盖/切换就绪。"""
     from kb_rsi import collect  # 延迟 import，避免 kb_rsi↔kb_scale 循环
     root = Path(root)
-    n_markdown = len(collect(root)) if root.exists() else 0
-    idx_path = root / IDX_DIR / IDX_FILE
+    n_markdown = indexable_count(root) if root.exists() else 0
+    idx_path = _index_path(root)
     payload, ver = _load_index(idx_path)
     hashes = _doc_hash_set(payload) if payload else None
     n_indexed = len(hashes) if hashes else (payload.get("n_docs", 0) if payload else 0)

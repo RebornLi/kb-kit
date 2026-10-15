@@ -20,9 +20,13 @@
 #   python3 agent_registry.py ingest --root R [--agent NAME] [--list] [--dry-run]
 # ============================================================
 import argparse, os, re, sys, json, glob, shutil, importlib, datetime
+from kb_common import atomic_write_text
 from pathlib import Path
 
+# 状态文件名（统一存 <vault>/.kb/state/）。旧位置有两个：vault 根 kb-agent.json（现行）
+# 与更早的根 dotfile .kb-agent.json —— 都作为只读回退，写只写规范路径。
 STATE_FILE = "kb-agent.json"
+_LEGACY_STATE = ("kb-agent.json", ".kb-agent.json")
 
 # 六种 agent 的形态:
 #   md                 : 记忆是 .md 文件（OpenClaw 有日报 + 核心文件；Hermes 仅有核心文件）
@@ -149,16 +153,15 @@ def detect_agents():
 # 注册表读写（kb-agent.json，在 vault 根目录）
 # ------------------------------------------------------------
 def load_registry(root):
-    p = Path(root) / STATE_FILE
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"version": 1, "agents": {}}
+    from state_manager import read_json
+    return read_json(root, STATE_FILE, legacy=_LEGACY_STATE,
+                     default={"version": 1, "agents": {}})
 
 
 def save_registry(root, reg):
-    p = Path(root) / STATE_FILE
-    p.write_text(json.dumps(reg, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+    # 原子写 + 规范路径：半截注册表会让所有 agent 记忆源一起消失
+    from state_manager import write_json
+    write_json(root, STATE_FILE, reg)
 
 
 def cmd_detect(root, out):
@@ -430,6 +433,12 @@ def main():
         r = cmd_enable(args.root, args.name, (args.enable.lower() not in ("false", "0", "no")), out)
         print("\n".join(out)); return r
     if args.cmd == "ingest":
+        if getattr(args, "list", False):
+            # `--list` 只在 ingest 子命令上注册过，cmd_ingest 从不检查它，且默认非 dry-run
+            # → 以前 `kb ingest-agent --list` 不列清单而是**直接写库**。这里短路成只读列举。
+            r = cmd_list(args.root, out)
+            print("\n".join(out))
+            return r
         r = cmd_ingest(args.root, args.name, args.dry_run, out)
         # 始终打印摄取结果（md agents 的输出依赖这里）
         print("\n".join(out))

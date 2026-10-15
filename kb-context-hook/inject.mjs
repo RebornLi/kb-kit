@@ -16,28 +16,36 @@
 export function buildInjectedText(hits, cfg) {
   if (!hits || hits.length === 0) return '';
 
+  // prefix + opening fence: the fence wraps the hit lines so the model treats
+  // them as external reference data (and does not execute any instructions
+  // that might appear inside a hit snippet).
+  const head = cfg.prefix + '\n```\n';
+  const tail = '```\n（以上为知识库相关片段，如与本轮问题无关请忽略）';
+  // ⚠️ 字节封顶必须把 head/tail 也算进去 —— 初版只累计命中行，导致整块超出
+  //   maxBytes（前缀 + 围栏 + 免责说明约 50+ 字节没算）。
+  const budget = Math.max(0, cfg.maxBytes - Buffer.byteLength(head) - Buffer.byteLength(tail));
   const lines = [cfg.prefix, '```'];
-  let acc = '';
+  let acc = 0;
   for (const h of hits) {
     const domain = h.domain ? ` · ${h.domain}` : '';
     const imp = h.importance != null ? `，importance ${h.importance}` : '';
     const line = `• ${h.title}（${h.path}${domain}，分 ${h.score.toFixed(3)}${imp}）` +
       (h.snippet ? `\n  ${h.snippet}` : '');
     const withNewline = line + '\n';
-    // 字节封顶：本命中加入后若超上限则停止（与 DSH 实现同口径）
-    if (Buffer.byteLength(acc) + Buffer.byteLength(withNewline) > cfg.maxBytes) break;
+    // Byte cap: never exceed cfg.maxBytes of injected text for this turn.
+    if (acc + Buffer.byteLength(withNewline) > budget) break;
     lines.push(line.trimEnd());
-    acc += withNewline;
+    acc += Buffer.byteLength(withNewline);
   }
-  if (lines.length === 2) return ''; // 只有 prefix + 开围栏，无命中贡献 → 跳过
-
+  if (lines.length === 2) return ''; // only prefix + opening fence, no hits contributed → skip
   lines.push('```', '（以上为知识库相关片段，如与本轮问题无关请忽略）');
   return lines.join('\n');
 }
 
 /**
- * 命中集的稳定去重键（顺序无关）：path::score 排序后拼接。
- * 同一会话内相同命中集不重复注入，保护 prompt 缓存。
+ * Stable dedupe key for a set of hits: the sorted list of hit identities.
+ * Two turns that resolve to the exact same hits should not re-inject — this
+ * protects the prompt cache across near-identical questions within a session.
  * @param {object[]} hits
  * @returns {string}
  */

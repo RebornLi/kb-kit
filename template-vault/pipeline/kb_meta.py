@@ -45,6 +45,8 @@
 #     python3 pipeline/kb_meta.py status --root R [--json]  # 旋钮历史 + 回滚状态
 # ============================================================
 import argparse, json, subprocess, sys
+from kb_common import atomic_write_text
+from state_manager import state_path, read_state_path
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -60,9 +62,16 @@ from kb_constants import (
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 
-PROPOSAL_FILE = ".kb_meta_proposals.jsonl"     # 瞬态调参提议（gitignore）
-STATE_FILE = ".kb_meta_state.json"            # 运行态：旋钮当前值 + 历史 + 回滚锚（gitignore）
-CONFIG_FILE = ".kb_meta_config.json"          # 运行时旋钮配置（人工 apply 写，gitignore）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+PROPOSAL_FILE = "kb_meta_proposals.jsonl"     # 瞬态调参提议（gitignore）
+STATE_FILE = "kb_meta_state.json"             # 运行态：旋钮当前值 + 历史 + 回滚锚（gitignore）
+CONFIG_FILE = "kb_meta_config.json"           # 运行时旋钮配置（人工 apply 写，gitignore）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {
+    PROPOSAL_FILE: ".kb_meta_proposals.jsonl",
+    STATE_FILE: ".kb_meta_state.json",
+    CONFIG_FILE: ".kb_meta_config.json",
+}
 
 # 该层“是否动作过”的来源（feedback_state 的 L0/L2 上次产出，best-effort）
 L0_PROPOSAL_REL = str(Path("pipeline") / ".kb_retriage_proposals.jsonl")
@@ -81,20 +90,26 @@ _KNOB_PRIORITY = {"L0_MIN_IDF": 0, "L2_SIGNAL_MIN": 1, "L2_L1_MISS_BONUS": 2}
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
 def _prop_path(root: Union[str, Path]) -> Path:
-    return Path(root) / PROPOSAL_FILE
+    """**写**路径（规范：.kb/state/）。读请用 `_read_path`。"""
+    return state_path(root, PROPOSAL_FILE)
 
 
 def _state_path(root: Union[str, Path]) -> Path:
-    return Path(root) / STATE_FILE
+    return state_path(root, STATE_FILE)
 
 
 def _config_path(root: Union[str, Path]) -> Path:
-    return Path(root) / CONFIG_FILE
+    return state_path(root, CONFIG_FILE)
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """**读**路径：规范文件优先，否则回退旧位置（旧库升级后状态不会凭空清零）。"""
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 
 def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _state_path(root)
-    if not p.exists():
+    p = _read_path(root, STATE_FILE)
+    if p is None:
         return {"knovals": dict(DEFAULT_KNOBS), "cycles": [], "last_good": dict(DEFAULT_KNOBS)}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -104,12 +119,13 @@ def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
 
 def _write_state(root, state) -> None:
     p = _state_path(root)
-    p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写：半截状态文件会让旋钮历史整段丢失（且无法解析）
+    atomic_write_text(p, json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _config_path(root)
-    if not p.exists():
+    p = _read_path(root, CONFIG_FILE)
+    if p is None:
         return {}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -119,9 +135,9 @@ def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
 
 def _write_config(root: Union[str, Path], knovals: Dict[str, float]) -> None:
     p = _config_path(root)
-    p.write_text(json.dumps({"knovals": knovals,
-                             "updated": datetime.now().isoformat(timespec="seconds")},
-                            ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(p, json.dumps({"knovals": knovals,
+                                     "updated": datetime.now().isoformat(timespec="seconds")},
+                                    ensure_ascii=False, indent=2))
 
 
 def current_knobs(root: Union[str, Path]) -> Dict[str, float]:
@@ -263,11 +279,10 @@ def propose(root: Union[str, Path]) -> Dict[str, Any]:
 
 def _write_proposals(root: Union[str, Path], proposals: List[Dict[str, Any]]) -> None:
     p = _prop_path(root)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(
+    atomic_write_text(
+        p,
         "\n".join(json.dumps(x, ensure_ascii=False) for x in proposals)
-        + ("\n" if proposals else ""),
-        encoding="utf-8")
+        + ("\n" if proposals else ""))
 
 
 # ── 连续负 delta 回滚（纯函数：对给定历史计数尾部连续负 delta）────────────────────
@@ -288,8 +303,8 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
     """把选定调参提议的旋钮值写进运行时配置 .kb_meta_config.json（不改仓内常量/笔记），
     写前一次提交（回滚锚）；并记一次漏检快照到运行态，供 calibrate 算连续负 delta。
     id 归一化：提案存 int、CLI 传串 → 统一转 int 比对（与 kb_contradiction 同约定）。"""
-    p = _prop_path(root)
-    if not p.exists():
+    p = _read_path(root, PROPOSAL_FILE)
+    if p is None:
         return {"written": [], "skipped": [], "note": "无待审提议；先 run calibrate/propose"}
     recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     if ids is None and force:
@@ -410,8 +425,8 @@ def status(root: Union[str, Path]) -> Dict[str, Any]:
         rollback_state[knob] = {"consecutive_negative": cn,
                                 "needs_rollback": cn >= L3_ROLLBACK_CONSEC,
                                 "last_good": state.get("last_good", {}).get(knob)}
-    p = _prop_path(root)
-    pending = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p.exists() else []
+    p = _read_path(root, PROPOSAL_FILE)
+    pending = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()] if p else []
     return {"grounded": grounded, "ground_note": ground_note, "outcome": o,
             "current_knobs": current_knobs(root), "default_knobs": dict(DEFAULT_KNOBS),
             "rollback_state": rollback_state, "pending_proposals": pending,
@@ -480,7 +495,9 @@ def main() -> int:
     if a.cmd == "apply":
         ids = a.id if (a.all_ is False and a.id) else None
         ids = None if a.all_ else ids
-        r = apply(root, ids)
+        # force=a.all_：apply() 只有在 `ids is None and force` 时才全选（kb_meta.py:295），
+        # 漏传 force 会让 --all 走到 else 分支、pick 恒为空 —— 写 0 个旋钮却打印成功。
+        r = apply(root, ids, force=a.all_)
         print(f"✅ L3 元调参 apply：写入 {len(r['written'])} 个旋钮 · 跳过 {len(r['skipped'])} 个")
         for w in r["written"]:
             print(f"   {w['knob']}: {w['old']} → {w['new']}")

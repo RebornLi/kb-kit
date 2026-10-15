@@ -18,7 +18,8 @@ from pathlib import Path
 from collections import Counter
 from kb_common import ROOT_DEFAULT, get_dedup_thresholds
 import rag
-from memory_sync import signal_density, slug, NOVEL_SIM, DUP_SIM, load_index
+# 只导入真正用到的（DUP_SIM 曾在此但从未使用；阈值实际走 get_dedup_thresholds 动态加载）
+from memory_sync import signal_density, slug, load_index
 
 AGENT_SRC_DEFAULT = os.environ.get("AGENT_MEMORY", "")
 AGENT_ROOT_DEFAULT = os.environ.get("AGENT_ROOT", "")
@@ -28,7 +29,9 @@ MIN_CHARS_DEFAULT = 80
 SYNC_SIM = 0.85     # 默认值（实际使用时通过 get_dedup_thresholds 动态获取）
 REPLACE_SIM = 0.85  # 默认值
 MERGE_SIM = 0.70    # 默认值
-STATE_FILE = ".memory_ingest_state.json"
+# 旧位置（只读回退）；规范位置是 <vault>/.kb/state/memory_ingest_state.json
+STATE_FILE = "memory_ingest_state.json"
+_LEGACY_STATE = ".memory_ingest_state.json"
 
 
 def _text_sim(a: str, b: str, method: str = "tfidf") -> float:
@@ -79,8 +82,13 @@ def _audit_log(root, action, target, detail=""):
     with log.open("a", encoding="utf-8") as f:
         f.write(f"[{ts}] {action} → {target} {detail}\n")
 
+# domain → PARA 顶层目录。本表已与 memory_sync / sync / intake_triage **完全对齐**
+# （一致性由 tests/test_route_consistency.py 守卫）。对齐依据：现役库知识层实测分布。
 DOMAIN_BUCKET = {"运维": "20-技术 Technology", "安全": "20-技术 Technology", "开发": "20-技术 Technology",
-                 "数据": "20-技术 Technology", "产品": "20-技术 Technology", "管理": "10-项目 Projects", "综合": "40-资源库 Resources"}
+                 "数据": "20-技术 Technology",
+                 # 实测：产品域知识层笔记 11/13(85%) 落在 40-资源库 Resources（原 20-技术 为异类）
+                 "产品": "40-资源库 Resources",
+                 "管理": "10-项目 Projects", "综合": "40-资源库 Resources"}
 CORE_FILES = ["MEMORY.md", "USER.md", "SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md"]
 
 # 命名空间归一表: 摄入路径里的简写 / 带与不带空格变体 → 标准 PARA 命名空间
@@ -146,7 +154,7 @@ def load_state(root):
         if store.exists("memory_state.json"):
             return store.load("memory_state.json", default)
         # 旧文件迁移
-        legacy = Path(root) / STATE_FILE
+        legacy = Path(root) / _LEGACY_STATE
         if legacy.exists():
             try:
                 data = json.loads(legacy.read_text(encoding="utf-8"))
@@ -157,7 +165,7 @@ def load_state(root):
         return default
     except ImportError:
         try:
-            return json.loads((Path(root) / STATE_FILE).read_text(encoding="utf-8"))
+            return json.loads((Path(root) / _LEGACY_STATE).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return default
 
@@ -167,7 +175,8 @@ def save_state(root, state):
         from state_manager import StateStore
         StateStore(root).save("memory_state.json", state)
     except ImportError:
-        (Path(root) / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        from state_manager import write_json
+        write_json(root, STATE_FILE, state)
 
 
 def commit_new_files(root, rels):

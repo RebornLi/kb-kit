@@ -10,7 +10,7 @@ rem ============================================================
 setlocal enableextensions
 
 set "VAULT=%~dp0"
-set "VAULT=%VAULT:~0,-1}"
+set "VAULT=%VAULT:~0,-1%"
 
 rem 选 python：优先 python，其次 py，再 python3
 where python >nul 2>&1 && set "PY=python" || (where py >nul 2>&1 && set "PY=py" || (where python3 >nul 2>&1 && set "PY=python3" || goto :nopys))

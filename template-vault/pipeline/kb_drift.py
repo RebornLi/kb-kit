@@ -9,7 +9,7 @@
 #   用法:
 #     python3 pipeline/kb_drift.py [--root R]
 # ============================================================
-import argparse, json, hashlib, datetime, os, math
+import argparse, json, hashlib, datetime, os, math, subprocess
 from pathlib import Path
 
 LEDGER_NAME = "promotions.jsonl"
@@ -114,12 +114,15 @@ def _analyze_records(records, now, root, window):
         except OSError:
             per_rec.append(entry)
             continue
-        current_sha = _sha(_split_body(text))
+        body_now = _split_body(text)   # 正文口径：与 kb_consistency 的 body-only 对齐
+        current_sha = _sha(body_now)
         if current_sha != rec.get("sha256_written", ""):
             entry["drift"] = True
         orig = rec.get("original_text", "")
         if orig:
-            entry["length_ratio"] = (len(text) - len(orig)) / max(len(orig), 1)
+            # 以前用 len(text)（含 frontmatter）比 len(orig)（body），
+            # 与 kb_consistency 的 body-only 口径不同，两个模块的「长度变化」不可比。
+            entry["length_ratio"] = (len(body_now) - len(orig)) / max(len(orig), 1)
         keys = _read_frontmatter_keys(target_path)
         if keys is not None and "kb_source" in keys:
             entry["preserved"] = True
@@ -237,8 +240,10 @@ def main():
     args = ap.parse_args()
     root = Path(args.root).resolve() if args.root else Path.cwd()
 
-    ledger_path = root / ".kb" / LEDGER_NAME
-    if not ledger_path.exists():
+    # 规范位置 .kb/state/，旧位置 .kb/<name> 只读回退
+    from state_manager import read_state_path
+    ledger_path = read_state_path(root, LEDGER_NAME, legacy=(".kb/" + LEDGER_NAME,))
+    if ledger_path is None or not ledger_path.exists():
         print("📈 漂移度量 · 暂无 ledger（%s 不存在，可忽略）" % LEDGER_NAME)
         return 0
 
@@ -264,9 +269,9 @@ def main():
     # 可选：git 历史可见时，补充“被改写记录有多少已进提交”
     if not args.window and not args.decay and _has_git(root):
         try:
-            from subprocess import run
-            res = run(["git", "-C", str(root), "log", "--oneline"],
-                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+            res = subprocess.run(["git", "-C", str(root), "log", "--oneline"],
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 timeout=10)
             if res.returncode == 0:
                 print("· 历史检查: 可访问 git 历史（可用 git blame 复核被改写记录）")
         except Exception:
@@ -276,5 +281,4 @@ def main():
 
 
 if __name__ == "__main__":
-    import subprocess  # noqa: E402  （供 _has_git 用）
     raise SystemExit(main())

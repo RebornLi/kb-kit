@@ -149,7 +149,7 @@ P0 前的实测痛点是：`kb query "vLLM 部署 坑"` Top-10 **9 条是只指�
 | 想撤销某批结晶 | `git log` 找该批 commit → `git revert`；或从 `raw/_curated/<原路径>` 复制回原位 |
 | 想重跑某篇 | 从 `.kb/curate_state.json` 的 `done` 里删掉该 rel（键即相对路径） |
 | 想调整准入 | `CONF_MIN`（置信闸门）、`HUGE_BODY`（超大跳过）、`SKIP_DIRS`（豁免目录） |
-| 索引被改坏了 | `rm "vector index/df_idf.json" && ./kb rag index`（纯可重建产物） |
+| 索引被改坏了 | `rm "vector index/df_idf."* && ./kb rag index`（纯可重建产物；v6 起主文件是 `df_idf.pkl`） |
 
 ---
 

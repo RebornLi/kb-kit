@@ -8,6 +8,7 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class ValidatePlugin(SubprocessPlugin):
     SCRIPT_NAME = "validate.py"
     ACTION_MAP = {"validate": None}
+    IN_PROCESS_ACTIONS = {"validate"}       # 只读
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

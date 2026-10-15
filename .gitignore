@@ -11,6 +11,9 @@ kb-kit-*.zip
 # 内部开发体检报告（不进公开仓库）
 DEPLOYMENT_REPORT.md
 
+# 开发仓测试环境（tests/testenv.py 构建；含真实库副本时是隐私数据，绝不入库）
+.testenv/
+
 # Python 产物
 __pycache__/
 *.pyc
@@ -33,6 +36,7 @@ Thumbs.db
 
 # 运行时知识库状态（审计日志、状态文件、向量索引；不进公开仓库）
 /**/.kb/
+/**/_audit/
 
 # 虚拟环境
 .venv/

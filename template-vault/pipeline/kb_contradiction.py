@@ -28,7 +28,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi  # 复用 collect/metrics/load_note（向量由本地 _vec/_cos，处理中文）
-from kb_common import norm as _norm, cos as _cos, build_inverted_index, candidate_pairs
+from kb_common import norm as _norm, cos as _cos, build_inverted_index, candidate_pairs, CJK
 from kb_constants import CONTRA_SIM, MAX_NOTES_CONTRA as MAX_NOTES
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)
@@ -68,7 +68,6 @@ except Exception:  # pragma: no cover — 两文件同目录，正常总会导�
 
 # 中文按字符单字建向量（kb_rsi.tokenize 把整段中文当单一 token，致中文笔记间余弦恒近 0），
 # 英文按词。这样"系统已经拥有意识"与"系统没有意识"能通过共有字(系统意识...)产生余弦相似。
-_CN_CHARS = re.compile(r"[\u4e00-\u9fff]")
 _LAT = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -79,12 +78,17 @@ def _vec(s):
     c = Counter()
     for w in _LAT.findall(s or ""):
         c[w.lower()] += 1
-    for ch in _CN_CHARS.findall(s or ""):
+    for ch in CJK.findall(s or ""):
         c[ch] += 1
     return _norm(dict(c))
 
 # 阈值（保守：宁可多报让人审，也不要漏报真矛盾）
 MIN_BODY_CHARS = 40      # 正文过短不计极性
+# LLM 极性解析的**总次数预算**：这条路径属于只读 lint，以前对每一对启发式未判定的
+# 笔记都捞一次 LLM（单次最长 ~40s，大库可触发成千上万次）。预算用尽后只走启发式。
+# 设 KB_CONTRA_LLM_MAX=0 可完全关闭 LLM 判定。
+LLM_PAIR_BUDGET = int(os.environ.get("KB_CONTRA_LLM_MAX", "40") or 0)
+
 MIN_NEG_DENSE = 0.020    # "否定方"至少要有的否定密度
 MAX_NEG_DENSE = 0.015    # "肯定方"不能超过的否定密度
 
@@ -103,7 +107,6 @@ _NEG_EN = re.compile(
     r"|avoid|prevent|reject|refuse|unable|crash|wrong|incorrect|invalid"
     r"|disagree|dispute|however|but|yet|although|despite|unlike)\b",
     re.I)
-_CN_TOKENS = re.compile(r"[\u4e00-\u9fff]")
 _ALL_TOKENS = re.compile(r"[A-Za-z0-9\u4e00-\u9fff]+")
 
 
@@ -144,7 +147,8 @@ def collect(root: Union[str, Path]) -> List[Dict[str, Any]]:
             continue
         if not body.strip() or len(body) < MIN_BODY_CHARS:
             continue
-        fm = kb_rsi.load_note(p)[0]
+        # 以前这里在 try 之外又 load_note 一次：文件此刻消失/权限变化会抛 OSError
+        # 直接打断整次 detect（而且纯属白读一遍）。fm 上面已经有了。
         out.append({"rel": rel, "text": text, "body": body,
                     "neg": neg_density(body),
                     "vec": _vec(body + " " + " ".join(fm.get("tags", [])))})
@@ -158,6 +162,8 @@ def detect(root: Union[str, Path]) -> List[Dict[str, Any]]:
     n = len(notes)
     if n < 2:
         return pairs
+
+    budget = {"left": max(0, LLM_PAIR_BUDGET)}
 
     def cmp_key(it):
         # 默认按 importance 降序（重要笔记优先比对）
@@ -188,7 +194,7 @@ def detect(root: Union[str, Path]) -> List[Dict[str, Any]]:
             members = sorted(buckets[di], key=cmp_key)[:60]
             member_keys = [str(idx[m]) for m in members]
             for a_key, b_key in candidate_pairs(inv_index, member_keys):
-                _maybe(notes, int(a_key), int(b_key), pairs, root=root)
+                _maybe(notes, int(a_key), int(b_key), pairs, root=root, budget=budget)
         # 跨域受限比较：每域取前 40 篇，使用 candidate_pairs 预过滤
         for xi in range(len(doms)):
             for yi in range(xi + 1, len(doms)):
@@ -201,18 +207,21 @@ def detect(root: Union[str, Path]) -> List[Dict[str, Any]]:
                 for a_key, b_key in candidate_pairs(inv_index, combined_keys):
                     if dom_of[a_key] == dom_of[b_key]:
                         continue
-                    _maybe(notes, int(a_key), int(b_key), pairs, root=root)
+                    _maybe(notes, int(a_key), int(b_key), pairs, root=root, budget=budget)
     else:
         # 小范围：全量比较改为 candidate_pairs 预过滤
         all_keys = [str(i) for i in range(n)]
         for a_key, b_key in candidate_pairs(inv_index, all_keys):
-            _maybe(notes, int(a_key), int(b_key), pairs, root=root)
+            _maybe(notes, int(a_key), int(b_key), pairs, root=root, budget=budget)
 
+    if LLM_PAIR_BUDGET and budget["left"] <= 0:
+        print(f"ℹ️ LLM 极性解析已达本轮预算 {LLM_PAIR_BUDGET} 次（其余对仅走启发式）；"
+              f"可用 KB_CONTRA_LLM_MAX 调整，设 0 关闭。")
     pairs.sort(key=lambda p: p["sim"], reverse=True)
     return pairs
 
 
-def _maybe(notes, i, j, pairs, root=None):
+def _maybe(notes, i, j, pairs, root=None, budget=None):
     a, b = notes[i], notes[j]
     s = _cos(a["vec"], b["vec"])
     if s < CONTRA_SIM:
@@ -225,7 +234,10 @@ def _maybe(notes, i, j, pairs, root=None):
     if hi >= MIN_NEG_DENSE and lo <= MAX_NEG_DENSE:
         is_contra = True
     # FR-6: LLM 极性解析（可选，当启发式未判定且 ORNITH_API_KEY 已设置时）
-    if not is_contra and root is not None:
+    if (not is_contra and root is not None
+            and (budget is None or budget.get("left", 0) > 0)):
+        if budget is not None:
+            budget["left"] -= 1
         llm_result = _llm_polarity(root, a["body"], b["body"])
         if llm_result is True:
             is_contra = True
@@ -303,8 +315,16 @@ def render(pairs: List[Dict[str, Any]]) -> str:
 
 
 def _snap_path(root: Union[str, Path]) -> Path:
-    """矛盾快照（.kb_contradictions.json）路径。"""
-    return Path(root) / "pipeline" / ".kb_contradictions.json"
+    """矛盾快照的**写**路径（规范：.kb/state/kb_contradictions.json）。读请用 `_snap_read`。"""
+    from state_manager import state_path
+    return state_path(root, "kb_contradictions.json")
+
+
+def _snap_read(root: Union[str, Path]):
+    """快照**读**路径：规范优先，旧位置 pipeline/.kb_contradictions.json 回退。"""
+    from state_manager import read_state_path
+    return read_state_path(root, "kb_contradictions.json",
+                           legacy=("pipeline/.kb_contradictions.json",))
 
 
 def _parse_retain(specs: Optional[List[str]]) -> Dict[int, str]:
@@ -340,8 +360,8 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
     kb_action=retire / status=legacy / category=contradicted），全程 git checkpoint 可回滚。
     返回 {written, skipped, decisions, note}。写入不改变 raw/（不可变层硬守卫）。
     """
-    sp = _snap_path(root)
-    if not sp.exists():
+    sp = _snap_read(root)          # 读：规范优先、旧位置回退
+    if sp is None or not sp.exists():
         return {"written": [], "skipped": [], "decisions": [],
                 "note": "无矛盾快照；先运行 `python3 pipeline/kb_contradiction.py` 生成"}
     snap = json.loads(sp.read_text(encoding="utf-8"))
@@ -472,17 +492,18 @@ def main() -> int:
     except (ImportError, OSError, AttributeError, TypeError):
         pass
 
+    from kb_common import atomic_write_text
     logdir = Path(root) / "pipeline"
     logdir.mkdir(parents=True, exist_ok=True)
-    (logdir / ".kb_contradictions.json").write_text(
-        json.dumps(snap, ensure_ascii=False, indent=2), encoding="utf-8")  # 瞬态快照（gitignore）
+    # 瞬态快照：统一写 .kb/state/（以前这里绕过 _snap_path 直接写 pipeline/）
+    atomic_write_text(_snap_path(root), json.dumps(snap, ensure_ascii=False, indent=2))
     (logdir / "kb_contradictions_report.md").write_text(render(pairs), encoding="utf-8")
 
     if args.json:
         print(json.dumps(snap, ensure_ascii=False, indent=2))
     else:
         print(render(pairs))
-        print(f"📝 矛盾快照 → {logdir / '.kb_contradictions.json'}  报告 → {logdir / 'kb_contradictions_report.md'}")
+        print(f"📝 矛盾快照 → {_snap_path(root)}  报告 → {logdir / 'kb_contradictions_report.md'}")
     return 0
 
 

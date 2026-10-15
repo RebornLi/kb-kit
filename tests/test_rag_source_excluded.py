@@ -27,6 +27,15 @@ sys.path.insert(0, str(PIPELINE))
 import rag  # noqa: E402
 from kb_common import index_excluded, is_source_note  # noqa: E402
 
+def _load_idx(root):
+    """读索引：统一走 rag.load_index（v6 起是 pickle，旧库仍是 json）。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "template-vault" / "pipeline"))
+    import rag
+    return rag.load_index(Path(root) / "vector index")[0] or {}
+
+
+
 
 def write_note(path: Path, body: str, extra_fm: str = "", mtime: float = 1_700_000_000) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -35,7 +44,7 @@ def write_note(path: Path, body: str, extra_fm: str = "", mtime: float = 1_700_0
 
 
 def load_payload(root: Path) -> dict:
-    return json.loads((root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))
+    return _load_idx(root)
 
 
 def quiet_index(root: Path) -> int:
@@ -72,9 +81,9 @@ class RagSourceExcludedTest(unittest.TestCase):
         self.assertEqual(quiet_index(self.root), 0)
         p = load_payload(self.root)
         self.assertEqual(p["n_docs"], 1, "只有普通笔记入索引")
-        self.assertIn("20-技术 Technology/keep.md", p["tf"])
+        self.assertIn("20-技术 Technology/keep.md", rag.indexed_docs(p))
         for rel in ("raw/a.md", "raw/b.md", "raw/c.md"):
-            self.assertNotIn(rel, p["tf"])
+            self.assertNotIn(rel, rag.indexed_docs(p))
             self.assertNotIn(rel, p["meta"])
         self.assertNotIn("alpha", p["vocab"], "来源独有词不应进词表")
 
@@ -87,7 +96,7 @@ class RagSourceExcludedTest(unittest.TestCase):
                    extra_fm="is_source: true\n", mtime=1_700_000_500)
         self.assertEqual(quiet_index(self.root), 0)  # 增量
         p = load_payload(self.root)
-        self.assertNotIn("raw/new.md", p["tf"])
+        self.assertNotIn("raw/new.md", rag.indexed_docs(p))
         self.assertNotIn("raw/new.md", p.get("doc_hashes", {}))
 
 

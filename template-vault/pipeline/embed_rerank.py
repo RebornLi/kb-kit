@@ -105,13 +105,15 @@ class CrossEncoderReranker:
         return out + tail
 
 
-def _norm(v: List[float]) -> List[float]:
+def _norm_vec(v: List[float]) -> List[float]:
+    """**embedding 列表**的 L2 归一化（与稀疏 dict 的 kb_common.norm 不同口径）。"""
     import math
     n = math.sqrt(sum(x * x for x in v)) or 1.0
     return [x / n for x in v]
 
 
-def _cos(a: List[float], b: List[float]) -> float:
+def _cos_vec(a: List[float], b: List[float]) -> float:
+    """**embedding 列表**余弦。"""
     return sum(x * y for x, y in zip(a, b))
 
 
@@ -161,7 +163,7 @@ class EmbedReranker:
             return None
         if not v:
             return None
-        v = _norm(list(v))
+        v = _norm_vec(list(v))
         self._cache[fp] = v
         self._cache_dirty = True
         return v
@@ -192,7 +194,7 @@ class EmbedReranker:
             tv = self._embed(texts.get(rel) or rel)
             if tv is None:
                 return hits
-            scored.append((rel, _cos(qv, tv), base))
+            scored.append((rel, _cos_vec(qv, tv), base))
         if not scored:
             return hits
         mx = max(base for _r, _s, base in scored) or 1.0
@@ -229,7 +231,7 @@ def main() -> int:
         if not (v1 and v2):
             print("✗ 嵌入不可用")
             return 1
-        print(f"语义相似度: {_cos(v1, v2):.4f}")
+        print(f"语义相似度: {_cos_vec(v1, v2):.4f}")
         return 0
     return 1
 

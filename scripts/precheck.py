@@ -6,6 +6,7 @@
 # 供三平台安装器调用，也可独立运行：
 #     python3 scripts/precheck.py
 # ============================================================
+import argparse
 import os
 import json
 import re
@@ -214,13 +215,39 @@ def _install_python_windows() -> CheckResult:
 # ============================================================
 # Obsidian 检测
 # ============================================================
-def check_obsidian() -> CheckResult:
-    """检测 Obsidian，未装则自动安装。"""
+def _confirm(prompt: str) -> bool:
+    """交互式确认。非 TTY（cron/管道/CI）一律视为「否」——绝不静默安装第三方软件。"""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        return input(f"{prompt} [y/N] ").strip().lower() in ("y", "yes")
+    except (EOFError, KeyboardInterrupt):
+        return False
+
+
+def check_obsidian(allow_install: bool = True) -> CheckResult:
+    """检测 Obsidian；未装时**先征得同意**再下载安装。
+
+    以前未装就直接 `download_and_install()`：Windows 走 exe + `/S` 静默安装、
+    macOS 写 /Applications、Linux 下 AppImage —— 未告知用户就落盘并执行第三方二进制。
+    而且 `_download_utils.SHA256_HASHES` 的 8 个键全为 None → 校验形同虚设。
+    现在：`--no-obsidian` 直接跳过；交互终端要用户明确同意；非交互环境只提示不安装。
+    """
     found, path = setup_obsidian.detect()
     if found:
         return CheckResult("Obsidian", True, str(path), None, False, None)
 
-    print("  Obsidian 未安装，尝试自动安装……")
+    if not allow_install:
+        return CheckResult("Obsidian", False, None, None, False,
+                           f"未安装（已跳过自动安装；可手动装: {setup_obsidian.OBSIDIAN_DOWNLOAD_PAGE}）")
+
+    print("  Obsidian 未安装。自动安装需要从官网下载安装包，"
+          "并在 Windows/macOS 上静默执行安装。")
+    print(f"    下载页: {setup_obsidian.OBSIDIAN_DOWNLOAD_PAGE}")
+    if not _confirm("    是否现在自动下载并安装 Obsidian？"):
+        return CheckResult("Obsidian", False, None, None, False,
+                           "已跳过自动安装（Obsidian 可选，不影响 kb query）")
+
     ok, path = setup_obsidian.download_and_install()
     if ok and path:
         return CheckResult("Obsidian", True, str(path), None, True, None)
@@ -446,7 +473,7 @@ def _deploy_agent_plugin(agent_name: str, info: dict) -> bool:
 # ============================================================
 # 主入口
 # ============================================================
-def run() -> int:
+def run(install_obsidian: bool = True) -> int:
     print("=" * 50)
     print("  环境检查")
     print("=" * 50)
@@ -463,7 +490,7 @@ def run() -> int:
             return 1
 
     # 2. Obsidian（可选：缺失不阻断安装，kb query 不依赖它）
-    obs = check_obsidian()
+    obs = check_obsidian(allow_install=install_obsidian)
     if obs.found:
         tag = "（自动安装）" if obs.auto_installed else ""
         print(f"  ✅ Obsidian{tag}: {obs.path}")
@@ -489,5 +516,13 @@ def run() -> int:
     return 0
 
 
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description="kb-kit 环境自检")
+    ap.add_argument("--no-obsidian", action="store_true",
+                    help="不自动下载/安装 Obsidian（只提示下载页）")
+    a = ap.parse_args(argv)
+    return run(install_obsidian=not a.no_obsidian)
+
+
 if __name__ == "__main__":
-    sys.exit(run())
+    sys.exit(main())

@@ -34,7 +34,15 @@ class AgentJSONPlugin(PluginBase):
         root = params.get("root", self._ctx.vault_root)
         json_path = params.get("json_path") or params.get("json")
         dry_run = params.get("dry_run", False)
-        if not json_path:
-            print("❌ 缺少 --json-path 参数", file=sys.stderr)
+        if not json_path or json_path is True:
+            print("❌ 缺少 --json-path 参数（`--json` 是全局布尔旗标，本命令请用 --json-path）",
+                  file=sys.stderr)
             return 1
-        return ingest(root, Path(json_path), dry_run)
+        if not Path(json_path).exists():
+            # ingest() 对缺失源只打印一行并返回 0 → 命令「静默成功」（rc=0）。
+            print(f"❌ JSON 源不存在: {json_path}", file=sys.stderr)
+            return 1
+        n = ingest(root, Path(json_path), dry_run)
+        # ingest 返回的是**写入条数**，不能直接当进程退出码（成功写 5 条 → rc=5，
+        # 破坏 set -e / cron / `kb … && …`）。规范化为 0/1。
+        return 0 if not isinstance(n, int) or n >= 0 else 1

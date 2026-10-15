@@ -68,12 +68,18 @@ REPORT_NAMES = {"intake_triage.md", "link_suggestions.md", "recall_deck.md",
 NAV_FILES = {"_MOC.md", "_INDEX.md"}
 
 
-def collect_md(root):
-    """用 os.walk + EXCLUDE 遍历，避免 glob(**) 递归过深且无法排除目录。"""
+def collect_md(root, include_reports=False):
+    """用 os.walk + EXCLUDE 遍历，避免 glob(**) 递归过深且无法排除目录。
+
+    include_reports=True 时连 REPORT_NAMES 里的瞬时报表一起收集 —— 死链巡检需要它们：
+    导航文件（_MOC.md/_INDEX.md）最容易积累悬空链接。以前 REPORT_NAMES 在 collect_md
+    阶段就把 `_INDEX.md` 滤掉，导致 check_deadlinks 里那段 NAV_FILES 豁免永远不可达，
+    注释声称修过的「_INDEX 死链漏报」实际只对 _MOC.md 生效。
+    """
     for dp, dn, fn in os.walk(root):
         dn[:] = [d for d in dn if d not in EXCLUDE]
         for f in fn:
-            if f.endswith(".md") and f not in REPORT_NAMES:
+            if f.endswith(".md") and (include_reports or f not in REPORT_NAMES):
                 yield Path(dp) / f
 
 
@@ -187,20 +193,34 @@ def is_absent(raw_path, stems, titles, root):
     return Path(raw_path).stem not in stems
 
 
+def _strip_code_spans(text: str) -> str:
+    r"""去掉围栏代码块与行内 code span。
+
+    里面的 `[[...]]` 是**语法示例**（写文档讲双链时必然出现），不是真实链接。
+    以前的做法是往 NOISE_LINKS 里逐个补词（"双向链接"/"wikilink"/"..."），
+    于是每出现一种新示例就多一次误报 —— 实测模板库的 SOP 里 `` `[[名]]` ``
+    就被判成死链（1/25，越过 <2% 阈值）。
+    """
+    t = re.sub(r"```.*?```", "", text, flags=re.S)
+    t = re.sub(r"~~~.*?~~~", "", t, flags=re.S)
+    t = re.sub(r"`[^`\n]*`", "", t)          # 行内 code span
+    return t
+
+
 def check_deadlinks(root):
     dead, total = [], 0
     stems = cached_stems(root)
     titles = collect_titles(root)
     # 噪声链接: 文档里的示例/占位/锚点 + 会话 reply_to 元数据, 不是真死链
     NOISE_LINKS = ("reply_to:", "双向链接", "双链", "双链接", "wikilink", "…", "...", "$# -gt", "[[#", "[[...")
-    for fp in collect_md(root):
+    for fp in collect_md(root, include_reports=True):
         rel = str(fp.relative_to(root))
         _nav = Path(rel).name in NAV_FILES
         if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or "/kb-kit/" in rel or is_generated_report(rel)) and not _nav:
             continue  # 模板/嵌套仓/raw 来源/归档/生成产物：不参与死链统计（导航文件除外）
-        content = fp.read_text(encoding="utf-8", errors="replace")
+        content = _strip_code_spans(fp.read_text(encoding="utf-8", errors="replace"))
         for m in re.finditer(r"\[\[([^]]+)\]\]", content):
             raw = m.group(1)
             if raw.strip() == "link":                  # 文档里的 [[link]] 占位示例

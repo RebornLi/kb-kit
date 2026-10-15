@@ -35,10 +35,25 @@ from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
                        is_generated_report, record_lineage, fmt_value, content_fingerprint)
 
 PROPOSAL_DIR = Path("70-知识治理 Governance") / "_curate"
-LEDGER = Path(".kb") / "curate_ledger.jsonl"
-STATE = Path(".kb") / "curate_state.json"
-REVIEW = Path(".kb") / "curate_review.jsonl"
-PROPS = Path(".kb") / "curate_proposals.jsonl"   # 完整提案（含 canon 草稿），供 recheck/人工复核
+# 状态文件（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）。
+# 以前直下 .kb/ —— 与 StateStore 约定的 .kb/state/ 不一致，是 5 套路径约定之一。
+LEDGER = Path(".kb") / "state" / "curate_ledger.jsonl"
+STATE = Path(".kb") / "state" / "curate_state.json"
+REVIEW = Path(".kb") / "state" / "curate_review.jsonl"
+PROPS = Path(".kb") / "state" / "curate_proposals.jsonl"   # 完整提案（含 canon 草稿），供 recheck/人工复核
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {
+    "curate_ledger.jsonl": ".kb/curate_ledger.jsonl",
+    "curate_state.json": ".kb/curate_state.json",
+    "curate_review.jsonl": ".kb/curate_review.jsonl",
+    "curate_proposals.jsonl": ".kb/curate_proposals.jsonl",
+}
+
+
+def _read_only(name: str):
+    """读路径解析器：规范优先，回退旧位置（读不到返回 None）。"""
+    from state_manager import read_state_path
+    return lambda root: read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 # 信息守恒：正典 / 原文 长度比允许区间
 MIN_RATIO, MAX_RATIO = 0.12, 0.65
@@ -97,16 +112,18 @@ def _body_of(text: str) -> str:
 
 
 def _load_state(root: Path) -> Dict[str, Any]:
+    p = _read_only("curate_state.json")(root)
+    if p is None:
+        return {"done": {}, "batches": {}}
     try:
-        return json.loads((root / STATE).read_text(encoding="utf-8"))
+        return json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"done": {}, "batches": {}}
 
 
 def _save_state(root: Path, st: Dict[str, Any]) -> None:
-    p = root / STATE
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+    from kb_common import atomic_write_text
+    atomic_write_text(root / STATE, json.dumps(st, ensure_ascii=False, indent=2))
 
 
 def _ledger_append(root: Path, entry: Dict[str, Any]) -> None:
@@ -495,13 +512,17 @@ def _boilerplate_ratio(body: str) -> Dict[str, Any]:
     cnt = Counter(l for l in lines if len(l) <= 40)
     boiler = 0
     dup = 0
+    hits: List[str] = []          # 具体的废话/冗余行，供蒸馏关比对正典是否真的删掉了
     for l in lines:
         if is_filler_line(l) or IMPERATIVE_PAT.match(l):
             boiler += 1
+            hits.append(l)
         elif len(l) <= 60 and cnt[l] >= 3:
             dup += 1
+            hits.append(l)
     return {"boilerplate_ratio": round((boiler + dup) / len(lines), 3),
-            "boiler_lines": boiler, "dup_lines": dup, "lines": len(lines)}
+            "boiler_lines": boiler, "dup_lines": dup, "lines": len(lines),
+            "boiler_hits": hits}
 
 
 def load_schema(root: Path) -> Optional[dict]:
@@ -599,12 +620,19 @@ def verify_note(body: str, prop: Dict[str, Any], root: Path,
 
     # 蒸馏关（P1）：原文里的废话/冗余，被删掉多少？——直接对应"没有废话"这个目标
     bp = _boilerplate_ratio(body)
+    boiler_hits = bp.pop("boiler_hits", [])   # 只用于本关判定，不落账本
     checks.update({f"src_{k}": v for k, v in bp.items()})
     if bp["lines"] >= 8 and bp["boilerplate_ratio"] >= 0.05:
-        keep = 1.0 - bp["boilerplate_ratio"]
-        if keep > 1.0 - bp["boilerplate_ratio"] * 0.8:      # 几乎没删
+        # 原条件 `keep > 1.0 - ratio*0.8`（keep = 1 - ratio）可化简为 `r < 0.8r`，
+        # 对 r>0 恒假 → 本关从未触发。改为直接量「原文的废话行有多少仍出现在正典里」：
+        # 留存 >80% 即判定"几乎没删"（与注释语义一致）。
+        kept = [l for l in boiler_hits if l in canon]
+        checks["boiler_total"] = len(boiler_hits)
+        checks["boiler_kept"] = len(kept)
+        if boiler_hits and len(kept) / len(boiler_hits) > 0.8:
             issues.append(f"⚠️废话未清：原文 {bp['boiler_lines']} 行寒暄/指令语 + "
-                          f"{bp['dup_lines']} 行重复（占 {bp['boilerplate_ratio']:.0%}），正典应把这些删掉")
+                          f"{bp['dup_lines']} 行重复（占 {bp['boilerplate_ratio']:.0%}），"
+                          f"其中 {len(kept)}/{len(boiler_hits)} 行仍留在正典里")
 
     # 覆盖关（P1）：用"原文关键标识符被正典覆盖的比例"代替"字符数守恒"。
     #   字符守恒 ≠ 信息守恒；标识符（命令/路径/端口/版本/数字/报错串）才是真正不能丢的东西。
@@ -754,9 +782,14 @@ def curate_one(root: Path, rel: str, llm: LLM, apply: bool = False) -> Dict[str,
     rec["verdict"] = verdict
     rec["proposal"] = prop
     if verdict in ("noise", "raw-only"):
-        # 不生成正典；把判定写回 frontmatter，让索引降级真正生效
+        # 不生成正典；把判定写回 frontmatter，让索引降级真正生效。
+        # 写回必须过 apply 门控（write-side-protocol 约定 1「预览优先」）：
+        # 以前无条件写，`kb curate run`（名义只出提案）也会改笔记、且无 git 回滚锚。
         rec["ok"] = True
-        rec["action"] = mark_evidence_verdict(root, rel, verdict, rec)
+        if apply:
+            rec["action"] = mark_evidence_verdict(root, rel, verdict, rec)
+        else:
+            rec["action"] = f"propose:{verdict}"
         return rec
     verified = verify_note(body, prop, root, sid)
     verified["checks"]["orig_chars"] = len(body)
@@ -799,11 +832,17 @@ def l4_frozen(root: Path) -> bool:
     冻结 = 真人连续判错达阈值 → 停止**自动写回**，退化为只出提案（人工在环）。
     读不到配置/损坏 → 不冻结（best-effort，绝不因此卡住流水线）。
     """
-    for name in (".kb_l4_config.json", ".kb/state/l4_config.json"):
+    from state_manager import read_state_path
+    # kb_l4 的冻结配置：规范位置 .kb/state/kb_l4_config.json，旧位置回退
+    _cfg = read_state_path(root, "kb_l4_config.json", legacy=(".kb_l4_config.json",))
+    if _cfg is not None:
         try:
-            d = json.loads((root / name).read_text(encoding="utf-8"))
+            d = json.loads(_cfg.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
-            continue
+            d = {}
+    else:
+        d = {}
+    if d:
         frz = (d.get("frozen") or {})
         if isinstance(frz, dict):
             return bool(frz.get("lc"))
@@ -858,7 +897,10 @@ def mark_evidence_verdict(root: Path, rel: str, verdict: str, rec: Dict[str, Any
 
 
 def _review_append(root: Path, entry: Dict[str, Any]) -> None:
-    """人工裁决队列（jsonl）：低置信/高价值批次等人拍板，可与 kb_l4 judge 对接。"""
+    """人工裁决队列（jsonl）：低置信/高价值批次等人拍板，可与 kb_l4 judge 对接。
+
+    这里是**写**，必须用规范写路径 —— 只读解析器在文件不存在时会返回 None。
+    """
     p = root / REVIEW
     p.parent.mkdir(parents=True, exist_ok=True)
     with open(p, "a", encoding="utf-8") as f:
@@ -867,8 +909,8 @@ def _review_append(root: Path, entry: Dict[str, Any]) -> None:
 
 def cmd_review(root: Path, limit: int, as_json: bool) -> int:
     """列出待人工裁决的结晶提案（低置信度）。人看完用 kb curate run 手动补跑或直接改笔记。"""
-    p = root / REVIEW
-    if not p.exists():
+    p = _read_only("curate_review.jsonl")(root)
+    if p is None or not p.exists():
         print("✅ 无待裁决提案（人工队列为空）")
         return 0
     rows = []
@@ -1011,10 +1053,15 @@ def _write_proposals(root: Path, batch_id: str, recs: List[Dict[str, Any]]) -> N
 
 
 def cmd_verify(root: Path, batch: Optional[str], pending: bool) -> int:
-    """重新校验账本里的提案（离线，不调模型）。"""
-    led = root / LEDGER
-    if not led.exists():
-        print("（无账本：先跑 kb curate run）")
+    """重新校验提案（离线，不调模型）。
+
+    读**旁路完整提案**（PROPS）而不是精简账本（LEDGER）：账本在 `_ledger_append` 前
+    已被剥掉 `proposal` 字段（cmd_run 里 `{k: v for k, v in rec.items() if k != "proposal"}`），
+    所以以前从账本读、再要求 `r.get("proposal")` → 恒为空 → 本命令永远输出「无提案记录」。
+    """
+    led = _read_only("curate_proposals.jsonl")(root)
+    if led is None or not led.exists():
+        print("（无提案记录：先跑 kb curate run）")
         return 0
     rows = []
     for line in led.read_text(encoding="utf-8").splitlines():
@@ -1065,7 +1112,7 @@ def cmd_report(root: Path, as_json: bool) -> int:
             n_raw += 1
         elif layer == "index":
             n_index += 1
-    led = root / LEDGER
+    led = _read_only("curate_ledger.jsonl")(root)
     n_runs = n_ok = n_drop = 0
     if led.exists():
         for line in led.read_text(encoding="utf-8").splitlines():
@@ -1114,8 +1161,8 @@ def cmd_recheck(root: Path, apply_pass: bool, export: bool) -> int:
     把仍未达标的导成 `_curate/REVIEW-NEEDED.md` 人工清单（附模型草稿与未过原因）。
     只对最终动作是 propose / review 的笔记动手（canon-written / skip:* 不动）。
     """
-    src = root / PROPS
-    if not src.exists():
+    src = _read_only("curate_proposals.jsonl")(root)
+    if src is None or not src.exists():
         # 兼容：早期只有账本（proposal 已被剥离）；提示用 _curate/*.md 人工复核
         print("（无完整提案旁路 .kb/curate_proposals.jsonl；历史提案请看 "
               "70-知识治理 Governance/_curate/b*.md，本次运行起会自动记录）")

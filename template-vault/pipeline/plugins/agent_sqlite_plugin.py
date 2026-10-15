@@ -34,7 +34,12 @@ class AgentSQLitePlugin(PluginBase):
         root = params.get("root", self._ctx.vault_root)
         data_dir = params.get("data_dir")
         dry_run = params.get("dry_run", False)
-        if not data_dir:
+        if not data_dir or data_dir is True:
             print("❌ 缺少 --data-dir 参数", file=sys.stderr)
             return 1
-        return ingest(root, Path(data_dir), dry_run)
+        if not Path(data_dir).exists():
+            print(f"❌ SQLite 源目录不存在: {data_dir}", file=sys.stderr)
+            return 1
+        n = ingest(root, Path(data_dir), dry_run)
+        # ingest 返回写入条数，不能当退出码（成功写 5 条 → rc=5 会破坏 set -e/cron）
+        return 0 if not isinstance(n, int) or n >= 0 else 1

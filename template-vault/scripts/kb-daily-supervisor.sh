@@ -155,8 +155,10 @@ else
 fi
 
 # 3c 索引新鲜度
-if [ -f "$VAULT/vector index/df_idf.json" ]; then
-  age_h=$(( ( $(date +%s) - $(stat -c %Y "$VAULT/vector index/df_idf.json") ) / 3600 ))
+# 用 glob 而不是写死 .json：索引主格式 v6 起是 df_idf.pkl（旧库仍可能是 .json）
+_IDX=$(ls -1 "$VAULT/vector index/df_idf."* 2>/dev/null | head -1)
+if [ -n "$_IDX" ] && [ -f "$_IDX" ]; then
+  age_h=$(( ( $(date +%s) - $(stat -c %Y "$_IDX") ) / 3600 ))
   if [ "$age_h" -gt 48 ]; then
     echo "  ⚠️ 向量索引已 ${age_h}h 未更新"
     note_problem "⚠️" "向量索引 ${age_h}h 未更新"

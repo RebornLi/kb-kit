@@ -8,6 +8,7 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class AuditPlugin(SubprocessPlugin):
     SCRIPT_NAME = "kb_audit.py"
     ACTION_MAP = {"scan": "scan", "fix": "fix", "log": "log"}
+    IN_PROCESS_ACTIONS = {"scan", "log"}     # fix 是写，走 subprocess
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

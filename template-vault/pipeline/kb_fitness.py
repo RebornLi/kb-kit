@@ -115,8 +115,24 @@ def fitness(root):
     cz, n_pairs = contradiction_component(root)
     qs_rate, n_queries = query_success_component(root)
 
-    fitness = round(W_SOURCE * src_div + W_FEEDBACK * fb_component + W_CONTRAD * cz
-                    + W_QUERY * qs_rate, 4)
+    # 未测量的分量**不参与加权**，有效权重重新归一化。
+    # 以前「0 矛盾 → 1.0」和「无查询数据 → 中性 1.0」会白送 W_CONTRAD+W_QUERY = 0.44，
+    # 于是空库 fitness ≈ 0.46 —— 「不测量」永远优于「测量后被发现有问题」（Goodhart）。
+    parts = [
+        ("source_diversity", W_SOURCE, src_div, bool(n_raw)),
+        ("external_feedback", W_FEEDBACK, fb_component, bool(n_fed)),
+        # 有编译笔记时，「0 对矛盾」是一次真实测量（好事）；库空时则无从测量。
+        ("contradiction", W_CONTRAD, cz, bool(m.get("total"))),
+        ("query_success", W_QUERY, qs_rate, bool(n_queries)),
+    ]
+    measured = [p for p in parts if p[3]]
+    w_sum = sum(p[1] for p in measured)
+    excluded = [p[0] for p in parts if not p[3]]
+    if w_sum <= 0:
+        return {"valid": False, "fitness": None,
+                "note": "四项外部锚（raw 外部源 / 真实反馈 / 矛盾 / 查询事件）都无数据 → fitness 不适用"
+                        "（不再用「没数据=满分」凑出一个数字）"}
+    fitness = round(sum(w * v for _n, w, v, _ok in measured) / w_sum, 4)
     return {
         "valid": True,
         "fitness": fitness,
@@ -129,6 +145,8 @@ def fitness(root):
             "query_success_component": qs_rate,
         },
         "w": {"source": W_SOURCE, "feedback": W_FEEDBACK, "contradiction": W_CONTRAD, "query": W_QUERY},
+        "w_effective_sum": round(w_sum, 4),
+        "components_excluded": excluded,   # 这些分量无数据，已被排除并重新归一化
         "n_raw_sources": n_raw,
         "raw_domain_dist": dom_dist,
         "n_feedbacked_notes": n_fed,
@@ -136,7 +154,8 @@ def fitness(root):
         "n_queries": n_queries,
         "compiled_total": m["total"],
         "note": ("fitness 锚定在真实外部接地（多样外部源 + 真实反馈 + 少矛盾 + 高查询成功率），"
-                 "T1/T2 的自编辑刷不动它，故 T3 不再优化自抬数字。"),
+                 "T1/T2 的自编辑刷不动它，故 T3 不再优化自抬数字。"
+                 "无数据的分量被排除并重新归一化权重，不再白送满分。"),
     }
 
 
@@ -153,6 +172,9 @@ def main():
             print("⚠️ " + f["note"]); return 1
         c = f["components"]
         print(f"💪 fitness = {f['fitness']:.3f}  (0-1，外部锚定)")
+        if f.get("components_excluded"):
+            print(f"   ⚠️ 无数据、已排除并重新归一化的分量: {', '.join(f['components_excluded'])}"
+                  f"（有效权重和 {f['w_effective_sum']}）")
         print(f"   - 来源多样性(raw领域熵)      {c['source_diversity']:.3f}  "
               f"({f['n_raw_sources']} 外部源, {f['raw_domain_dist']})")
         print(f"   - 外部反馈率                 {c['external_feedback_rate']:.3f}  "

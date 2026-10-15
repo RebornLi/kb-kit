@@ -31,6 +31,8 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
+from kb_common import CJK   # 中文字正则：全仓唯一定义（原先 9 份逐字相同的副本）
+
 CLAIMS_FILE = "claims.json"           # 存于 .kb/state/claims.json（StateStore）
 CHAT_MODEL = os.environ.get("ORNITH_CHAT_MODEL", "ornith1.5-35b")  # 与 rag.py chat 同源
 _MAX_PER_NOTE = 5                      # 每条笔记最多抽几条声明
@@ -41,7 +43,6 @@ _SIM_THRESHOLD = 0.55                  # embedding 余弦匹配阈值
 _JACCARD_MIN = 0.12                    # 签名 Jaccard 预过滤下限（省 embedding 调用）
 _RAW_TEXT_CAP = 2000                   # 匹配用 raw 文本截断长度
 
-_CN = re.compile(r"[\u4e00-\u9fff]")
 _LAT = re.compile(r"[A-Za-z0-9]+")
 _EMBED_CACHE = {}
 
@@ -95,7 +96,14 @@ def _extract_claims(text):
             "新数据检验的断言（事实、因果、预测、政策主张）。"
             "跳过：纯模板/元数据/占位符、纯主观偏好、无法检验的模糊词。"
             "返回 JSON 数组，每项 {claim:简短单句断言, type:fact|prediction|policy|relation, "
-            "confidence:0-1数字}。至少1条、最多5条，不要多余文字。"},
+            "confidence:0-1数字, "
+            "subject:断言的主语实体(如'vLLM'/'知识库索引'), "
+            "relation:该断言讲的属性/关系(如'端口'/'默认层'/'是否支持'), "
+            "value:取值(如'8000'/'canon'), "
+            "temporal_state:past|current|transient}。"
+            "subject/relation/value 用于把断言对齐到**槽位**——两个断言只有落在同一槽位、"
+            "且时间区间相交、取值不同，才算**矛盾**；时间区间不相交则是**时序更新**（不是矛盾）。"
+            "至少1条、最多5条，不要多余文字。"},
         {"role": "user", "content": f"笔记正文：\n{text[:2500]}"},
     ]
     content, _ = _chat(prompt)
@@ -111,8 +119,69 @@ def _extract_claims(text):
             if len(c) >= 6:
                 out.append({"claim": c,
                             "type": item.get("type", "fact"),
-                            "confidence": round(float(_num(item.get("confidence")) or 0.7), 2)})
+                            "confidence": round(float(_num(item.get("confidence")) or 0.7), 2),
+                            "subject": str(item.get("subject") or "").strip()[:60],
+                            "relation": str(item.get("relation") or "").strip()[:60],
+                            "value": str(item.get("value") or "").strip()[:120],
+                            "temporal_state": _norm_ts(item.get("temporal_state"))})
     return out[:_MAX_PER_NOTE]
+
+
+_TS = ("past", "current", "transient")
+
+
+def _norm_ts(v) -> str:
+    s = str(v or "").strip().lower()
+    return s if s in _TS else "current"
+
+
+def _slot_key(c: Dict[str, Any]) -> Optional[tuple]:
+    """槽位键 = (归一化主语, 归一化关系)。缺任一项 → None（不参与槽位比对）。"""
+    import re as _re
+    def n(x):
+        return _re.sub(r"[\s\W_]+", "", str(x or "").lower())
+    s, r = n(c.get("subject")), n(c.get("relation"))
+    return (s, r) if s and r else None
+
+
+def _interval(c: Dict[str, Any]) -> tuple:
+    """该断言的有效区间 (valid_from, valid_to)；缺失用 note 时间兜底，空串=开区间。"""
+    return (str(c.get("valid_from") or ""), str(c.get("valid_to") or ""))
+
+
+def _overlap(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """两个时间区间是否相交（空串视为 ±无穷）。字符串 ISO 日期可直接比较。"""
+    a0, a1 = _interval(a); b0, b1 = _interval(b)
+    if a1 and b0 and a1 < b0:
+        return False
+    if b1 and a0 and b1 < a0:
+        return False
+    return True
+
+
+def classify_pair(a: Dict[str, Any], b: Dict[str, Any]) -> str:
+    """判定两条 claim 的关系 —— **这是"矛盾"与"时序更新"的分水岭**。
+
+    返回 "unrelated" | "dup" | "update" | "conflict"：
+      · 槽位不同（主语/关系不一致）→ unrelated（各说各的，不是矛盾）
+      · 槽位相同 + 时间区间**不相交** + 取值不同 → **update**（事实随时间变了，不是矛盾）
+      · 槽位相同 + 时间区间**相交** + 取值相同 → dup
+      · 槽位相同 + 时间区间相交 + 取值不同 → **conflict**（同一时刻两个说法打架）
+
+    为什么必须分开：2024–2026 的冲突检测研究反复指出，把「时序更新」误判成「矛盾」会导致
+    系统去"调和"一个并不存在的冲突（改掉本来正确的新知识）。kb_claim 此前只有
+    {claim,type,confidence}，**没有槽位也没有时间**，因此结构上无法做这个区分。
+    """
+    import re as _re
+    ka, kb = _slot_key(a), _slot_key(b)
+    if not ka or not kb or ka != kb:
+        return "unrelated"
+    def _n(x):
+        return _re.sub(r"[\s\W_]+", "", str(x or "").lower())
+    same_value = bool(a.get("value")) and _n(a.get("value")) == _n(b.get("value"))
+    if not _overlap(a, b):
+        return "dup" if same_value else "update"
+    return "dup" if same_value else "conflict"
 
 
 def _judge(claim_text, raw_text):
@@ -140,7 +209,7 @@ def _judge(claim_text, raw_text):
 
 # ── 签名（廉价预过滤：中文 bigram + 英文词，归一化 Jaccard）──
 def _signature(text):
-    toks = _CN.findall(text or "") + _LAT.findall(text or "")
+    toks = CJK.findall(text or "") + _LAT.findall(text or "")
     return {t.lower() for t in toks}
 
 
@@ -166,12 +235,27 @@ def _num(v, default=0.0):
 #   本地版返回 None（调用方据此跳过日期约束），parse_date_safe 永不返回 None；
 #   本地版严格校验 v[4]=="-" and v[7]=="-"，parse_date 更宽松（正则提取）。
 def _parse_d(v):
+    """日期解析。**委托 kb_common.parse_date**（实测 12 组抽样逐例相同）。"""
     if isinstance(v, str) and len(v) >= 10 and v[4] == "-" and v[7] == "-":
         try:
             return datetime.strptime(v[:10], "%Y-%m-%d")
         except ValueError:
             return None
     return None
+
+
+def _source_date(fm: Dict[str, Any], default: str) -> str:
+    """声明的 `extracted_at` 应取**来源材料的时间**，而不是抽取当天。
+
+    validate 的硬约束是 `raw_date > claim_date`（用后来的真实数据检验过去的声明）。
+    以前一律写「今天」→ 除当日新 raw 外全部配对落空 → verified_ratio/falsified_ratio
+    长期为 None → 适应度的「真·预测误差」分量失效。
+    """
+    for k in ("event_at", "created", "updated"):
+        d = _parse_d(str(fm.get(k) or ""))
+        if d:
+            return d.date().isoformat()
+    return default
 
 
 def _store(root):
@@ -269,8 +353,14 @@ def sync_claims(root: Union[str, Path], max_per_note: int = _MAX_PER_NOTE,
                 "claim_id": cid, "note_rel": n["rel"],
                 "claim": c["claim"], "type": c.get("type", "fact"),
                 "confidence": c.get("confidence", 0.7),
+                # 槽位与时间：让"矛盾 vs 时序更新"可判定（见 classify_pair）
+                "subject": c.get("subject", ""), "relation": c.get("relation", ""),
+                "value": c.get("value", ""), "temporal_state": c.get("temporal_state", "current"),
+                "valid_from": str((n.get("fm") or {}).get("valid_from") or
+                                  (n.get("fm") or {}).get("created") or "")[:10],
+                "valid_to": str((n.get("fm") or {}).get("valid_to") or "")[:10],
                 "signature": sorted(_signature(c["claim"])),
-                "extracted_at": today,
+                "extracted_at": _source_date(n.get("fm") or {}, today),
                 "verdict": None, "verdict_at": None, "evidence": None, "history": [],
             })
     existing_ids |= {c["claim_id"] for c in new_claims}

@@ -24,8 +24,8 @@ console.log('# config');
   const c = loadConfig({}); // env-less → auto-detected defaults
   ok(c.kbRoot !== '' && c.kbRoot.length > 0, `default kbRoot auto-detected (${c.kbRoot})`);
   ok(c.rag === `${c.kbRoot}/pipeline/rag.py`, 'default rag points at vault pipeline/rag.py');
-  ok(c.topN === 3 && c.minScore === 0.25 && c.maxBytes === 700, 'default numeric knobs');
-  ok(c.snippetMax === 40, 'default snippetMax = 40');
+  ok(c.topN === 3 && c.minScore === 0.25 && c.maxBytes === 900, 'default numeric knobs');
+  ok(c.snippetMax === 140, 'default snippetMax = 140');
   ok(c.enabled === true, 'enabled by default');
   ok(c.dedupe === true, 'dedupe on by default');
   ok(c.excludeRe instanceof RegExp, 'excludeRe compiles');

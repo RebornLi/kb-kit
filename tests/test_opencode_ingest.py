@@ -75,13 +75,17 @@ class OpenCodeIngestTest(unittest.TestCase):
         n = mio.ingest(self.vault, self.db, dry_run=False)
         self.assertEqual(n, 1)
         self.assertIn(MARKER, self._haystack())
-        self.assertTrue((self.vault / ".memory_ingest_state.json").exists())
+        # 状态统一落在 .kb/state/（曾经是根目录 dotfile，已迁移）
+        self.assertTrue((self.vault / ".kb" / "state" / "memory_ingest_state.json").exists(),
+                        "摄取状态应写入 .kb/state/（统一约定）")
+        self.assertFalse((self.vault / ".memory_ingest_state.json").exists(),
+                         "不应再往根目录写旧位置")
 
     def test_dry_run_does_not_write(self):
         n = mio.ingest(self.vault, self.db, dry_run=True)
         self.assertEqual(n, 1)
         self.assertNotIn(MARKER, self._haystack())
-        self.assertFalse((self.vault / ".memory_ingest_state.json").exists())
+        self.assertFalse((self.vault / ".kb" / "state" / "memory_ingest_state.json").exists())
 
     def test_detect_opencode(self):
         os.environ["KB_OPENCODE_DB"] = str(self.db)

@@ -21,12 +21,62 @@ from kb_constants import PERF_WARN_THRESHOLD
 load = load_note  # 兼容本模块原有 load(p) 调用
 
 
+# ── 建链的多信号闸（2025–2026 实证：误链代价远大于漏链）──────────────
+#   文献（KG Refinement, doi:10.3233/SW-160218）：噪声边沿图传播放大，
+#   而漏一条边几乎零成本 —— 个人库里"该连没连"只是少一次发现，
+#   "连错了"会让图遍历、MOC、检索都带上错误关联。
+#   所以要求 **≥2 个独立信号，且至少一个"结构性"信号**（标签/同源/共引）。
+#   单靠词面或向量相似度建链，是"主题相近"而非"该互链"。
+LINK_MIN_SIGNALS = 2
+LINK_STRUCTURAL = {"tag", "source", "co-ref"}
+
+
+def link_signals(a: str, b: str, notes: Dict[str, Dict[str, Any]]) -> List[str]:
+    """枚举两条笔记之间的**独立信号**。
+
+    信号设计对应 2024–2026 建链研究的几类可靠证据：
+      · tag      —— 受控标签交集（你自己的词汇，比词面重叠强）
+      · source   —— 同源（共享 source_ref / 同一原始来源）：最强的非语义信号
+      · co-ref   —— 共引（都指向同一批笔记）：Adamic-Adar 类共现信号
+      · lexical  —— 词面向量相似度（现有 threshold 判据）
+      · neighbor —— 同域（弱，只作补充计数）
+    """
+    sig: List[str] = []
+    na, nb = notes.get(a) or {}, notes.get(b) or {}
+    if (na.get("tags") or set()) & (nb.get("tags") or set()):
+        sig.append("tag")
+    sa, sb = na.get("source") or "", nb.get("source") or ""
+    if sa and sa == sb:
+        sig.append("source")
+    if (na.get("out") or set()) & (nb.get("out") or set()):
+        sig.append("co-ref")
+    sig.append("lexical")                      # 调用方已用 threshold 过滤
+    if na.get("domain") and na.get("domain") == nb.get("domain"):
+        sig.append("neighbor")
+    return sig
+
+
+def passes_link_gate(signals: List[str]) -> bool:
+    """多信号闸：≥LINK_MIN_SIGNALS 个信号，且至少一个结构性信号。"""
+    if len(signals) < LINK_MIN_SIGNALS:
+        return False
+    return any(s in LINK_STRUCTURAL for s in signals)
+
+
 def outbound(text: str) -> Set[str]:
+    """已有出链的**笔记名集合（stem，无 .md）**。
+
+    以前返回 `basename` 但保留扩展名（"x.md"），而调用方用 `Path(t).stem`（"x"）比对，
+    两边永远不相等 → 「排除已存在的出链」实际是失效的（会重复建议用户已有的链接）。
+    """
     out = set()
     for ln in re.findall(r"\[\[([^\]]+)\]\]", text):
         tgt = ln.split("#")[0].split("|")[0].strip()
         if tgt:
-            out.add(tgt.split("/")[-1].split(os.sep)[-1])
+            name = tgt.split("/")[-1].split(os.sep)[-1]
+            if name.lower().endswith(".md"):
+                name = name[:-3]
+            out.add(name)
     return out
 
 
@@ -50,7 +100,11 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
                                    (fm.get("tags", "").split(",") if isinstance(fm.get("tags"), str)
                                     else fm.get("tags", [])) if t.strip())
         vecs[rel] = norm(Counter(tokenize(txt)))
+        _sref = fm.get("source_ref") or fm.get("source") or ""
+        if isinstance(_sref, list):
+            _sref = ",".join(str(x) for x in _sref)
         notes[rel] = {"fm": fm, "text": text, "domain": fm.get("domain", "-"),
+                      "source": str(_sref).split(",")[0].strip()[:120],
                       "tags": set(t.strip() for t in
                                   (fm.get("tags", "").split(",") if isinstance(fm.get("tags"), str)
                                    else fm.get("tags", [])) if t.strip()),
@@ -76,7 +130,10 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
             if sc < threshold:
                 continue
             shared = notes[a]["tags"] & notes[b]["tags"]
-            rec = {"score": round(sc, 3), "from": a, "to": b,
+            sigs = link_signals(a, b, notes)
+            if not passes_link_gate(sigs):
+                continue                        # 多信号闸（见文件头说明）
+            rec = {"score": round(sc, 3), "from": a, "to": b, "signals": sigs,
                    "shared_tags": sorted(shared), "cross": False, "kind": "concept"}
             recs.append(rec)
 
@@ -97,7 +154,12 @@ def suggestions(root: Union[str, Path], threshold: float) -> Tuple[List[str], Di
                 if sc < threshold:
                     continue
                 shared = notes[a]["tags"] & notes[b]["tags"]
-                rec = {"score": round(sc, 3), "from": a, "to": b,
+                sigs = link_signals(a, b, notes)
+                # 跨域对是探索性的（发现"跨界联系"），闸门放宽一档：
+                # 只要带任一结构性信号即可（不强制凑满 2 个信号）。
+                if not any(s in LINK_STRUCTURAL for s in sigs):
+                    continue
+                rec = {"score": round(sc, 3), "from": a, "to": b, "signals": sigs,
                        "shared_tags": sorted(shared), "cross": True, "kind": "cross"}
                 recs.append(rec)
                 cross.append(rec)
@@ -177,10 +239,10 @@ def apply_links(root: Union[str, Path], threshold: float, limit: int,
         parts = ["\n## 🔗 智能建议链接\n"]
         if cross_want:
             parts.append("\n### 🌐 跨域（洞察来源）\n")
-            parts += [f"- [[{t}]]\n" for t in cross_want]
+            parts += [f"- [[{Path(t).stem}]]\n" for t in cross_want]
         if concept_want:
             parts.append("\n### 🧩 同域（概念关联）\n")
-            parts += [f"- [[{t}]]\n" for t in concept_want]
+            parts += [f"- [[{Path(t).stem}]]\n" for t in concept_want]
         block = "".join(parts)
         if dry_run:
             total = len(cross_want) + len(concept_want)

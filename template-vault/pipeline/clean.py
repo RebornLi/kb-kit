@@ -37,10 +37,12 @@ from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, iter_notes,
                        add_alias_text, record_lineage,
                        is_index_stub, is_pointer_page, is_raw_path)
 from kb_common import parse_date_str as parse_date
+from kb_common import CJK   # 中文字正则：全仓唯一定义（原先 9 份逐字相同的副本）
 from kb_common import load_note_full as load
 
 BODY_LIMIT = 2000
-ARCHIVE_DAYS = 90  # SOP-02 流转归档：updated 超过此天数且非 archived/legacy → 建议 retire
+# 统一从 kb_constants 取（此前本地又定义了一份 90 —— 两处一起改才不会分叉）
+from kb_constants import ARCHIVE_DAYS  # noqa: E402  （SOP-02 流转归档阈值）
 STATUS = {"draft", "active", "stable", "legacy", "archived"}
 REQUIRED = ["tags", "status", "domain", "created", "updated",
             "importance", "kb_target", "kb_action", "kb_summary"]
@@ -113,7 +115,6 @@ def route_chunk_strategy(body: str) -> str:
 
 
 FM_RE = re.compile(r"^---\s*$", re.M)
-CJK = re.compile(r"[\u4e00-\u9fff]")
 LAT = re.compile(r"[A-Za-z0-9]+")
 
 
@@ -170,6 +171,18 @@ def _stage_paths(root: Union[str, Path], paths: List[str]) -> List[str]:
 # kb_common（Task 1 解耦），此处通过 re-export 保持向后兼容。
 
 
+def _keep_or_infer_summary(fm, body: str) -> str:
+    """已有有效 kb_summary 就保留，缺失或仍是字面占位符才重算。
+
+    以前无条件 `infer_summary(body)`，会抹掉 curate / kb_retriage / memory_sync /
+    memory_ingest 写进去的摘要（那些摘要信息量更高）。
+    """
+    cur = str(fm.get("kb_summary") or "").strip()
+    if cur and "{name}" not in cur and "{i}" not in cur:
+        return cur
+    return infer_summary(body)
+
+
 def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
     rel = str(p.relative_to(root))
     folder = rel.split(os.sep)[0]
@@ -190,7 +203,9 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
     status = infer_status(rel, fm, mtime)
     importance = _parse_importance(fm.get("importance"))
     is_archive = ("归档" in rel) or ("trash" in rel.lower())
-    extras = {k: v for k, v in fm.items() if k not in REQUIRED and v is not None}
+    # 空值键（`url:` / `note:` 这类有意占位）必须原样保留：以前用 `v is not None` 过滤，
+    # 会把它们永久删除（P0-2）。渲染时 None 写成 `key:`，不写成 `key: None`。
+    extras = {k: v for k, v in fm.items() if k not in REQUIRED}
     fm2 = {
         "tags": list_of(fm) or infer_tags(folder),
         "status": status, "domain": domain,
@@ -198,7 +213,7 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
         "importance": round(float(importance), 2),
         "kb_target": rel.split(os.sep)[0],
         "kb_action": "retire" if is_archive else "new",
-        "kb_summary": infer_summary(body),
+        "kb_summary": _keep_or_infer_summary(fm, body),
     }
     # P0：分块索引页显式打标（无正文、只指向子块）→ RAG 不入索引，防"空壳顶替真内容"
     if is_index_stub(fm, body):
@@ -208,9 +223,10 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
     if "{name}" in str(fm2["kb_summary"]) or "{i}" in str(fm2["kb_summary"]):
         fm2["kb_summary"] = f"{title}（分块 {len(body.replace(chr(10), ''))} 字）"
     for k, v in extras.items():
-        if k not in REQUIRED and k not in fm2 and v is not None:
+        if k not in REQUIRED and k not in fm2:
             fm2[k] = v
-    new = "---\n" + "\n".join(f"{k}: {fmt_value(v)}" for k, v in fm2.items()) + "\n---\n\n" + body.lstrip("\n")
+    fm_lines = [f"{k}:" if v is None else f"{k}: {fmt_value(v)}" for k, v in fm2.items()]
+    new = "---\n" + "\n".join(fm_lines) + "\n---\n\n" + body.lstrip("\n")
     return rel, new
 
 
@@ -218,6 +234,9 @@ def do_clean(root: Union[str, Path], dry: bool) -> Tuple[List[str], int, Counter
     changed, dup_archived, stats = [], 0, Counter()
     touched = []  # 所有被改/新建/删除的文件 rel，用于精确 git add
     for p in iter_notes(root):
+        rel = str(p.relative_to(root))
+        if _is_raw_rel(rel):
+            continue  # raw/ 是不可变证据层：原文保真，清洗只读不写（write-side-protocol §4）
         rel, new = clean_note(root, p)
         cur = p.read_text(encoding="utf-8")
         if new != cur:
@@ -239,8 +258,14 @@ def do_clean(root: Union[str, Path], dry: bool) -> Tuple[List[str], int, Counter
     for group in idx.values():
         if len(group) > 1:
             group.sort(key=lambda pp: pp.stat().st_mtime)
-            keep, *dups = group
+            *dups, keep = group   # mtime 升序 → 末尾是最新；保留最新，旧者归档（与下方注释一致）
             for dp in dups:
+                # dry 守卫：这一段以前**完全不看 dry**，会照写归档文件、改保留笔记的别名、
+                # 并 unlink() 删掉重复件。也就是说 `do_clean(root, dry=True)` 其实会写盘 ——
+                # 一旦有人把它接到 dry-run 子命令，只读命令就变成破坏性命令了。
+                if dry:
+                    dup_archived += 1
+                    continue
                 trash_dir.mkdir(parents=True, exist_ok=True)
                 target = trash_dir / f"{dp.stem}-dup-{datetime.date.today()}.md"
                 i = 1
@@ -592,8 +617,18 @@ def main() -> int:
                 print("   下一步：kb rag index（重建索引）")
         return 0
     if args.cmd == "dry-run":
-        print("🔍 dry-run 将执行：给每条笔记补全 frontmatter + 归一 域/状态/标签 + 精确去重归档。")
-        print("   建议先 `--report` 查看范围，再 `--apply`，最后可视情况 `--chunk`。")
+        # 以前这里只是两行固定文案（协议约定 2 要求「预览必须可数、可指认」）。
+        # 现在真算一遍：do_clean(dry=True) 已加守卫，只统计不写盘。
+        changed, dup_archived, _stats, _touched = do_clean(args.root, dry=True)
+        print(f"🔍 dry-run：拟改 {len(changed)} 条 + 去重归档 {dup_archived} 条"
+              f"（未写入任何文件）")
+        for rel in changed[:10]:
+            print(f"   · {rel}")
+        if len(changed) > 10:
+            print(f"   … 其余 {len(changed) - 10} 条")
+        if dup_archived:
+            print(f"   · 去重归档 {dup_archived} 条 → 90-归档 Archive/_trash/")
+        print("   应用：kb clean apply        然后：kb rag index（重建索引）")
         return 0
     if args.cmd == "report":
         return report(args.root)

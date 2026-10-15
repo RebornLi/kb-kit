@@ -8,6 +8,7 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class RecallPlugin(SubprocessPlugin):
     SCRIPT_NAME = "recall_schedule.py"
     ACTION_MAP = {"deck": "deck", "mark": "mark", "status": "status"}
+    IN_PROCESS_ACTIONS = {"deck", "status"}   # mark 是写，走 subprocess
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

@@ -19,8 +19,13 @@ export function buildInjectedText(hits, cfg) {
   // prefix + opening fence: the fence wraps the hit lines so the model treats
   // them as external reference data (and does not execute any instructions
   // that might appear inside a hit snippet).
+  const head = cfg.prefix + '\n```\n';
+  const tail = '```\n（以上为知识库相关片段，如与本轮问题无关请忽略）';
+  // ⚠️ 字节封顶必须把 head/tail 也算进去 —— 初版只累计命中行，导致整块超出
+  //   maxBytes（前缀 + 围栏 + 免责说明约 50+ 字节没算）。
+  const budget = Math.max(0, cfg.maxBytes - Buffer.byteLength(head) - Buffer.byteLength(tail));
   const lines = [cfg.prefix, '```'];
-  let acc = '';
+  let acc = 0;
   for (const h of hits) {
     const domain = h.domain ? ` · ${h.domain}` : '';
     const imp = h.importance != null ? `，importance ${h.importance}` : '';
@@ -28,9 +33,9 @@ export function buildInjectedText(hits, cfg) {
       (h.snippet ? `\n  ${h.snippet}` : '');
     const withNewline = line + '\n';
     // Byte cap: never exceed cfg.maxBytes of injected text for this turn.
-    if (Buffer.byteLength(acc) + Buffer.byteLength(withNewline) > cfg.maxBytes) break;
+    if (acc + Buffer.byteLength(withNewline) > budget) break;
     lines.push(line.trimEnd());
-    acc += withNewline;
+    acc += Buffer.byteLength(withNewline);
   }
   if (lines.length === 2) return ''; // only prefix + opening fence, no hits contributed → skip
   lines.push('```', '（以上为知识库相关片段，如与本轮问题无关请忽略）');

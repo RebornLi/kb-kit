@@ -16,7 +16,8 @@ from pathlib import Path
 from collections import Counter
 from kb_common import ROOT_DEFAULT
 
-STATE_FILE = ".memory_ingest_state.json"
+# 状态文件名（统一存 <vault>/.kb/state/；旧位置 .memory_ingest_state.json 只读回退）
+STATE_FILE = "memory_ingest_state.json"
 
 
 def _domain(content):
@@ -134,9 +135,6 @@ def ingest(root, data_dir, dry_run=False):
     for sqlite_path in _iter_sqlite_dirs(data_dir):
         turns = _extract_turns(sqlite_path)
         for turn in turns:
-            key = (sqlite_path, turn.get("thread_id"), turn.get("turn_id"))
-            if key in seen:
-                continue
             user = turn.get("user", "").strip()
             reply = turn.get("reply", "").strip()
             if not user or not reply:
@@ -149,9 +147,13 @@ def ingest(root, data_dir, dry_run=False):
             date_str = datetime.datetime.fromtimestamp(
                 turn.get("ts", 0) / 1000).strftime("%F") if turn.get("ts") else "2026-01-01"
             kb_target = _kb_target(full)
-            summary = f"codex-{domain}-{title}"
-            if summary in seen:
-                continue  # 按"summary"去重，增量
+            # 去重键必须带**内容指纹**：以前用的是 `codex-{domain}-{title}`（只有标题），
+            # 「同标题、新内容」的轮次会被永久丢弃（静默数据丢失）。
+            # 另外原来那个 tuple key 是死代码：seen 里只存字符串，tuple 永远不相等。
+            fp = hashlib.sha1(full.encode("utf-8")).hexdigest()[:12]
+            dedup_key = f"codex|{domain}|{title}|{fp}"
+            if dedup_key in seen:
+                continue
 
             entry = (f"## {title}（{date_str}）\n\n"
                      f"**用户**：{user}\n\n"
@@ -162,13 +164,15 @@ def ingest(root, data_dir, dry_run=False):
                 print(f"  ⚠️ 跳过越界 kb_target '{kb_target}'（不在 vault 内或为绝对路径）")
                 continue
             if dry_run:
-                seen.append(summary)
+                seen.append(dedup_key)
                 written += 1
                 continue
             if kb_path.exists():
                 text = kb_path.read_text(encoding="utf-8")
-                if f"## {title}" in text:
-                    seen.append(summary)
+                # 内容级幂等：这一轮的「用户」原文已写入过才算重复。
+                # 以前只看 `## {title}` 在不在 → 同标题的新轮次被当成重复丢掉。
+                if user and user in text:
+                    seen.append(dedup_key)
                     continue
                 kb_path.write_text(text + "\n" + entry, encoding="utf-8")
             else:
@@ -179,7 +183,7 @@ def ingest(root, data_dir, dry_run=False):
                       "kb_source": "codex", "kb_synced_from": Path(sqlite_path).name}
                 kb_path.write_text(_fm_block(fm) + f"# {title}\n\n{entry}\n", encoding="utf-8")
             touched.append(str(kb_path))
-            seen.append(summary)
+            seen.append(dedup_key)
             written += 1
 
     if not dry_run:
@@ -187,21 +191,28 @@ def ingest(root, data_dir, dry_run=False):
         _save_state(root, state)
 
     if touched and not dry_run:
+        # add 之后必须 commit：以前只 add 不 commit，摄取结果长期停在暂存区，
+        # 用户下一次 `git commit` 会被「顺手」打包（与 json 适配器的行为也不一致）。
         subprocess.run(["git", "-C", root, "add", "--", *touched],
                        capture_output=True, text=True)
+        if subprocess.run(["git", "-C", root, "status", "--porcelain"],
+                          capture_output=True, text=True).stdout.strip():
+            subprocess.run(["git", "-C", root, "commit", "-q",
+                            "-m", f"kb: Codex SQLite 记忆摄取 {written} 条"],
+                           capture_output=True, text=True)
     print(f"✅ Codex SQLite 摄取 {written} 条{'（dry-run，未落盘）' if dry_run else ''}")
     return written
 
 
 def _load_state(root):
-    try:
-        return json.loads((Path(root) / STATE_FILE).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    # 统一走 state_manager：读规范路径（.kb/state/），旧位置 .memory_ingest_state.json 只读回退
+    from state_manager import read_json
+    return read_json(root, STATE_FILE, legacy=(".memory_ingest_state.json",))
 
 
 def _save_state(root, state):
-    (Path(root) / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    from state_manager import write_json
+    write_json(root, STATE_FILE, state)
 
 
 if __name__ == "__main__":

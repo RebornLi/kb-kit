@@ -21,7 +21,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from kb_common import (ROOT_DEFAULT, EXCLUDE, parse_frontmatter, tokenize,
                        iter_notes, parse_importance as _parse_importance)
 
-STATE = ".recall_state.json"
+# 旧位置（只读回退）；规范位置是 <vault>/.kb/state/recall_state.json
+_LEGACY_PATHS = ("pipeline/.recall_state.json", ".recall_state.json")
 IDX_DIR = "vector index"
 IGNORE = EXCLUDE
 
@@ -39,19 +40,44 @@ EASE_DEFAULT = 2.5
 EASE_MIN = 1.3
 MAX_INTERVAL = 365        # 间隔上限（天）
 DAILY_CAP = 20            # 单日复习上限（防积压）
-GRADE_Q = {"again": 1, "hard": 3, "good": 4, "easy": 5}
+# ⚠️ 评分口径（**已从 SM-2 切到 FSRS**，2026-10-16）：
+#   SM-2 用 q=1/3/4/5；FSRS 只认 **1/2/3/4**（again/hard/good/easy）。之前这里留过注释
+#   钉住"迁移 FSRS 时必须同时改这里"—— 现在改了模型，所以一并改口径。
+#   不一起改的后果：难度 D 会朝**反方向**更新（hard(2) 被当成 SM-2 的 3 反而算"及格"）。
+GRADE_Q = {"again": 1, "hard": 2, "good": 3, "easy": 4}
+GRADE_Q_SM2_LEGACY = {"again": 1, "hard": 3, "good": 4, "easy": 5}   # 仅供历史数据对账
 
 
-def review_update(interval, ease, reps, q):
-    """SM-2 式更新：按评分调整 ease；间隔按 ease 增长，遗忘则缩短。
+def review_update(interval, ease, reps, q, elapsed_days=None):
+    """**FSRS-6** 更新（原 SM-2 版保留在下方 `_review_update_sm2` 供对账）。
 
-    首次回忆(reps 从 0 →1)保持种子间隔(来自 importance)；之后 interval *= ease。
+    返回值签名不变 `(interval, ease, reps)`，但语义映射为：
+      · interval ← FSRS 的 `due_in_days`（都是"到 90% 可提取的天数"，同尺度）
+      · ease     ← 由难度 D 反推的等效易度（便于旧字段与旧报表继续可读）
+      · reps     ← 复习次数（内部维护 D/S）
+
+    FSRS 的稳定性 S **直接就是**现有 interval（r=0.9 时 I(S,0.9)=S），所以**无迁移成本**。
     """
+    import fsrs_core as F
+    state = {"stability": float(interval or 0.0), "reps": int(reps or 0)}
+    # 难度从 ease 反解（首次无历史时用 SM-2 反解公式；有历史则由 FSRS 自己维护）
+    _s, d0 = F.memory_state_from_sm2(float(interval or 1.0), float(ease or EASE_DEFAULT))
+    state["difficulty"] = d0
+    elapsed = float(elapsed_days) if elapsed_days is not None else float(interval or 0.0)
+    out = F.review(state, int(q), elapsed)
+    # 等效 ease：D 越小越"容易"（1↔2.9, 10↔1.3 线性映射，仅为兼容旧报表）
+    ease_eq = round(2.9 - (float(out["difficulty"]) - 1.0) * (1.6 / 9.0), 3)
+    interval_out = max(1.0, min(float(out["due_in_days"]), float(MAX_INTERVAL)))
+    return round(interval_out, 2), ease_eq, int(out["reps"])
+
+
+def _review_update_sm2(interval, ease, reps, q):
+    """旧 SM-2 实现（留档：换 FSRS 前的行为，便于对照与回滚判断）。"""
     ease = ease + (0.1 - (5 - q) * (0.08 + (5 - q) * 0.02))
     ease = max(EASE_MIN, min(2.5, ease))
     if q < 3:
         reps = 0
-        interval = max(1.0, interval * 0.5)   # 遗忘 → 缩短
+        interval = max(1.0, interval * 0.5)
     else:
         reps += 1
         if reps > 1:
@@ -90,13 +116,12 @@ def load_state(root: Union[str, Path]) -> Dict[str, Any]:
         store = StateStore(root)
         if store.exists("recall_state.json"):
             return store.load("recall_state.json", {})
-        legacy = Path(root) / "pipeline" / STATE
-        if legacy.exists():
-            return json.loads(legacy.read_text(encoding="utf-8"))
-        return {}
+        from state_manager import read_state_path
+        lg = read_state_path(root, "recall_state.json", legacy=_LEGACY_PATHS)
+        return json.loads(lg.read_text(encoding="utf-8")) if lg else {}
     except ImportError:
-        sp = Path(root) / "pipeline" / STATE
-        return json.loads(sp.read_text(encoding="utf-8")) if sp.exists() else {}
+        from state_manager import read_json
+        return read_json(root, "recall_state.json", legacy=_LEGACY_PATHS, default={})
 
 
 def save_state(root: Union[str, Path], st: Dict[str, Any]) -> None:
@@ -104,26 +129,25 @@ def save_state(root: Union[str, Path], st: Dict[str, Any]) -> None:
         from state_manager import StateStore
         StateStore(root).save("recall_state.json", st)
     except ImportError:
-        sp = Path(root) / "pipeline" / STATE
-        sp.parent.mkdir(parents=True, exist_ok=True)
-        sp.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        from state_manager import write_json
+        write_json(root, "recall_state.json", st)
 
 
 def load_index(root: Union[str, Path]) -> Optional[Dict[str, Any]]:
     """加载 rag 索引(rel2vec + vocab/idf);无索引返回 None。
     复用 rag.load_index 兼容旧索引（无 version 字段），版本不匹配时打印告警。"""
-    idx = Path(root) / IDX_DIR / "df_idf.json"
     if rag is None:
         return None
-    payload, ver = rag.load_index(idx)
+    # 传目录让 rag.load_index 自己解析（pickle 优先、回退旧 json）
+    payload, ver = rag.load_index(Path(root) / IDX_DIR)
     if payload is None:
         return None
     if ver < rag.IDX_VERSION:
         print(f"⚠️ 索引格式旧（version {ver} < {rag.IDX_VERSION}），建议跑 `rag.py index` 重建；当前仍可回忆。", file=sys.stderr)
     elif ver > rag.IDX_VERSION:
         print(f"⚠️ 索引版本 {ver} 高于当前代码支持 {rag.IDX_VERSION}，建议升级 kb-kit 或跑 `rag.py index` 重建；当前仍可回忆。", file=sys.stderr)
-    rel2vec = {r: rag._vec(payload["tf"][r], payload["vocab"], payload["idf"])
-               for r in payload["tf"]}
+    # v7 起索引不再写 tf → 由 rag 统一提供文档向量（postings 一趟构建）
+    rel2vec = rag.all_doc_vectors(payload)
     return {"rel2vec": rel2vec, "vocab": payload["vocab"], "idf": payload["idf"]}
 
 
@@ -204,9 +228,11 @@ def report_status(due_list: List[Dict[str, Any]]) -> str:
 
 
 def mark(root: Union[str, Path], deck_n: int, rels: Optional[str], grade: str = "good") -> int:
-    """标记已复习（SM-2 式）：按评分调整 ease，更新间隔与复习次数。
+    """标记已复习（**FSRS-6**）：更新稳定性 S、难度 D 与下次间隔。
 
-    grade ∈ again/hard/good/easy（映射 SM-2 q=1/3/4/5）。
+    grade ∈ again/hard/good/easy → FSRS 的 1/2/3/4。
+    状态里 `stability`/`difficulty` 是**权威字段**；`interval`/`ease` 是同一事实的
+    兼容投影（旧报表与旧代码仍可读），不要反过来用它们推 FSRS 状态。
     """
     state = load_state(root)
     _, deck, _ = build(root, 999)
@@ -222,16 +248,35 @@ def mark(root: Union[str, Path], deck_n: int, rels: Optional[str], grade: str = 
             imp = _parse_importance(fm.get("importance"))
         except OSError:
             pass
-        interval = float(st.get("interval", st.get("stability", base_interval(imp))))
-        ease = float(st.get("ease", EASE_DEFAULT))
+        import fsrs_core as F
+        # ── 读状态：S/D 是权威字段；首次（或旧 SM-2 数据）用反解公式初始化 ──
         reps = int(st.get("reps", st.get("recalls", 0)))
-        new_interval, new_ease, new_reps = review_update(interval, ease, reps, q)
-        st.pop("stability", None)   # 迁移旧字段
+        sm2_iv = float(st.get("interval", base_interval(imp)))
+        if st.get("stability"):
+            s0 = float(st["stability"])
+            d0 = float(st.get("difficulty") or 5.0)
+        else:
+            s0, d0 = F.memory_state_from_sm2(sm2_iv, float(st.get("ease", EASE_DEFAULT)))
+        # FSRS 用「上次复习到现在过了几天」算可提取性 R(t,S)
+        _elapsed = 0.0
+        _last = st.get("last_seen")
+        if _last:
+            try:
+                _elapsed = max(0.0, (datetime.date.today()
+                                     - datetime.date.fromisoformat(str(_last)[:10])).days)
+            except (ValueError, TypeError):
+                _elapsed = 0.0
+        out = F.review({"stability": s0, "difficulty": d0, "reps": reps,
+                        "lapses": int(st.get("lapses", 0))}, int(q), _elapsed)
+        new_interval = max(1.0, min(float(out["due_in_days"]), float(MAX_INTERVAL)))
+        # 等效 ease：仅作旧字段/旧报表的兼容投影（D 越小越容易）
+        new_ease = round(2.9 - (float(out["difficulty"]) - 1.0) * (1.6 / 9.0), 3)
         st.pop("recalls", None)
-        st.update({"last_seen": today, "interval": new_interval,
-                   "ease": new_ease, "reps": new_reps})
-        if q < 3:
-            st["lapses"] = int(st.get("lapses", 0)) + 1
+        st.update({"last_seen": today, "interval": new_interval, "ease": new_ease,
+                   "reps": int(out["reps"]), "lapses": int(out["lapses"]),
+                   "stability": float(out["stability"]),
+                   "difficulty": float(out["difficulty"])})
+        # 旧实现写的是 `q < 3`（SM-2 口径：1/2 都算没回忆起来）；FSRS 只有 again(1) 是遗忘。
         advanced.append((rel, new_interval, new_ease))
     save_state(root, state)
     print(f"✅ 已复习 {len(advanced)} 篇（grade={grade}）→ 间隔/ease 更新：\n" +

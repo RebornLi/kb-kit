@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi            # 复用 collect/compiled_notes/metrics/proposals/load_note
-from kb_common import cos as _cos  # 余弦相似度（行为等价：非空向量点积）
+from kb_common import cos as _cos, CJK  # 余弦 + 中文字正则（全仓唯一定义）
 
 # ── 有界门控常量 ──────────────────────────────────────────────
 MIN_ANSWER_CHARS = 60      # 答案太短 = 一次性闲聊，不提议
@@ -35,7 +35,6 @@ NOVELTY_MIN_SIM = 0.90     # 答案与已有编译笔记的最大余弦低于此
                            # 仅当近乎完整复制单篇(合成膨胀)才拒绝。
 MAX_PROPOSALS_PER_DAY = 10 # 频率门：同一天最多提议条数
 # ── 本地字符向量（中文字 / 英文词，避免整段中文单 token）────────
-_CN = re.compile(r"[\u4e00-\u9fff]")          # 中文字（按字切，避免整段中文当单 token）
 _LAT = re.compile(r"[A-Za-z0-9]+")            # 英文词（按词切）
 _DATE = datetime.now().strftime("%Y-%m-%d")
 
@@ -43,7 +42,7 @@ _DATE = datetime.now().strftime("%Y-%m-%d")
 # ── 字符向量 ──────────────────────────────────────────────────
 def _tokenize(s):
     # 中文字各计一 token、英文按词；避免"整段中文当单 token"使余弦恒近 0（P1 旧坑）
-    return _CN.findall(s or "") + _LAT.findall(s or "")
+    return CJK.findall(s or "") + _LAT.findall(s or "")
 
 
 def _vec(s):
@@ -133,17 +132,35 @@ def durability(answer: str, root: Union[str, Path]) -> Tuple[Dict[str, Any], boo
 
 
 # ── 提案文件 I/O ──────────────────────────────────────────────
+# 旧位置（迁移期只读回退）；规范位置 <vault>/.kb/state/kb_query_*.json(l)
+_LEGACY_PROP = "pipeline/.kb_query_proposals.jsonl"
+_LEGACY_STATE = "pipeline/.kb_query_state.json"
+
+
 def _prop_path(root):
-    return Path(root) / "pipeline" / ".kb_query_proposals.jsonl"
+    """**写**路径（规范）。读请用 `_read_path`。"""
+    from state_manager import state_path
+    return state_path(root, "kb_query_proposals.jsonl")
 
 
 def _state_path(root):
-    return Path(root) / "pipeline" / ".kb_query_state.json"
+    from state_manager import state_path
+    return state_path(root, "kb_query_state.json")
+
+
+def _read_prop(root):
+    from state_manager import read_state_path
+    return read_state_path(root, "kb_query_proposals.jsonl", legacy=(_LEGACY_PROP,))
+
+
+def _read_state(root):
+    from state_manager import read_state_path
+    return read_state_path(root, "kb_query_state.json", legacy=(_LEGACY_STATE,))
 
 
 def _daily_count(root):
-    st = _state_path(root)
-    if not st.exists():
+    st = _read_state(root)
+    if st is None or not st.exists():
         return 0
     try:
         return json.loads(st.read_text(encoding="utf-8")).get("per_day", {}).get(_DATE, 0)
@@ -152,20 +169,20 @@ def _daily_count(root):
 
 
 def _inc_daily(root):
-    st = _state_path(root)
-    st.parent.mkdir(parents=True, exist_ok=True)
+    rd = _read_state(root)                      # 读：规范优先、旧位置回退
     try:
-        st_obj = json.loads(st.read_text(encoding="utf-8")) if st.exists() else {}
+        st_obj = json.loads(rd.read_text(encoding="utf-8")) if rd else {}
     except (json.JSONDecodeError, OSError):
         st_obj = {}
     per = st_obj.setdefault("per_day", {})
     per[_DATE] = per.get(_DATE, 0) + 1
-    st.write_text(json.dumps(st_obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    from kb_common import atomic_write_text
+    atomic_write_text(_state_path(root), json.dumps(st_obj, ensure_ascii=False, indent=2))
 
 
 def _next_id(root):
-    p = _prop_path(root)
-    n = (len(p.read_text(encoding="utf-8").splitlines())) if p.exists() else 0
+    p = _read_prop(root)
+    n = (len(p.read_text(encoding="utf-8").splitlines())) if p else 0
     return f"q-{_DATE}-{n + 1:03d}"
 
 
@@ -202,9 +219,8 @@ def query(root: Union[str, Path], q: str, answer: Optional[str] = None) -> Dict[
         "scores": {"chars": dur["chars"], "ttr": dur["ttr"], "novelty": dur["novelty"],
                    "grounded": grounded},
     }
-    _prop_path(root).parent.mkdir(parents=True, exist_ok=True)
-    with open(_prop_path(root), "a", encoding="utf-8") as f:
-        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    from state_manager import append_jsonl
+    append_jsonl(root, "kb_query_proposals.jsonl", rec)
     _inc_daily(root)
     result["verdict"] = "PROPOSE"
     result["id"] = rec["id"]
@@ -267,8 +283,8 @@ def _git_commit(root, rel, msg):
 
 def apply(root: Union[str, Path], ids: Optional[List[str]] = None, force: bool = False) -> Dict[str, Any]:
     """人工确认后，把选定提案真正写为编译笔记（带 git checkpoint，可回滚）。"""
-    p = _prop_path(root)
-    if not p.exists():
+    p = _read_prop(root)
+    if p is None or not p.exists():
         return {"written": [], "skipped": [], "note": "无待审提案"}
     recs = [json.loads(l) for l in p.read_text(encoding="utf-8").splitlines() if l.strip()]
     pick = recs if (ids is None and force) else [r for r in recs if r.get("id") in (ids or set())]
@@ -278,12 +294,16 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None, force: bool =
         _git_commit(root, rel, f"kb: 查询综合入库[{r.get('id')}] 「{str(r.get('query',''))[:24]}…」")
         written.append(r["id"]); meta[r["id"]] = rel
         # 从提案清单移除
-    for r in recs:
-        if r.get("id") in set(written):
-            continue
+    written_set = set(written)
+    kept = [r for r in recs if r.get("id") not in written_set]
+    for r in kept:
         skipped.append(r["id"])
-    # 重写提案文件（仅保留未写入的）
-    open(_prop_path(root), "w", encoding="utf-8").close()
+    # 重写提案文件：**只保留未被写入的**。
+    # 以前这里只做 `open(...,"w").close()` 把文件清空 —— 未选中的提案被无声删除，
+    # 而返回值仍声称「剩余 N 条待审」（数据丢失 + 报告失真）。
+    from kb_common import atomic_write_text
+    atomic_write_text(_prop_path(root),
+                      "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
     try:
         import evolution_log
         evolution_log.append(root, "QUERY",

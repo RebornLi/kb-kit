@@ -32,6 +32,10 @@ TEMPLATE_DIR = REPO_DIR / "template-vault"
 STATE_IGNORE = shutil.ignore_patterns(
     ".git", ".git/*", "__pycache__", "*.pyc", ".pytest_cache", "*.egg-info",
     "vector index",  # 运行时向量索引：不随模板分发，安装时由 run_demo 重建
+    # 运行态**绝不随模板分发** —— 否则新库会带上模板作者跑测试留下的
+    # 反馈命中、查询缓存、RSI 提议（指向并不存在的笔记）。以前这里漏了 .kb/，
+    # 于是 template-vault/.kb/state/*.json 被原样复制进每个新库。
+    ".kb", ".agents", ".trash", "_curate", "*.jsonl",
 )
 
 
@@ -287,7 +291,12 @@ def register_global_kb(vault):
 
 
 def verify_install(vault):
-    """调用 verify.py 自检。返回 True 表示通过。"""
+    """调用 verify.py 自检。返回 True 表示通过。
+
+    注意：超时/异常一律按**失败**返回。以前它们都 `return True`（timeout 只有 60s，
+    而 verify.py 内部自己就要跑 `kb help` 15s + `rag query` 30s），于是「装坏了也算成功」，
+    安装器的退出码失去意义 —— 这也正是 kb.cmd 的 Windows 缺陷长期没被发现的原因。
+    """
     verify_script = REPO_DIR / "scripts" / "verify.py"
     if not verify_script.exists():
         print("⚠️ verify.py 不存在，跳过自检。", file=sys.stderr)
@@ -295,15 +304,15 @@ def verify_install(vault):
     try:
         r = subprocess.run(
             [sys.executable, str(verify_script), "--vault", str(vault)],
-            timeout=60,
+            timeout=180,   # 要容纳 verify.py 内部 15s + 30s 的子步骤并留余量
         )
         return r.returncode == 0
     except subprocess.TimeoutExpired:
-        print("⚠️ 自检超时（不影响安装）。", file=sys.stderr)
-        return True
+        print("⚠️ 自检超时 —— 无法确认安装完整性，按失败处理。", file=sys.stderr)
+        return False
     except Exception as e:
-        print(f"⚠️ 自检异常: {e}（不影响安装）", file=sys.stderr)
-        return True
+        print(f"⚠️ 自检异常，按失败处理: {e}", file=sys.stderr)
+        return False
 
 
 def open_obsidian(vault):
@@ -372,6 +381,7 @@ category: knowledge
 ## 现在做什么
 
 - 看 [[01-如何开始.md|🚀 如何开始]]
+- 不懂技术也能看 [[如何使用.md|🙋 如何使用（面向第一次使用）]]
 - 规则见 [[📖-知识库管理方案.md|📖-知识库管理方案]]
 - 巡检见 `70-知识治理 Governance/_INDEX.md`（跑 `kb dashboard` 生成）
 """
@@ -532,21 +542,23 @@ def main():
     generate_quickstart_card(vault)
     write_install_manifest(vault)
 
+    verify_ok = True
     if not args.no_verify:
-        ok = verify_install(vault)
-        if not ok:
-            print("⚠️ 自检有失败项，请按上方提示修复。", file=sys.stderr)
+        verify_ok = verify_install(vault)
+        if not verify_ok:
+            print("⚠️ 自检有失败项 → 本次安装以非 0 退出码结束（便于自动化发现「装坏了」）。\n"
+                  "   请按上方提示修复；确认无碍可加 --no-verify 重跑。", file=sys.stderr)
 
     if not args.no_open:
         open_obsidian(vault)
 
     launch = "./kb.cmd" if sys.platform == "win32" else "./kb"
-    print("\n🎉 安装完成！")
+    print("\n🎉 安装完成！" if verify_ok else "\n📦 安装步骤已执行完，但自检未全绿：")
     print(f"  知识库位置: {vault}")
     print(f"  提问:       {launch} query '如何备份知识库'")
     print(f"  快捷卡:     {vault}/如何使用.md")
     print("  更多命令:   kb help    巡检: kb healthcheck    仪表盘: kb dashboard")
-    return 0
+    return 0 if verify_ok else 1
 
 
 if __name__ == "__main__":

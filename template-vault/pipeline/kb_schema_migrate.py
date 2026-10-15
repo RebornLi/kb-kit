@@ -88,14 +88,22 @@ def set_fm(p, key, value):
     return True
 
 
-# 注：iter_notes 保留本地实现——与 kb_common.iter_notes 排除集不同：
+# 注：iter_notes **已改为委托 kb_common.iter_notes**（此前是第二套更松的排除集，
+#     会让 `--apply` 给生成物 pipeline/EVOLVED.md 写 frontmatter；实测作用范围 4430→4228 篇）。
+# 历史记录（已废弃的本地实现）：
 #   本地版仅排除 (.git, .obsidian, vector, .kb)，不排除 backups/logs/pipeline 等；
 #   schema migrate 需扫描更广范围（含 pipeline/ 下的模板笔记），故保持独立。
 def iter_notes(root):
-    for p in Path(root).rglob("*.md"):
-        if any(d in p.parts for d in (".git", ".obsidian", "vector", ".kb")):
-            continue
-        yield p
+    """遍历候选笔记。**直接委托 `kb_common.iter_notes`**（唯一的遍历权威）。
+
+    这里以前是第二份实现，排除集只含 `.git/.obsidian/vector/.kb` —— 于是它会把
+    `pipeline/` 与 `logs/` 也算进来。对一个**会写 frontmatter** 的迁移工具来说，
+    后果是 `kb schema-migrate --apply` 会给生成物 `pipeline/EVOLVED.md` 写 frontmatter
+    （实测确认）。现已对齐到 `EXCLUDE`（含 pipeline/logs/backups/_curate…）+ 嵌套仓剪枝，
+    作用范围与其它治理工具一致。
+    """
+    from kb_common import iter_notes as _iter
+    return _iter(root)
 
 
 def analyze(root):
@@ -162,8 +170,9 @@ def main():
 
     git_backup(root, "pre-schema-migrate checkpoint")
     applied = 0
-    logp = Path(root) / "pipeline" / ".kb_schema_migrate.jsonl"
-    logp.parent.mkdir(parents=True, exist_ok=True)
+    from state_manager import state_path
+    # 统一 .kb/state/（旧位置 pipeline/.kb_schema_migrate.jsonl 只读回退）
+    logp = state_path(root, "kb_schema_migrate.jsonl")
     for x in plan:
         p = Path(root) / x["rel"]
         for k, (old, new) in x["changes"].items():

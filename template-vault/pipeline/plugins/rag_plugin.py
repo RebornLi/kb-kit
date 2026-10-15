@@ -8,6 +8,9 @@ from plugins._subprocess_plugin import SubprocessPlugin
 class RAGPlugin(SubprocessPlugin):
     SCRIPT_NAME = "rag.py"
     ACTION_MAP = {"index": "index", "query": "query"}
+    # `query` 是最高频、只读、延迟敏感的命令：允许进程内执行，省一次解释器启动+import
+    # （实测 ~40ms，占 query 端到端的 21%）。`index` 是长任务，省 40ms 无意义，仍走 subprocess。
+    IN_PROCESS_ACTIONS = {"query"}
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(

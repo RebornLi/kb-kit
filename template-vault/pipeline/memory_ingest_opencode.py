@@ -13,7 +13,7 @@
 #
 # 用法: ingest(root, db_path, dry_run=False) -> 摄取条数
 # ============================================================
-import sqlite3, re, os, json, datetime, glob
+import sqlite3, re, os, json, hashlib, datetime, glob
 from pathlib import Path
 from kb_common import ROOT_DEFAULT
 from memory_ingest_sqlite import (_safe_kb_path, _fm_block, _domain, _kb_target,
@@ -114,17 +114,18 @@ def ingest(root, db_path, dry_run=False):
             title = user.split("\n", 1)[0].strip()[:60]
             if len(title) < 4:
                 title = (turn.get("title") or "opencode 交互")[:60]
-            key = (sqlite_path, turn.get("session_id"), turn.get("ts"))
-            if key in seen:
-                continue
             domain = _domain(user + reply)
             full = f"{user}\n\n---\n\n{reply}\n\n---\n\n[agent reasoning] {turn.get('reasoning', '')}"
             date_str = datetime.datetime.fromtimestamp(
                 turn["ts"] / 1000).strftime("%F") if turn.get("ts") else "2026-01-01"
             kb_target = _kb_target(full)
-            summary = f"opencode-{domain}-{title}"
-            if summary in seen:
-                continue  # 按 summary 去重，增量
+            # 去重键带内容指纹：只用 `opencode-{domain}-{title}` 会把
+            # 「同标题、新内容」的会话永久丢弃（静默数据丢失）。
+            # 原 tuple key 是死代码：seen 只存字符串，tuple 永不相等。
+            fp = hashlib.sha1(full.encode("utf-8")).hexdigest()[:12]
+            dedup_key = f"opencode|{domain}|{title}|{fp}"
+            if dedup_key in seen:
+                continue
 
             entry = (f"## {title}（{date_str}）\n\n"
                      f"**用户**：{user}\n\n"
@@ -135,13 +136,14 @@ def ingest(root, db_path, dry_run=False):
                 print(f"  ⚠️ 跳过越界 kb_target '{kb_target}'（不在 vault 内或为绝对路径）")
                 continue
             if dry_run:
-                seen.append(summary)
+                seen.append(dedup_key)
                 written += 1
                 continue
             if kb_path.exists():
                 text = kb_path.read_text(encoding="utf-8")
-                if f"## {title}" in text:
-                    seen.append(summary)
+                # 内容级幂等：这一轮的原文已写入过才算重复（旧标题级判断会挡住同标题新内容）
+                if user and user in text:
+                    seen.append(dedup_key)
                     continue
                 kb_path.write_text(text + "\n" + entry, encoding="utf-8")
             else:
@@ -152,7 +154,7 @@ def ingest(root, db_path, dry_run=False):
                       "kb_source": "opencode", "kb_synced_from": Path(sqlite_path).name}
                 kb_path.write_text(_fm_block(fm) + f"# {title}\n\n{entry}\n", encoding="utf-8")
             touched.append(str(kb_path))
-            seen.append(summary)
+            seen.append(dedup_key)
             written += 1
 
     if not dry_run:
@@ -161,8 +163,15 @@ def ingest(root, db_path, dry_run=False):
 
     if touched and not dry_run:
         import subprocess
+        # add 之后必须 commit：只 add 不 commit 会让结果长期停在暂存区，
+        # 下次 `git commit` 被顺手打包（与 json 适配器行为不一致）。
         subprocess.run(["git", "-C", str(root), "add", "--", *touched],
                        capture_output=True, text=True)
+        if subprocess.run(["git", "-C", str(root), "status", "--porcelain"],
+                          capture_output=True, text=True).stdout.strip():
+            subprocess.run(["git", "-C", str(root), "commit", "-q",
+                            "-m", f"kb: OpenCode 记忆摄取 {written} 条"],
+                           capture_output=True, text=True)
     print(f"✅ OpenCode SQLite 摄取 {written} 条{'（dry-run，未落盘）' if dry_run else ''}")
     return written
 

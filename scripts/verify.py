@@ -10,6 +10,7 @@
 # ============================================================
 import argparse
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -54,6 +55,14 @@ CONTENT_FILES = [
     "如何使用.md",
 ]
 
+# 修复建议：**绝不能**建议用户跑
+#   `create_vault.py --vault <vault> --force`
+# 那条路径在 create_vault.py:63-68 会先 rmtree/unlink 目标目录的每个子项
+# （= 用户全部笔记 + .git 历史），照抄即不可恢复的数据丢失；而且 vault 内
+# 根本没有 create_vault.py（它在仓库根）。所以只给「另存备份 → 装到空目录 → 抄回笔记」。
+REINSTALL_HINT = ("先用 `kb backup daily` 备份，再把安装器指向一个**空目录**重装，"
+                  "然后逐个把笔记抄回（不要用 --force：它会先清空目标目录）")
+
 
 # ============================================================
 # 检查项
@@ -89,7 +98,7 @@ def check_vault_structure(vault: Path) -> VerifyItem:
         missing.append(f"文件: {', '.join(missing_files)}")
     return VerifyItem("目录结构", False,
                       f"缺失 {'; '.join(missing)}",
-                      f"python3 create_vault.py --vault {vault} --force")
+                      REINSTALL_HINT)
 
 
 def check_vector_index(vault: Path) -> VerifyItem:
@@ -145,7 +154,9 @@ def check_kb_command(vault: Path) -> VerifyItem:
     import platform as _pf
     if _pf.system() == "Windows":
         kb = vault / "kb.cmd"
-        cmd = [str(kb), "help"]
+        # Windows 的 CreateProcess 不能直接执行 .cmd，必须经 cmd.exe /c，
+        # 否则这一项恒被判失败（以前自检失败又不影响退出码，所以一直没暴露）。
+        cmd = [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(kb), "help"]
     else:
         kb = vault / "kb"
         cmd = ["bash", str(kb), "help"]
@@ -153,7 +164,7 @@ def check_kb_command(vault: Path) -> VerifyItem:
     if not kb.exists():
         return VerifyItem("kb 命令", False,
                           f"启动器不存在: {kb}",
-                          f"python3 create_vault.py --vault {vault} --force")
+                          REINSTALL_HINT)
 
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
@@ -192,7 +203,7 @@ def check_install_manifest(vault: Path) -> VerifyItem:
         head = ", ".join(missing[:5]) + (" …" if len(missing) > 5 else "")
         return VerifyItem("安装清单", False,
                           f"缺失 {len(missing)} 个基线文件: {head}",
-                          f"python3 create_vault.py --vault {vault} --force")
+                          REINSTALL_HINT)
     return VerifyItem("安装清单", True, f"{len(files)} 个基线文件齐全")
 
 

@@ -90,7 +90,8 @@ class Judge:
 # ── 检索 + 作答（走真实链路，不做特例）────────────────────────
 def retrieve(root: Path, q: str, top: int = 6) -> Dict[str, Any]:
     r = subprocess.run([sys.executable, str(root / "pipeline" / "rag.py"), "query", q,
-                        "--root", str(root), "--top", str(top), "--json", "--context", "500"],
+                        "--root", str(root), "--top", str(top), "--json", "--context", "500",
+                        "--no-record"],   # 评测不得污染使用信号
                        capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
         raise RuntimeError(f"检索失败（退出码 {r.returncode}）：{(r.stderr or '')[:200]}")

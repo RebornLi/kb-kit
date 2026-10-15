@@ -26,6 +26,15 @@ sys.path.insert(0, str(PIPELINE))
 
 import rag  # noqa: E402  (需要 pipeline 在 sys.path)
 
+def _load_idx(root):
+    """读索引：统一走 rag.load_index（v6 起是 pickle，旧库仍是 json）。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "template-vault" / "pipeline"))
+    import rag
+    return rag.load_index(Path(root) / "vector index")[0] or {}
+
+
+
 
 def write_note(path: Path, title: str, body: str, extra_fm: str = "", mtime: float = None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -38,7 +47,7 @@ def write_note(path: Path, title: str, body: str, extra_fm: str = "", mtime: flo
 
 
 def load_payload(root: Path) -> dict:
-    return json.loads((root / "vector index" / "df_idf.json").read_text(encoding="utf-8"))
+    return _load_idx(root)
 
 
 def quiet_index(root: Path) -> int:
@@ -56,8 +65,8 @@ class RagIncrementalRetireTest(unittest.TestCase):
         self.assertEqual(quiet_index(self.root), 0)  # 首次 → 全量
         p = load_payload(self.root)
         self.assertEqual(p["n_docs"], 2)
-        self.assertIn("10-项目 Projects/a.md", p["tf"])
-        self.assertIn("20-技术 Technology/b.md", p["tf"])
+        self.assertIn("10-项目 Projects/a.md", rag.indexed_docs(p))
+        self.assertIn("20-技术 Technology/b.md", rag.indexed_docs(p))
 
     def tearDown(self):
         shutil.rmtree(self.root, ignore_errors=True)
@@ -74,11 +83,11 @@ class RagIncrementalRetireTest(unittest.TestCase):
         rel_a = "10-项目 Projects/a.md"
         rel_b = "20-技术 Technology/b.md"
         self.assertEqual(p["n_docs"], 1)
-        self.assertNotIn(rel_a, p["tf"], "retire 笔记应从 tf 移除")
+        self.assertNotIn(rel_a, rag.indexed_docs(p), "retire 笔记应从索引移除")
         self.assertNotIn(rel_a, p["meta"], "retire 笔记应从 meta 移除")
         self.assertNotIn(rel_a, p.get("doc_hashes", {}), "retire 笔记应从 doc_hashes 移除")
         self.assertNotIn(rel_a, p.get("doc_mtimes", {}), "retire 笔记应从 doc_mtimes 移除")
-        self.assertIn(rel_b, p["tf"], "未 retire 的笔记应保留")
+        self.assertIn(rel_b, rag.indexed_docs(p), "未 retire 的笔记应保留")
         # 检索词表也不应再含仅属于 a 的词
         self.assertNotIn("alpha", p["vocab"])
 
@@ -89,7 +98,7 @@ class RagIncrementalRetireTest(unittest.TestCase):
         self.assertEqual(rc, 0)
         p = load_payload(self.root)
         self.assertEqual(p["n_docs"], 1)
-        self.assertNotIn("20-技术 Technology/b.md", p["tf"])
+        self.assertNotIn("20-技术 Technology/b.md", rag.indexed_docs(p))
         self.assertNotIn("beta", p["vocab"])
 
     def test_retire_incremental_matches_full_rebuild(self):
@@ -106,7 +115,7 @@ class RagIncrementalRetireTest(unittest.TestCase):
         full = load_payload(self.root)
 
         self.assertEqual(inc["n_docs"], full["n_docs"])
-        self.assertEqual(set(inc["tf"]), set(full["tf"]))
+        self.assertEqual(rag.indexed_docs(inc), rag.indexed_docs(full))
         self.assertEqual(set(inc["meta"]), set(full["meta"]))
 
 

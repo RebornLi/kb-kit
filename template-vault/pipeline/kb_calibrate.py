@@ -21,17 +21,16 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import cos as _cos  # 余弦相似度（行为等价：非空稀疏向量点积）
+from kb_common import cos as _cos, CJK  # 余弦 + 中文字正则（全仓唯一定义）
 
 # ── 双轨字符向量（中文字按字 / 英文词）+ L2 归一化（与 kb_query 一致，避免长度稀释）──
-_CN = re.compile(r"[\u4e00-\u9fff]")
 _LAT = re.compile(r"[A-Za-z0-9]+")
 
 
 # 注：_tokenize / _vec 保留本地实现——与 kb_common.tokenize/char_vec 不同：
 #   本地 _tokenize 无 lower()、无 CJK bigram，刻意保持以不改变标定结果。
 def _tokenize(s):
-    return _CN.findall(s or "") + _LAT.findall(s or "")
+    return CJK.findall(s or "") + _LAT.findall(s or "")
 
 
 def _vec(s):
@@ -67,17 +66,40 @@ def _synth_text(rng, base, keep_ratio, vocab):
     return " ".join(out)
 
 
+def _is_synth_target(root: Path) -> bool:
+    """目标目录是否可安全清空：空目录，或本工具自己的产物目录。
+
+    真实知识库（有笔记 / .git / reference/）一律拒绝 —— synth() 会整目录删除。
+    """
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        return False
+    if not entries:
+        return True
+    names = {p.name for p in entries}
+    return bool(names & {"gt_dup.json", "gt_over.json"})   # 上一轮 synth 的产物
+
+
 def synth(root: Union[str, Path], n: int = 300, pairs: int = 40,
-          seed: int = 7, today: Optional[date] = None) -> Dict[str, Any]:
+          seed: int = 7, today: Optional[date] = None,
+          force: bool = False) -> Dict[str, Any]:
     """生成仿真 vault（git init）+ ground truth 文件。返回 gt dict。"""
     root = Path(root)
     if root.exists():
+        # 以前无条件 shutil.rmtree(root)：误把真实库路径传进来就是整库删除。
+        if not force and not _is_synth_target(root):
+            raise SystemExit(
+                f"✗ 拒绝清空非仿真目录: {root}\n"
+                "  synth 会先删除目标目录的全部内容；为防误删真实知识库，只允许"
+                "空目录、或含 gt_dup.json/gt_over.json 的本工具产物目录。\n"
+                "  确认该目录可删时加 --force。")
         shutil.rmtree(root)
     (root / "raw").mkdir(parents=True)
     (root / "20-技术 Technology").mkdir(parents=True)
     (root / "40-资源库 Resources").mkdir(parents=True)
     rng = random.Random(seed)
-    vocab = _TOKEN_VOCAB = _CN.findall(_FREQ_CN) + ["knowledge", "retention", "retire", "merge"]
+    vocab = _TOKEN_VOCAB = CJK.findall(_FREQ_CN) + ["knowledge", "retention", "retire", "merge"]
 
     today = today or date(2026, 9, 18)
     gt_dup, gt_over = [], []
@@ -150,10 +172,10 @@ def calibrate(root: Union[str, Path], what: str, csv_out: Optional[str] = None) 
     if what == "retire":
         gt_over = _read_gt(root, "gt_over.json")
         today = date(2026, 9, 18)
-        pos_age = {rel: (today - _parse_d(d)).days for rel, d in gt_over}  # 正样本(过期)年龄
+        pos_age = {rel: (today - _parse_day_epoch(d)).days for rel, d in gt_over}  # 正样本(过期)年龄
         neg_age = {}
         for n in notes.values():
-            c = _parse_d(n["fm"].get("created"))
+            c = _parse_day_epoch(n["fm"].get("created"))
             if c and (rel := str(n["rel"])) not in pos_age:
                 neg_age[rel] = (today - c).days
         ts = list(range(30, 370, 10))
@@ -206,7 +228,11 @@ def calibrate(root: Union[str, Path], what: str, csv_out: Optional[str] = None) 
 
 # 注：_parse_d 保留本地实现——返回 date 对象（非 datetime），
 #   kb_common.parse_date_safe 返回 datetime，date-datetime 做 .days 会 TypeError。
-def _parse_d(s):
+def _parse_day_epoch(s):
+    """解析成 **date**（不是 datetime），失败回退 `1970-01-01`。
+
+    与 `kb_common.parse_date`（返回 datetime|None）不同口径 —— 改名以免被误当同义函数替换。
+    """
     try:
         y, m, d = (int(x) for x in str(s)[:10].split("-"))
         return date(y, m, d)
@@ -245,6 +271,8 @@ def main() -> int:
     s.add_argument("--n", type=int, default=300)
     s.add_argument("--pairs", type=int, default=40)
     s.add_argument("--seed", type=int, default=7)
+    s.add_argument("--force", action="store_true",
+                   help="目标非空且非本工具产物时也允许清空（危险）")
 
     common = lambda p: (p.add_argument("--root", required=True), p.add_argument("--csv", default=None))
     for name in ("dup", "merge", "retire"):
@@ -253,7 +281,7 @@ def main() -> int:
 
     a = ap.parse_args()
     if a.cmd == "synth":
-        gt = synth(Path(a.root), a.n, a.pairs, a.seed)
+        gt = synth(Path(a.root), a.n, a.pairs, a.seed, force=getattr(a, "force", False))
         print(f"✅ 仿真 vault 已建: {a.root} · {a.n} 篇 / {a.pairs} 对重复 / "
               f"{len(gt['gt_over'])} 篇过期")
         return 0

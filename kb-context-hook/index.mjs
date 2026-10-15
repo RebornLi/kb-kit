@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadCfg } from "./config.mjs";
 import { buildInjectedText, hitsKey } from "./inject.mjs";
+import { getWorker } from "./worker.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -39,29 +40,30 @@ function dbg(msg) {
 let runs = 0, injected = 0, skipped = 0;
 
 /**
- * 调 kb query --json，返回规范化后的命中对象数组。
- * 失败一律返回空数组（不抛），让上层静默跳过。
+ * 调 kb 查询，返回规范化后的命中对象数组。
+ * 快路径：常驻 `python3 kb_worker.py`（索引只加载一次、mtime 变更才重载），
+ * 稳态单查 ~60ms（旧路径每次 spawn 进程 + 重载索引 ~190ms）。
+ * 失败一律返回空数组（不抛），让上层静默跳过；worker 不可用则回退逐次 execFile。
  * @param {Record<string, any>} cfg
  * @param {string} queryText
  */
 async function queryKB(cfg, queryText) {
-  const args = [
-    cfg.rag, "query", queryText,
-    "--top", String(cfg.topN),
-    "--root", cfg.kbRoot,
-    "--json",
-  ];
-  const { stdout } = await execFileAsync("python3", args, {
-    cwd: cfg.kbRoot,
-    timeout: 12000,
-    env: { ...process.env, PYTHONUNBUFFERED: "1" },
-  });
-  const data = JSON.parse(stdout || "null");
-  const hits = Array.isArray(data?.hits) ? data.hits : [];
-  return hits
+  if (cfg.kbRoot) {
+    const res = await getWorker(cfg).query(queryText, cfg.topN);
+    if (res?.ok) {
+      return selectHits(Array.isArray(res.hits) ? res.hits : [], cfg);
+    }
+    // worker 不可用 → 回退到下面的逐次 execFile 路径
+  }
+  return queryKBFallback(cfg, queryText);
+}
+
+/** 归一化 + 过滤命中（worker 与回退路径共用，保证两条路径结果一致）。 */
+function selectHits(raw, cfg) {
+  return raw
     .filter((h) => typeof h?.score === "number")
-    .filter((h) => h.score >= cfg.minScore)                  // 高阈值：只引高相关
-    .filter((h) => !cfg.excludeRe.test(h.path || "") && !cfg.excludeRe.test(h.title || ""))  // 排除会话转储
+    .filter((h) => h.score >= cfg.minScore)
+    .filter((h) => !cfg.excludeRe.test(h.path || "") && !cfg.excludeRe.test(h.title || ""))
     .sort((a, b) => b.score - a.score)
     .slice(0, cfg.topN)
     .map((h) => ({
@@ -70,8 +72,27 @@ async function queryKB(cfg, queryText) {
       domain: h.domain || "",
       score: h.score,
       importance: typeof h.importance === "number" ? h.importance : null,
-      snippet: String(h.snippet || "").replace(/\s+/g, " ").trim().slice(0, cfg.snippetMax),
+      // 优先用命中自带的 context（父子块/CCH 上下文），再回退 snippet
+      snippet: String(h.context || h.snippet || "").replace(/\s+/g, " ").trim().slice(0, cfg.snippetMax),
     }));
+}
+
+/** 旧路径（无 worker）：每次 spawn 一个 rag.py query 子进程。作回退 / 参照。 */
+async function queryKBFallback(cfg, queryText) {
+  const args = [
+    cfg.rag, "query", queryText,
+    "--top", String(cfg.topN),
+    "--root", cfg.kbRoot,
+    "--json",
+    "--no-record",
+  ];
+  const { stdout } = await execFileAsync("python3", args, {
+    cwd: cfg.kbRoot,
+    timeout: 12000,
+    env: { ...process.env, PYTHONUNBUFFERED: "1" },
+  });
+  const data = JSON.parse(stdout || "null");
+  return selectHits(Array.isArray(data?.hits) ? data.hits : [], cfg);
 }
 
 export default definePluginEntry({

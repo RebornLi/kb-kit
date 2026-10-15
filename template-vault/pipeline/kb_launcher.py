@@ -33,6 +33,7 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     # 摄入
     ("ingest", None):      ("intake", "review"),
     ("ingest", "review"):  ("intake", "review"),
+    ("ingest", "apply"):   ("intake", "apply"),   # intake 有 apply 动作；缺这条会静默落到 review
     ("ingest", "move"):    ("intake", "move"),
     ("ingest", "trash"):   ("intake", "trash"),
     ("ingest", "agent"):   ("agent_registry", "ingest"),
@@ -88,8 +89,21 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("schema", None):      ("schema", "check"),
     ("schema", "check"):   ("schema", "check"),
     ("schema", "fields"):  ("schema", "fields"),
+    ("schema", "bitemporal"): ("schema", "bitemporal"),
 
     # P3：置信分与矛盾在环
+    ("gate", None):           ("gate", "check"),
+    ("gate", "check"):        ("gate", "check"),
+    ("consolidate", None):    ("consolidate", "run"),
+    ("consolidate", "run"):   ("consolidate", "run"),
+    ("consolidate", "status"):("consolidate", "status"),
+    ("ladder", None):         ("ladder", "status"),
+    ("ladder", "status"):     ("ladder", "status"),
+    ("ladder", "propose"):    ("ladder", "propose"),
+    ("ladder", "run"):        ("ladder", "run"),
+    ("ladder", "apply"):      ("ladder", "apply"),
+    ("ladder", "adjudicate"): ("ladder", "adjudicate"),
+    ("ladder", "verdicts"):   ("ladder", "verdicts"),
     ("confidence", None):     ("confidence", "audit"),
     ("confidence", "audit"):  ("confidence", "audit"),
     ("confidence", "show"):   ("confidence", "show"),
@@ -187,11 +201,27 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
 
 
 # ── 布尔标志参数（无值，存在即 True）────────────────────────
+# 这份清单必须覆盖 pipeline/ 与 plugins/ 里**全部** action="store_true" 的旗标：
+# 解析器只有两种形态 —— 在白名单里 = 无值布尔；不在 = 会吞掉下一个 token 当值。
+# 曾经只登记了 13 个，而全项目有 39 个 store_true，于是 `kb clean --apply x.md` 之类
+# 会把位置参数吃成旗标值。tests/test_launcher_flags.py 会扫描源码守卫这份清单。
 BOOL_FLAGS = {
-    "--dry-run", "--dry", "--json", "--answer", "--semantic",
-    "--incremental", "--full", "--move", "--trash",
-    "--list", "--verbose", "--debug", "--help", "-h",
+    "--ab-report", "--all", "--allow-existing-issues", "--answer", "--apply",
+    "--apply-pass", "--auto", "--confirm", "--debug", "--decay",
+    "--dry", "--dry-run", "--exclude-stale", "--export", "--force",
+    "--full", "--generate", "--help", "--include-evidence", "--include-raw",
+    "--include-stubs", "--incremental", "--json", "--list", "--llm",
+    "--log", "--move", "--no-purge", "--no-record", "--out", "--path-only",
+    "--pending", "--quality", "--report", "--reset-config", "--review",
+    "--semantic", "--status", "--stdin", "--strict", "--trash",
+    "--verbose", "--with-index",
+    "-h",
+    "--kpi",
 }
+
+# 可重复取值的旗标（nargs="+"）：lancher 只吃一个 token 会让第 2 个起落到 _positional
+# 然后被静默丢弃（如 `kb agent add --project-context-root /a /b`）。
+MULTI_FLAGS = {"--project-context-root"}
 
 
 class KBLauncher:
@@ -218,9 +248,12 @@ class KBLauncher:
     def _parse_params(args: List[str]) -> dict:
         """将命令行参数解析为 params dict。
 
-        --key value → params["key"] = value
-        --bool-flag → params["bool_flag"] = True
-        位置参数 → params["_positional"] = [...]
+        --key value  → params["key"] = value
+        --key=value  → params["key"] = value（与 --root= 保持一致的写法）
+        --bool-flag  → params["bool_flag"] = True
+        --multi a b  → params["multi"] = ["a", "b"]（MULTI_FLAGS 里的 nargs="+" 旗标）
+        -h           → params["-h"] = True（短选项保留原形，不改写成 --h）
+        位置参数      → params["_positional"] = [...]
         """
         params: dict = {}
         positional: List[str] = []
@@ -228,15 +261,30 @@ class KBLauncher:
         while i < len(args):
             arg = args[i]
             if arg.startswith("--"):
+                # `--key=value`：以前不识别，整串被当成键名（`top=3`）导致值静默丢失
+                if "=" in arg:
+                    key, _, val = arg[2:].partition("=")
+                    params[key.replace("-", "_")] = val
+                    i += 1
+                    continue
                 key = arg[2:].replace("-", "_")
+                if arg in MULTI_FLAGS:
+                    vals: List[str] = []
+                    j = i + 1
+                    while j < len(args) and not args[j].startswith("-"):
+                        vals.append(args[j])
+                        j += 1
+                    params[key] = vals
+                    i = j
+                    continue
                 if arg in BOOL_FLAGS or i + 1 >= len(args) or args[i + 1].startswith("--"):
                     params[key] = True
                 else:
                     params[key] = args[i + 1]
                     i += 1
             elif arg.startswith("-") and len(arg) > 1:
-                key = arg[1:].replace("-", "_")
-                params[key] = True
+                # 短选项原样保留：以前改写成 `--h`，`kb query -h` 必然报错
+                params[arg] = True
             else:
                 positional.append(arg)
             i += 1
@@ -282,6 +330,16 @@ class KBLauncher:
             # 检查 (tool, candidate_sub) 是否在映射表中
             if (tool, candidate_sub) in COMPAT_MAP:
                 sub = candidate_sub
+                params_args = rest[1:]
+        # 写开关被写成旗标形态时，把它提升成子命令：
+        # `kb clean --apply` → `kb clean apply`。README 与 `kb help` 都用这种写法，
+        # 但以前会解析成 `clean.py dry-run --apply` → dry-run 子解析器没有 --apply → 报错退出。
+        # 只在「(tool, 旗标名) 确实是 COMPAT_MAP 里的合法子命令」时提升，不误伤真旗标
+        # （如 `--log`/`--json`/`--full` 都不是任何工具的子命令名）。
+        if sub is None and rest and rest[0].startswith("--"):
+            candidate = rest[0][2:]
+            if candidate and "--" not in candidate and (tool, candidate) in COMPAT_MAP:
+                sub = candidate
                 params_args = rest[1:]
 
         # 查兼容映射表
@@ -387,8 +445,18 @@ class KBLauncher:
         print("  kb validate               frontmatter 校验")
         print("  kb schema check           对照知识契约（reference/kb-schema.json）查偏差")
         print("  kb schema fields          字段使用率（看契约实际覆盖）")
+        print("  kb schema bitemporal      补双时态字段（事件时间/事务时间，默认 dry-run）")
         print("")
         print("置信与矛盾（P3）:")
+        print("  kb gate check             写入前质量门禁（pass/quarantine/reject 三态）")
+        print("  kb consolidate run        睡眠时整理（空闲期算近重复/冲突/陈旧，只产提议）")
+        print("  kb consolidate status     整理水位与上次结果")
+        print("  kb ladder                  L0–L5 反馈阶梯状态（只读）")
+        print("  kb ladder propose          产出各级提案（不改笔记，交人工）")
+        print("  kb ladder run              propose + 简报（cron 入口）")
+        print("  kb ladder apply --level L1 --id N   人工确认后落地")
+        print("  kb ladder adjudicate      本地模型自主裁决（LLM 语义 + 实测双闸）")
+        print("  kb ladder verdicts        裁决账本（谁判的/判了什么/依据）")
         print("  kb confidence audit       复合置信分审计（四因子可解释）+ 分档")
         print("  kb confidence show --rel P 解释某一篇为什么是这个分")
         print("  kb decay                  原则性遗忘审计（只降层，从不删文件）")

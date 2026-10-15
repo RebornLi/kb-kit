@@ -49,6 +49,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi  # 复用 collect/metrics（接地阀 P0-1 + 真实结果快照）
+from state_manager import state_path, read_state_path
 
 # 单一事实源：收敛在 kb_constants（与 L0/L2/L3/L4 常量同中心）
 from kb_constants import (
@@ -58,31 +59,44 @@ from kb_constants import (
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 
-STATE_FILE = ".kb_l5_state.json"      # 运行态：逐 rung score + cycle 历史（gitignore）
-CONFIG_FILE = ".kb_l5_policy.json"    # 发布的元策略权重（人工/调度 apply 写，gitignore）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+STATE_FILE = "kb_l5_state.json"       # 运行态：逐 rung score + cycle 历史（gitignore）
+CONFIG_FILE = "kb_l5_policy.json"     # 发布的元策略权重（人工/调度 apply 写，gitignore）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {
+    STATE_FILE: ".kb_l5_state.json",
+    CONFIG_FILE: ".kb_l5_policy.json",
+}
 
 # 各 rung「本 cycle 是否动作过」的来源（= 该层自己的 applied/状态账本，best-effort，缺一 rung 不炸）
 #   l0/l2 读 applied 字典；l1 读 adjustments 列表；l3 读 meta 状态 cycles 计数。
+#   这些是**别的模块**的状态：写死旧路径会在它们迁移后读不到 → 统一「规范名 + 旧位置回退」。
 _L5_ACTIVITY = {
-    "l0": str(Path("pipeline") / ".kb_retriage_applied.json"),
-    "l1": str(Path("pipeline") / ".kb_retrieval_adjust.json"),
-    "l2": str(Path("pipeline") / ".kb_selfweight_applied.json"),
-    "l3": ".kb_meta_state.json",
+    "l0": ("kb_retriage_applied.json", "pipeline/.kb_retriage_applied.json"),
+    "l1": ("kb_retrieval_adjust.json", "pipeline/.kb_retrieval_adjust.json"),
+    "l2": ("kb_selfweight_applied.json", "pipeline/.kb_selfweight_applied.json"),
+    "l3": ("kb_meta_state.json", ".kb_meta_state.json"),
 }
 
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
 def _state_path(root: Union[str, Path]) -> Path:
-    return Path(root) / STATE_FILE
+    """**写**路径（规范）。读请用 `_read_path`。"""
+    return state_path(root, STATE_FILE)
 
 
 def _config_path(root: Union[str, Path]) -> Path:
-    return Path(root) / CONFIG_FILE
+    return state_path(root, CONFIG_FILE)
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """读路径：规范优先，回退旧位置。"""
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 
 def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _state_path(root)
-    if not p.exists():
+    p = _read_path(root, STATE_FILE)
+    if p is None:
         return {"scores": {r: 0.0 for r in L5_RUNGS}, "cycles": []}
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
@@ -94,13 +108,14 @@ def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
 
 
 def _write_state(root: Union[str, Path], state: Dict[str, Any]) -> None:
-    p = _state_path(root)
-    p.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子写（委托 kb_common）：半截状态会让 cycle 历史整段丢失
+    from kb_common import atomic_write_text
+    atomic_write_text(_state_path(root), json.dumps(state, ensure_ascii=False, indent=2))
 
 
 def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _config_path(root)
-    if not p.exists():
+    p = _read_path(root, CONFIG_FILE)
+    if p is None:
         return {}
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
@@ -112,8 +127,8 @@ def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
 
 
 def _write_config(root: Union[str, Path], config: Dict[str, Any]) -> None:
-    p = _config_path(root)
-    p.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    from kb_common import atomic_write_text
+    atomic_write_text(_config_path(root), json.dumps(config, ensure_ascii=False, indent=2))
 
 
 def _checkpoint(root: Union[str, Path], message: str, paths: List[Path]) -> bool:
@@ -156,11 +171,15 @@ def _outcome(root: Union[str, Path]) -> Optional[Dict[str, Any]]:
 # ── 逐 rung 本 cycle 是否动作过（读该层自己的账本，best-effort）────────────────────
 def _rung_activity(root: Union[str, Path], rung: str) -> int:
     """返回某 rung 本 cycle 累计动作量（>0=动作过）。缺失/损坏 → 0。"""
-    rel = _L5_ACTIVITY.get(rung)
-    if not rel:
+    spec = _L5_ACTIVITY.get(rung)
+    if not spec:
+        return 0
+    name, legacy = spec
+    p = read_state_path(root, name, legacy=(legacy,))
+    if p is None:
         return 0
     try:
-        d = json.loads((Path(root) / rel).read_text(encoding="utf-8"))
+        d = json.loads(p.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return 0
     if not isinstance(d, dict):

@@ -18,7 +18,8 @@ from pathlib import Path
 from collections import Counter
 from kb_common import ROOT_DEFAULT
 
-STATE_FILE = ".memory_ingest_state.json"
+# 状态文件名（统一存 <vault>/.kb/state/；旧位置 .memory_ingest_state.json 只读回退）
+STATE_FILE = "memory_ingest_state.json"
 
 
 def _domain(content):
@@ -162,14 +163,14 @@ def _fm_block(fm):
 
 
 def _load_state(root):
-    try:
-        return json.loads((Path(root) / STATE_FILE).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    # 统一走 state_manager：读规范路径（.kb/state/），旧位置 .memory_ingest_state.json 只读回退
+    from state_manager import read_json
+    return read_json(root, STATE_FILE, legacy=(".memory_ingest_state.json",))
 
 
 def _save_state(root, state):
-    (Path(root) / STATE_FILE).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    from state_manager import write_json
+    write_json(root, STATE_FILE, state)
 
 
 def _git_add_commit(root, rels):

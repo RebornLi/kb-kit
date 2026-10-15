@@ -75,8 +75,13 @@ kb query "怎么备份知识库"
 | 写了新笔记后让它能被搜到 | `kb rag index` |
 | 看收件箱要怎么整理 | `kb ingest` |
 | 检查知识库健康度 | `kb healthcheck` |
+| 入库前查质量门禁 | `kb gate check` |
+| 空闲时整理知识库 | `kb consolidate run` |
+| 看抗 Goodhart 的健康 KPI | `kb health kpi` |
 | 今天该复习哪些 | `kb recall` |
 | 生成治理仪表盘 | `kb dashboard` |
+| 看自我调节阶梯（L0–L5） | `kb ladder` · 产提案 `kb ladder propose` |
+| 让本地模型自主裁决提案 | `kb ladder adjudicate` · 账本 `kb ladder verdicts` |
 | 备份 | `kb backup daily` |
 | 看所有插件与状态 | `kb list` |
 
@@ -91,17 +96,22 @@ kb query "怎么备份知识库"
 统一由 `pipeline/kb_launcher.py` 路由到插件注册中心（`COMPAT_MAP` 兼容旧命令名）。
 
 **检索**
-- `kb query "问题" [--top N] [--json] [--answer] [--domain X] [--content-type T] [--tags a,b] [--date-from D] [--date-to D] [--exclude-stale] …`
+- `kb query "问题" [--top N] [--json] [--answer] [--domain X] [--content-type T] [--tags a,b] [--date-from D] [--date-to D] [--exclude-stale] [--no-record] …`
+  - `--no-record`：**不写使用信号**。评测/探针/脚本调用必须带它，否则会把「评测流量」灌进再问率、反过来压低 fitness
 - `kb rag index`　重建/增量更新本地向量索引
+- `kb contextual [build [--llm] [--limit N] [--dry-run] | show --rel R]`　上下文强化（确定性 CCH，零成本；`--llm` 才用本地模型补充定位语，只进索引不改正文）
 
 **摄入**
 - `kb ingest`　收件箱四维 triage（只读，写 `intake_triage.md`）
 - `kb ingest move`　按 `kb_target` 路由收件箱（写操作；合并时写墓碑/别名/lineage）
 - `kb ingest trash`　归档收件箱（写操作）
 - `kb ingest agent`　按注册表摄取 Agent 记忆进 KB
+- `kb ingest-agent`　同上（简写，等价于 `kb agent ingest`）
+- `kb ingest-any <文件>`　统一摄取入口：格式归一化 → 分类 → 质量门禁 → 路由 → 写入（等价于 `kb sync ingest-any`）
 
 **Agent 管理**
-- `kb agent detect | list | add --name N --type T | enable --name N --enable true | setup | ingest`
+- `kb agent detect | list | add --name N --type T [--json-path F] | enable --name N --enable true | setup | ingest`
+  - 注册 JSON 记忆源请用 **`--json-path`**（`--json` 是全局布尔旗标，它的值会被当成位置参数）
 
 **成长引擎**
 - `kb feedback [ingest | apply | hit --query Q --hit PATH --useful true|false]`
@@ -113,12 +123,25 @@ kb query "怎么备份知识库"
 
 **治理**
 - `kb healthcheck [all | summary | deadlinks | skeletons | tags | empty | frontmatter | discipline | overlong | orphans | freshness]`
+  - 别名 `kb kb-healthcheck` = `kb healthcheck`
+- `kb health-metrics`　六维健康度量指标
 - `kb validate [--strict]`
 - `kb dashboard`
-- `kb clean [dry-run | apply | chunk | report | refine | taxonomy | repair]`
+- `kb clean [dry-run | apply | chunk | report | refine | taxonomy | repair | repair-headings]`
   - `refine` = 结构化+去重→分块→重建索引→校验　·　`taxonomy [--apply]` = 标签归一（受控词表/层级）
   - `repair [--apply]` = 修历史分块残留（未插值占位符 → 实际标题；分块索引页打 `kb_layer: index` 标）
+  - `--apply` 可直接跟在 `clean` 后（`kb clean --apply` = `kb clean apply`）
 - `kb user [add | list | remove | check-perm]`
+
+**结构审计与契约**
+- `kb audit [scan | fix [--confirm] | log]`　结构审计（溯源漂移/标签簇内聚/索引一致性/孤儿/死链）；`fix` 需 `--confirm` 才写
+- `kb schema [check [--limit N] [--json] | fields]`　知识契约（`reference/kb-schema.json`）只读对照 + 字段使用率
+- `kb tagfix [scan | fix [--apply]]`　标签越界治理（删目录路径型 / 归一别名 / 扩受控词表），默认 dry-run
+
+**置信分与矛盾（人工在环）**
+- `kb confidence [show --rel R | audit [--limit N] | apply [--dry-run] [--limit N] | decay]`　复合置信分（四因子可审计）
+  - `kb decay` 是 `kb confidence decay` 的别名（原则性遗忘审计：**只降层，从不删文件**）
+- `kb contradict [scan | apply [--dry-run] [--limit N]]`　矛盾在环：主题重合+变更信号 → 标注 + 人工队列（区分真冲突与近似重复）
 
 **知识结晶（空闲本地 Agent 把日志炼成可调用正典）**
 - `kb curate plan`　只读：选出最该结晶的笔记 + 本地模型可用性
@@ -135,8 +158,15 @@ kb query "怎么备份知识库"
 
 **同步**
 - `kb sync [dry-run | apply | rollback | history | ingest-any]`
+  - ⚠️ `rollback` 会 `git reset --hard` 并清理未跟踪笔记；清理**前会先备份**到 `backups/rollback-<ts>/`，备份不完整则整体放弃清理
+
+**评测（RAGAS 式，需本地裁判模型）**
+- `kb eval [run | gold | compare]`　四指标 faithfulness / relevancy / context_precision / context_recall
+  - 需要本地裁判模型（`.kb/model.json` 或 `ORNITH_API_KEY`）；不可用时优雅降级并提示，不会崩
+  - `context_recall` 需要人工确认的黄金集，缺 `gold_set.jsonl` 时为 `null`
 
 **其它**
+- `kb verify [--json] [--with-index] [--timeout S]`　一行验收：契约/校验/巡检/探针/单测 五项全绿（退出码 0 = 全绿）
 - `kb backup [daily | weekly]`　全量快照（zip + sha256，跨平台）
 - `kb list`　列出所有插件及状态
 - `kb help`　帮助
@@ -197,11 +227,22 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
 
 ### 插件清单（`kb list`）
 
-- **Agent 适配器（4）**：`agent_registry`、`agent_md`、`agent_json`、`agent_sqlite`
-- **KB 模块（24）**：`rag`、`intake`、`feedback`、`link`、`recall`、`healthcheck`、
-  `health_metrics`、`dashboard`、`clean`、`validate`、`sync`、`memory_sync`、`classify`、
-  `graph`、`rerank`、`semantic_chunk`、`ingest_chat`、`ingest_convert`、`user_manager`、
-  `compile`、`rsi`、`backup`
+实测 **39 个**：4 个 Agent 适配器 + 35 个 KB 模块。新增插件放进 `pipeline/plugins/` 即被发现。
+
+- **Agent 适配器（4）**：`agent_registry`、`agent_json`、`agent_md`、`agent_sqlite`
+- **KB 模块（35）**：
+  - 检索与索引：`rag`、`rerank`、`semantic_chunk`、`contextual`
+  - 摄入与清洗：`intake`、`clean`、`classify`、`ingest_chat`、`ingest_convert`、`sync`
+  - 记忆与图谱：`memory_sync`、`graph`、`link`
+  - 治理与质量：`healthcheck`、`health_metrics`、`validate`、`schema`、`audit`、`tagfix`、`verify`、`dashboard`、`user_manager`
+  - 成长与反馈：`feedback`、`recall`、`compile`、`rsi`、`ladder`（L0–L5 阶梯统一入口）
+  - 质量与整理：`gate`（写入前门禁三态）、`consolidate`（睡眠时整理）
+  - 知识结晶与判定：`curate`、`confidence`、`contradict`、`raw`
+  - 运维：`backup`
+  - 评测：`eval`
+
+> 该清单由注册中心实测得出；`tests/test_readme_plugin_list.py` 会比对 README 与实际
+> 插件，防止再次漂移（历史上这里曾写「24 个」而实际 32 个）。
 
 ---
 
@@ -258,7 +299,7 @@ OpenClaw / Hermes / DSH / Codex / OpenCode 并注册；可手动增删：
 ```bash
 kb agent detect                 # 探测本机 Agent
 kb agent list                   # 列出已注册
-kb agent add --name dsh --type json --json ~/.dsh/storages/memory.json
+kb agent add --name dsh --type json --json-path ~/.dsh/storages/memory.json
 kb agent add --name opencode --type opencode --opencode-db ~/.local/share/opencode/opencode.db
 kb agent enable --name dsh --enable false
 kb ingest agent --dry-run       # 预览摄取（只读）
@@ -292,11 +333,52 @@ kb ingest agent                 # 实际摄取
 
 ## 九、开发与测试
 
-- **Python 回归**：`python3 -m unittest discover -s tests`（66 条；覆盖 rag 增量/缓存/混合检索/来源权威、
-  状态原子写、verify、create_vault、插件发现、可达性、help 对齐、`--root`、清洗去重/分块、taxonomy、SM-2 回忆、墓碑/lineage）。
+单测只覆盖**函数级**行为。检索质量、性能量级、状态迁移、安装验收这四类改动必须在
+**真实规模的库**上验证，所以开发仓提供一套可复现的测试环境。
+
+### 9.1 测试环境（`tests/testenv.py`）
+
+```bash
+python3 tests/testenv.py build                 # 合成库（默认 300 篇）+ 安装验收库
+python3 tests/testenv.py build --from-vault /path/to/real-vault   # 追加真实库副本
+python3 tests/testenv.py check --perf          # 全套验证 + 性能基线
+python3 tests/testenv.py status                # 看环境状态与构建参数
+python3 tests/testenv.py clean                 # 删除
+```
+
+产物在 `.testenv/`（已 gitignore）：
+
+| 目录 | 用途 |
+|------|------|
+| `fresh/` | `create_vault` 装出来的新库 → 安装验收（`kb verify` 必须全过） |
+| `synth/` | 合成库（有效笔记 + 索引 + 黄金集）→ 检索/治理/状态全链路**冒烟** |
+| `clone/` | 可选：真实库副本 + dev 代码 + 重建索引 → 检索**质量**与**真实规模性能** |
+
+**隔离铁律**：`KB_ROOT` 在本机全局指向现役库，一处疏忽就会改到生产数据。因此所有子进程都由
+`run()` 发起并**强制**把 `KB_ROOT` 指到沙箱；任何落在保护路径内的构建目标直接 abort。
+这条由 `tests/test_testenv.py` 守卫。
+
+> ⚠️ `clone/` 是真实库的副本（可能含私人内容）：它被 gitignore，`clean` 可随时删除；
+> 只做质量评测时也可以不带 `--from-vault`，只用合成库冒烟。
+
+实测基线（供改动前后对比）：`clone` 索引 **17.9 MB / 1530 篇** · `json.loads` **199 ms** ·
+查询 p50 **350 ms**（含进程启动）；检索质量 **top1 90.0% · recall@10 98.3% · MRR 0.950**。
+
+### 9.2 单元测试
+
+- `python3 -m unittest discover -s tests`　（**193 条，约 1 秒**）
+  - 覆盖：rag 增量索引/查询缓存/混合检索/来源权威/索引版本兼容、状态原子写、verify、create_vault、
+    插件发现与 help 对齐、模块可达性、`--root`、清洗去重与分块、taxonomy、SM-2 回忆、墓碑/lineage、
+    路由一致性、README 与实现一致、验收器目标库正确、测试环境隔离，
+    以及一轮代码梳理中修复的全部缺陷（数据安全、CLI 解析、真增量索引、评测不污染信号等）。
+- **检索质量评测（确定性、不需要 LLM 裁判）**：
+  `python3 scripts/eval_retrieval_gold.py [--module rag_b] [--top 10] [--show-misses]`
+  —— 用 `.kb/eval/gold_*.jsonl` 的目标笔记算 top1 / recall@K / MRR。
+  **任何对检索排序的改动都必须先过它**（`rag.py` 里那条倒排加成看起来像量纲缺陷，
+  实测却是排序主力：改法不当会让 recall@10 从 98.3% 掉到 55%）。
 - **DSH 插件**：`cd kb-context-dsh && npm test`（`test.mjs` + `load-probe.mjs`，无需 DSH host）。
 - **OpenClaw 插件**：`cd kb-context-hook && node scripts/test.mjs`。
-- **架构图**：`python3 gen_kb_arch.py`。
+- **架构图**：`python3 gen_kb_arch.py`（输出到 `arch/`，该目录被 gitignore、脚本会自动创建）。
 
 ---
 

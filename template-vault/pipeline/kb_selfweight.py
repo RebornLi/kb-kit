@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi            # 复用 collect/metrics（接地阀）、load_note
-from kb_common import parse_importance as _parse_importance
+from kb_common import parse_importance as _parse_importance, atomic_write_text
+from state_manager import state_path, read_state_path
 from kb_constants import (
     EXTERNAL_MIN_CROSS, EXTERNAL_FRESH_MIN_PCT,
     L2_SIGNAL_MIN, L2_LINK_BONUS, L2_L1_MISS_BONUS,
@@ -48,8 +49,12 @@ from feedback_loop import (
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 
-PROPOSAL_FILE = ".kb_selfweight_proposals.jsonl"   # 瞬态提议（gitignore）
-APPLIED_FILE = ".kb_selfweight_applied.json"       # 累计提升账本（gitignore，写前 force-add 作回滚锚）
+# 状态文件名（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）
+PROPOSAL_FILE = "kb_selfweight_proposals.jsonl"   # 瞬态提议（gitignore）
+APPLIED_FILE = "kb_selfweight_applied.json"       # 累计提升账本（gitignore，写前 force-add 作回滚锚）
+# 旧位置（迁移期只读回退；写永远只写规范路径）
+_LEGACY = {PROPOSAL_FILE: "pipeline/.kb_selfweight_proposals.jsonl",
+           APPLIED_FILE: "pipeline/.kb_selfweight_applied.json"}
 
 
 # ── 状态 / 文件路径 ──────────────────────────────────────────
@@ -74,16 +79,21 @@ def _state(root: Union[str, Path]) -> Dict[str, Any]:
 
 
 def _prop_path(root: Union[str, Path]) -> Path:
-    return Path(root) / "pipeline" / PROPOSAL_FILE
+    return state_path(root, PROPOSAL_FILE)
 
 
 def _applied_path(root: Union[str, Path]) -> Path:
-    return Path(root) / "pipeline" / APPLIED_FILE
+    return state_path(root, APPLIED_FILE)
+
+
+def _read_path(root: Union[str, Path], name: str):
+    """读路径：规范优先，回退旧位置（旧库升级后账本不会凭空消失）。"""
+    return read_state_path(root, name, legacy=(_LEGACY.get(name),))
 
 
 def _read_applied(root: Union[str, Path]) -> Dict[str, Any]:
-    p = _applied_path(root)
-    if not p.exists():
+    p = _read_path(root, APPLIED_FILE)
+    if p is None:
         return {"applied": {}}
     try:
         return json.loads(p.read_text(encoding="utf-8"))
@@ -347,11 +357,10 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
         written.append({"id": rid, "rel": rel, "old": old, "new": new_imp, "delta": round(actual, 3)})
 
     # 写累计账本（transient，force-add 作回滚锚点）
-    ap_path = _applied_path(root)
-    ap_path.parent.mkdir(parents=True, exist_ok=True)
-    ap_path.write_text(json.dumps({"applied": applied, "ids": sorted(applied_ids),
-                                   "updated": datetime.now().isoformat(timespec="seconds")},
-                                  ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(_applied_path(root),
+                      json.dumps({"applied": applied, "ids": sorted(applied_ids),
+                                  "updated": datetime.now().isoformat(timespec="seconds")},
+                                 ensure_ascii=False, indent=2))
 
     if written:
         for rel in rels:

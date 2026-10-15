@@ -33,13 +33,13 @@
       "maxBytes": {
         "type": "integer",
         "minimum": 64,
-        "default": 700,
+        "default": 900,
         "description": "注入块的空间上限（env KB_MAX_BYTES 可覆盖）"
       },
       "snippetMax": {
         "type": "integer",
         "minimum": 8,
-        "default": 40,
+        "default": 140,
         "description": "每条命中片段截断的字符数（env KB_SNIPPET_MAX 可覆盖）"
       },
       "enabled": {

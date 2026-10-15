@@ -55,8 +55,11 @@ def build_mermaid(nodes, max_nodes=MAX_NODES):
         node_ids[rel] = node_id
         title = info["title"].replace('"', "'")
         ct = info["content_type"]
-        shape = "[]" if ct == "policy" else "()" if ct == "decision" else "(())"
-        lines.append(f'  {node_id}{shape[:1]}{shape[1:] if len(shape)>1 else ""}["{title}"]')
+        # Mermaid 的形状语法是「括号包住标签」，不是拼在节点 id 后面：
+        # 以前拼成 `N0(())["标题"]` / `N1[]["标题"]` 全是非法语法，图渲染不出来。
+        open_b, close_b = ("[", "]") if ct == "policy" else \
+                          ("(", ")") if ct == "decision" else ("((", "))")
+        lines.append(f'  {node_id}{open_b}"{title}"{close_b}')
 
     # 边
     edge_styles = {
