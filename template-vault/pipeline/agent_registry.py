@@ -28,13 +28,14 @@ from pathlib import Path
 STATE_FILE = "kb-agent.json"
 _LEGACY_STATE = ("kb-agent.json", ".kb-agent.json")
 
-# 六种 agent 的形态:
+# 七种 agent 的形态:
 #   md                 : 记忆是 .md 文件（OpenClaw 有日报 + 核心文件；Hermes 仅有核心文件）
-#   json               : 记忆是纯 JSON（DSH 的 agent-memory + evolve 结晶）
+#   json               : 记忆是纯 JSON（DSH 的 agent-memory + evolve 结晶，通常是过期快照）
+#   session            : 记忆是 DSH 原始对话日志（.dsh/sessions/*.jsonl.zstd）= 每天新记忆
 #   project-context    : 事件记忆在 <项目>/.agents/memory/*.md（project-context 生成）
 #   sqlite             : 记忆是 SQLite 数据库（Codex 的 thread_items）
 #   opencode           : 记忆是 SQLite 数据库（OpenCode 的 session/message/part）
-AGENT_TYPES = ("md", "json", "project-context", "sqlite", "opencode")
+AGENT_TYPES = ("md", "json", "session", "project-context", "sqlite", "opencode")
 
 
 # ------------------------------------------------------------
@@ -267,6 +268,8 @@ def cmd_ingest(root, name, dry_run, out):
             done.append(_ingest_sqlite(root, aname, srcs, dry_run, out))
         elif atype == "opencode":
             done.append(_ingest_opencode(root, aname, srcs, dry_run, out))
+        elif atype == "session":
+            done.append(_ingest_session(root, aname, srcs, dry_run, out))
         else:
             out.append(f"⚠️ 未知 agent 类型 {atype}，跳过 {aname}")
     return 0
@@ -387,6 +390,41 @@ def _ingest_opencode(root, aname, srcs, dry_run, out):
     return f"{aname}: opencode done"
 
 
+def _ingest_session(root, aname, srcs, dry_run, out):
+    """摄入 DSH 原始对话日志（.dsh/sessions/*.jsonl.zstd）—— 每天新记忆。
+
+    两条腿（原样落检索层 + 本地模型蒸馏出可晋升结论）：
+    1) memory_ingest_session.mirror_session：人类轮原样落 memory/（status: staged，不晋升）；
+       幂等键=物理文件路径 str(p)（多版本文件不互相覆盖）；独立 state 不污染共享去重表。
+    2) memory_distill_session.distill_session：用本地 LLM（ornith）把会话炼成声明式
+       决定/经验（status: active，可晋升）；缺 ORNITH 配置时自动跳过，不影响第 1 条。
+    apply=(not dry_run)：dry-run 只读预览（不写盘、不 commit），实写时才落盘 + git commit。"""
+    try:
+        import memory_ingest_session as msi
+    except (ImportError, ModuleNotFoundError):
+        out.append(f"  ⚠️ memory_ingest_session 缺省，跳过 {aname}")
+        return f"{aname}: skip(memory_ingest_session)"
+    session_root = srcs.get("root") or os.environ.get("KB_DSH_SESSION_ROOT")
+    if not session_root:
+        out.append(f"  ⚠️ 缺会话日志根（需 sources.root 或 KB_DSH_SESSION_ROOT），跳过 {aname}")
+        return f"{aname}: skip(no session root)"
+    out.append(f"→ {aname}（session）: sessions={session_root}（{'只读预览' if dry_run else '实写'}）")
+    try:
+        msi.mirror_session(root, session_root, days=0,
+                           apply=(not dry_run), agent_name=aname)
+    except Exception as e:  # 写侧带坏不中断整条流水线（靠 step() 判定）
+        out.append(f"  ⚠️ 原始轮摄取异常: {e}")
+    try:
+        import memory_distill_session as mds
+        mds.distill_session(root, session_root, days=0,
+                            apply=(not dry_run), agent_name="dsh-distill")
+    except (ImportError, ModuleNotFoundError):
+        out.append("  ⚠️ memory_distill_session 缺省，仅落原始轮（无蒸馏）")
+    except Exception as e:
+        out.append(f"  ⚠️ 蒸馏异常: {e}")
+    return f"{aname}: session {'dry-run' if dry_run else 'written'}"
+
+
 def main():
     ap = argparse.ArgumentParser(description="多 agent 记忆摄取注册表")
     sub = ap.add_parser("sub") if False else ap
@@ -433,12 +471,6 @@ def main():
         r = cmd_enable(args.root, args.name, (args.enable.lower() not in ("false", "0", "no")), out)
         print("\n".join(out)); return r
     if args.cmd == "ingest":
-        if getattr(args, "list", False):
-            # `--list` 只在 ingest 子命令上注册过，cmd_ingest 从不检查它，且默认非 dry-run
-            # → 以前 `kb ingest-agent --list` 不列清单而是**直接写库**。这里短路成只读列举。
-            r = cmd_list(args.root, out)
-            print("\n".join(out))
-            return r
         r = cmd_ingest(args.root, args.name, args.dry_run, out)
         # 始终打印摄取结果（md agents 的输出依赖这里）
         print("\n".join(out))

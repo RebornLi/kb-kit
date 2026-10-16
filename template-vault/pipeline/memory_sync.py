@@ -162,11 +162,16 @@ def save_state(root, state):
         write_json(root, "memory_sync_state.json", state)
 
 
-def best_match(vocab, idf, rel2vec, meta_all, body, topk=2):
+def best_match(vocab, idf, rel2vec, meta_all, body, topk=2, exclude=None):
+    """返回与 body 最相似的 topk 篇（排除 exclude 指定的 rel，通常是查询文件自身）。
+
+    必须排除自身：rel2vec 覆盖全库（含 memory/ 下未晋升文件），若不排除，
+    查询文件会以 sim≈1.0 匹配到自己 → 恒判「与 KB 重复」→ 所有记忆永远无法晋升。"""
     if not rel2vec:
         return []
     qv = rag._vec(Counter(rag.tokenize(body)), vocab, idf)
-    scored = [(r, rag._cos(v, qv), meta_all.get(r, {})) for r, v in rel2vec.items()]
+    scored = [(r, rag._cos(v, qv), meta_all.get(r, {})) for r, v in rel2vec.items()
+              if r != exclude]
     scored.sort(key=lambda x: x[1], reverse=True)
     return [(r, s, m) for r, s, m in scored if s > 0][:topk]
 
@@ -184,7 +189,7 @@ def memory_files(root):
 
 def grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic, root=None):
     dens = signal_density(body)
-    matches = best_match(vocab, idf, rel2vec, meta_all, body, topk=2)
+    matches = best_match(vocab, idf, rel2vec, meta_all, body, topk=2, exclude=rel)
     best = matches[0] if matches else None
     best_sim = best[1] if best else 0.0
     best_rel = best[0] if best else None
@@ -364,11 +369,14 @@ def do_promote(root, density_thr, min_chars, semantic, dry_run=False):
         print("⛳ 写前 checkpoint（快照 HEAD，仅记录不 sweep）")
     baseline = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"],
                                   capture_output=True, text=True).stdout.strip()
-    created, skipped, skipped_old, nearc = 0, 0, 0, 0
+    created, skipped, skipped_old, nearc, staged_skip = 0, 0, 0, 0, 0
     staged = []
     for rel, p, fm, body in memory_files(root):
         if rel in promoted:
             skipped_old += 1          # 幂等：已晋升过，跳过
+            continue
+        if str(fm.get("status", "")).strip().lower() == "staged":
+            staged_skip += 1          # 原始会话轮（status: staged）：只做检索层，蒸馏后才晋升
             continue
         g = grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, semantic, root)
         if not g["pass"]:
@@ -422,7 +430,8 @@ def do_promote(root, density_thr, min_chars, semantic, dry_run=False):
     if not dry_run:
         save_state(root, state)
     if dry_run:
-        print(f"\n🔍 dry-run 汇总：拟晋升 {created} 条 · 已晋升跳过 {skipped_old} 条 · 留档 {skipped} 条")
+        print(f"\n🔍 dry-run 汇总：拟晋升 {created} 条 · 已晋升跳过 {skipped_old} 条 · "
+              f"staged 不晋升 {staged_skip} 条 · 留档 {skipped} 条")
         print("   应用：kb memory-sync promote --apply")
         return 0
     if staged:
@@ -432,11 +441,13 @@ def do_promote(root, density_thr, min_chars, semantic, dry_run=False):
             subprocess.run(["git", "-C", root, "commit", "-q",
                                 "-m", f"kb: 记忆同步晋升 {created} 条（源 memory/）"],
                                capture_output=True)
-        print(f"✅ 晋升 {created} 条  已晋升跳过 {skipped_old} 条  留档 {skipped} 条  相关 {nearc} 条")
+        print(f"✅ 晋升 {created} 条  已晋升跳过 {skipped_old} 条  staged 不晋升 {staged_skip} 条  "
+              f"留档 {skipped} 条  相关 {nearc} 条")
         print(f"   基线 {baseline}（revert 即可回滚本次晋升）")
     else:
         why = []
         if skipped_old: why.append(f"已晋升跳过 {skipped_old} 条")
+        if staged_skip: why.append(f"staged 不晋升 {staged_skip} 条")
         if skipped: why.append(f"过门槛未通过留档 {skipped} 条")
         if not why: why.append("无记忆源 / 全部过门槛未通过")
         print("✅ 无记忆晋升（" + " · ".join(why) + "）")

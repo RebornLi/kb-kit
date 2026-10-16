@@ -91,6 +91,7 @@ fi
 # ⑦b 注册表驱动记忆摄取：读 kb-agent.json，对所有已启用 agent 自动摄取记忆
 #   这是问题三的核心：定时获取各 agent 的记忆文件，处理成知识库内容
 #   按 agent 类型分发：md → memory_ingest.py / json → memory_ingest_json.py /
+#                       session → memory_ingest_session.py（.dsh/sessions/*.jsonl.zstd，每天新记忆）/
 #                       sqlite → memory_ingest_sqlite.py / project-context → mirror_project_context
 #   先 dry-run 预览再实际摄取，确保安全
 log "⑦b 注册表驱动记忆摄取（kb-agent.json → 各 agent adapter → KB）"
