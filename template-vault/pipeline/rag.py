@@ -1334,8 +1334,12 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
     }, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     try:
         from state_manager import StateStore
-        cache = StateStore(root).load("query_cache.json", {})
-        entry = cache.get(cache_key)
+        # no_record（探针/评测/脚本调用）不应读/写检索缓存：既要拿**最新**结果，
+        # 也不该把 .kb/state/query_cache.json 写进模板库（kb-context 插件/评测跑在
+        # 模板上会污染模板，触发 test_no_state_dir_in_template）。写缓存已在下方用
+        # `if cache is not None` 守卫，这里置 None 即同时禁掉读与写。
+        cache = StateStore(root).load("query_cache.json", {}) if record else None
+        entry = cache.get(cache_key) if cache is not None else None
         if entry and (time.time() - entry.get("ts", 0)) < 300:  # TTL 5 分钟
             # 老条目可能只存了 text 或只存了 result（as_json 以前不在键里）：
             # 取不到就跳过缓存走正常检索，绝不 KeyError。

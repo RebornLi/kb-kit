@@ -70,6 +70,15 @@ kb_contradictions_report.md
 # P2-2: 统一演进日志（机器可读 jsonl + 人可读 EVOLVED.md，每次运行重新生成）
 .kb_evolution.jsonl
 EVOLVED.md
+# ---- 知识结晶（curate）瞬态 state / 账本（可重生成，不入库）----
+.kb/curate_state.json
+.kb/curate_ledger.jsonl
+.kb/curate_review.jsonl
+# kb query 的检索结果缓存，纯瞬态，可随时重建；不入库
+.kb/state/query_cache.json
+# P2: 库内模型端点配置（含密钥，绝不入库）
+.kb/model.json
+kb-model.json
 # P3-2: 阈值标定仿真 ground truth + 标定曲线 CSV（synth/calibrate 产物，可重生成，不入库）
 gt_dup.json
 gt_over.json

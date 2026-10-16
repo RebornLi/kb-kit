@@ -316,10 +316,18 @@ def mirror_project_context(root, roots=None, agent_name="project-context", dry_r
     if roots is None:
         roots = _discover_pc_roots()
     touched, mirrored = [], 0
+    # 自嵌套防护：roots 常是 ~/workspace 这种宽目录，rglob 会一路扫进
+    #   · `.testenv/`（测试环境对 vault 的**完整拷贝**，内含镜像输出 → 无限自嵌套）
+    #   · `reference/project-context/`（镜像**输出本身**，别吃回去）
+    #   · 常规噪声目录（.git / node_modules / __pycache__ / backups / .kb / vector index）
+    _SKIP_PARTS = {".testenv", ".git", "node_modules", "__pycache__",
+                   "backups", ".kb", "vector index", "project-context"}
     for r in roots:
         r = Path(r)
         base = r.name or "root"
         for p in sorted(r.rglob("**/.agents/memory/*.md")):
+            if _SKIP_PARTS & set(p.relative_to(r).parts):
+                continue                    # 跳过测试副本/镜像输出/噪声目录
             rel = p.relative_to(r)                 # .agents/memory/MEMORY.md
             key = f"{base}/{rel}"
             if ch.get(key) == sha(p):
