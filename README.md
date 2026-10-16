@@ -352,6 +352,26 @@ kb ingest agent                 # 实际摄取
 来源标记 `kb_source` 记为实际 Agent 名。探测用「标准位置 + CLI + `KB_<AGENT>_<FIELD>`
 环境变量」覆盖，绝不写死私人路径。
 
+### DSH 会话日志摄取与蒸馏
+
+DSH 的「每日记忆」以原始对话日志形式存在 `~/.dsh/sessions/**/session*.jsonl.zstd`。
+`session` 类型按两条腿处理：
+
+1. **原始轮** → `memory/dsh-<日期>-<指纹>.md`，标 `status: staged`：仅作 `kb query`
+   检索层，`memory-sync promote` 会**跳过**它们，不进 PARA 正典。
+2. **蒸馏结论** → `memory/dshd-<日期>-<指纹>.md`，标 `status: active`：调本地 LLM 把
+   会话炼成声明式「决定/规则/经验/教训」，可被晋升。缺 `ORNITH_*` 配置时自动跳过（只落原始轮）。
+
+```bash
+kb agent add --name dsh-session --type session --root-src ~/.dsh/sessions
+kb ingest agent                  # 原始轮 staged + 蒸馏 active
+kb memory-sync promote --apply   # 晋升蒸馏结论（staged 原始轮始终不晋升）
+```
+
+蒸馏走本地模型：`ORNITH_BASE_URL`（如 `http://127.0.0.1:8000/v1`）、`ORNITH_API_KEY`、
+`ORNITH_CHAT_MODEL`（默认 `ornith1.5-35b`）。会话根亦可用环境变量 `KB_DSH_SESSION_ROOT`
+覆盖。幂等按「物理文件路径 + mtime/size」判定，中断可安全续跑。
+
 ---
 
 ## 八、让知识库「自己跑」

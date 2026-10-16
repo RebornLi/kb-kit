@@ -3,12 +3,44 @@ domain: 管理
 status: active
 importance: 0.5
 created: 2026-09-19
-updated: 2026-10-15
+updated: 2026-10-16
 tags: ["管理"]
 ---
 # 📋 kb-kit 版本更新日志（CHANGELOG）
 
 > 记录 kb-kit 工程套件的版本演进。日期格式：YYYY-MM-DD。
+
+---
+
+## v2.5.0 — DSH 会话日志摄取 + 本地模型蒸馏 + 记忆晋升通路修复（2026-10-16）
+
+把 DSH 运行时的「每日记忆」从原始对话日志接进知识库，并修好长期失效的
+「memory/ → PARA 正典」晋升通路。
+
+### ✨ 新能力
+- **DSH 会话日志摄取**（`session` 类型）：解析 `~/.dsh/sessions/**/session*.jsonl.zstd`，
+  人类发言落 `memory/dsh-<date>-<hash8>.md`（`status: staged`，仅 `kb query` 检索层）。
+- **本地模型蒸馏**：用本地 LLM（`ORNITH_BASE_URL`/`ORNITH_API_KEY`/`ORNITH_CHAT_MODEL`）
+  把会话炼成声明式「决定/规则/经验/教训」，落 `memory/dshd-*.md`（`status: active`，可晋升）。
+  缺配置时优雅跳过，只落原始轮。
+- `agent_registry` 新增 `session` 类型分发 + `_ingest_session`（原始轮 + 蒸馏两条腿），
+  `growth_cron.sh` ⑦b 自动覆盖。
+
+### 🔴 修复：晋升通路此前**从未成功过**
+- **`best_match` 自匹配**：novelty 比较在含 `memory/` 的整库索引里取 top-k，从不排除查询
+  文件自身 → 每个笔记以 sim≈0.99 匹配到自己 → 恒判「与 KB 重复」→ 全部被拦。
+  加 `exclude=rel` 后：拟晋升 **0 → 133 条**。
+- **`memory_sync` 新增 `status: staged` 硬门**：原始会话轮只做检索层、不晋升。
+
+### 🟠 健壮性
+- **`memory_ingest_session` 幂等键修正**：由 `p.name` 改为物理文件路径 `str(p)`——
+  同一 `session-<uuid>/` 目录下的 `session`/`v3`/`v4` 多版本文件会互相覆盖，导致每日重扫全量；
+  且文件名用「每次运行从 1 重数的当日计数器」时，同日二次运行会**覆盖丢失**前一会话的记忆，
+  已改用内容指纹命名并恢复被覆盖条目。
+- **`memory_distill_session` 抗中断**：独立 state + 已有笔记指纹并入去重表 + 每 5 篇增量落盘；
+  `--limit` 支持分批回填。
+- **`agent_registry`**：`load/save_registry` 走 `state_manager.read_json/write_json`
+  （原子写 + 规范路径 + legacy 回退）。
 
 ---
 
