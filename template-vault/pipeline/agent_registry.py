@@ -391,35 +391,28 @@ def _ingest_opencode(root, aname, srcs, dry_run, out):
 
 
 def _ingest_session(root, aname, srcs, dry_run, out):
-    """摄入 DSH 原始对话日志（.dsh/sessions/*.jsonl.zstd）—— 每天新记忆。
+    """摄入 DSH 原始对话日志（.dsh/sessions/*.jsonl.zstd）—— 蒸馏成记忆。
 
-    两条腿（原样落检索层 + 本地模型蒸馏出可晋升结论）：
-    1) memory_ingest_session.mirror_session：人类轮原样落 memory/（status: staged，不晋升）；
-       幂等键=物理文件路径 str(p)（多版本文件不互相覆盖）；独立 state 不污染共享去重表。
-    2) memory_distill_session.distill_session：用本地 LLM（ornith）把会话炼成声明式
-       决定/经验（status: active，可晋升）；缺 ORNITH 配置时自动跳过，不影响第 1 条。
+    单腿：memory_distill_session.distill_session —— 用本地 LLM（ornith）把会话炼成
+    声明式决定/经验（status: active，可晋升），产物 memory/dshd-<date>-<hash8>.md；
+    缺 ORNITH 配置时自动跳过，不写盘。
+
+    已永久停用：memory_ingest_session.mirror_session（原样落 memory/dsh-*.md 的 staged
+    会话镜像腿）。该腿只产日志流水、不入检索、还污染契约校验，已于 2026-10-19 移除。
+    memory_ingest_session 模块文件保留，因 memory_distill_session 仍复用其
+    content_fingerprint / decompress / session_meta 等工具。
     apply=(not dry_run)：dry-run 只读预览（不写盘、不 commit），实写时才落盘 + git commit。"""
-    try:
-        import memory_ingest_session as msi
-    except (ImportError, ModuleNotFoundError):
-        out.append(f"  ⚠️ memory_ingest_session 缺省，跳过 {aname}")
-        return f"{aname}: skip(memory_ingest_session)"
     session_root = srcs.get("root") or os.environ.get("KB_DSH_SESSION_ROOT")
     if not session_root:
         out.append(f"  ⚠️ 缺会话日志根（需 sources.root 或 KB_DSH_SESSION_ROOT），跳过 {aname}")
         return f"{aname}: skip(no session root)"
-    out.append(f"→ {aname}（session）: sessions={session_root}（{'只读预览' if dry_run else '实写'}）")
-    try:
-        msi.mirror_session(root, session_root, days=0,
-                           apply=(not dry_run), agent_name=aname)
-    except Exception as e:  # 写侧带坏不中断整条流水线（靠 step() 判定）
-        out.append(f"  ⚠️ 原始轮摄取异常: {e}")
+    out.append(f"→ {aname}（session）: sessions={session_root}（{'只读预览' if dry_run else '实写'}），仅蒸馏（mirror 已永久停用）")
     try:
         import memory_distill_session as mds
         mds.distill_session(root, session_root, days=0,
                             apply=(not dry_run), agent_name="dsh-distill")
     except (ImportError, ModuleNotFoundError):
-        out.append("  ⚠️ memory_distill_session 缺省，仅落原始轮（无蒸馏）")
+        out.append("  ⚠️ memory_distill_session 缺省，会话蒸馏不可用")
     except Exception as e:
         out.append(f"  ⚠️ 蒸馏异常: {e}")
     return f"{aname}: session {'dry-run' if dry_run else 'written'}"
