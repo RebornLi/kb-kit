@@ -253,10 +253,10 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
 
 ### 插件清单（`kb list`）
 
-实测 **39 个**：4 个 Agent 适配器 + 35 个 KB 模块。新增插件放进 `pipeline/plugins/` 即被发现。
+实测 **40 个**：4 个 Agent 适配器 + 36 个 KB 模块。新增插件放进 `pipeline/plugins/` 即被发现。
 
 - **Agent 适配器（4）**：`agent_registry`、`agent_json`、`agent_md`、`agent_sqlite`
-- **KB 模块（35）**：
+- **KB 模块（36）**：
   - 检索与索引：`rag`、`rerank`、`semantic_chunk`、`contextual`
   - 摄入与清洗：`intake`、`clean`、`classify`、`ingest_chat`、`ingest_convert`、`sync`
   - 记忆与图谱：`memory_sync`、`graph`、`link`
@@ -266,6 +266,7 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
   - 知识结晶与判定：`curate`、`confidence`、`contradict`、`raw`
   - 运维：`backup`
   - 评测：`eval`
+  - 域聚合（P2-1 试点）：`ops`（备份/同步/巡检/度量/仪表盘/审计/评测/验收/用户管理 的统一路由，与上述原名单手并存）
 
 > 该清单由注册中心实测得出；`tests/test_readme_plugin_list.py` 会比对 README 与实际
 > 插件，防止再次漂移。

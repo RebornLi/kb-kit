@@ -50,10 +50,19 @@ def pipeline_modules() -> set:
 
 
 def plugin_scripts() -> set:
+    """插件层封装的引擎脚本名。
+
+    两种接线形态都要认：
+      1. 经典 per-plugin 壳：    SCRIPT_NAME = "rag.py"
+      2. 域聚合插件（P2-1 起）： _ROUTES = {"action": ("kb_audit.py", "scan", True), ...}
+                                 元组第一元素即脚本名
+    """
     out = set()
     for p in PLUGINS.glob("*.py"):
-        m = re.search(r'SCRIPT_NAME\s*=\s*"([^"]+)"', p.read_text(encoding="utf-8"))
-        if m:
+        text = p.read_text(encoding="utf-8")
+        for m in re.finditer(r'SCRIPT_NAME\s*=\s*"([^"]+)"', text):
+            out.add(m.group(1))
+        for m in re.finditer(r'\(\s*"([A-Za-z0-9_.-]+\.py)"\s*,', text):
             out.add(m.group(1))
     return out
 

@@ -63,6 +63,8 @@ import kb_scale as _kb_scale  # noqa: E402
 import kb_launcher          # noqa: E402
 import precheck             # noqa: E402
 import link_engine
+import plugin_base
+from plugin_base import PluginContext  # noqa: E402
 import rag                  # noqa: E402
 import sync as sync_mod     # noqa: E402
 
@@ -258,3 +260,141 @@ class InProcessPluginTest(unittest.TestCase):
 def subprocess_run(cmd, **kw):
     import subprocess as sp
     return sp.run(cmd, capture_output=True, text=True, timeout=120, **kw)
+
+
+class OpsAggregatePluginTest(unittest.TestCase):
+    """P2-1 域合并（ops 域）的行为不变守卫。
+
+    这条测试锁住**两个真实踩过的坑**，都是"合并能注册、测试全绿、但 CLI 执行坏掉"
+    的静默回归 —— 单测绿不等于 CLI 通，所以直接断言 CLI 构造：
+
+      坑1. shim 保留原 `meta.actions`（那是对用户的 CLI 契约，不能改），而聚合类
+           `OpsPlugin._ROUTES` 的键是消歧后的聚合名。只登记聚合名 → 所有 shim 调用
+           都报"ops 不支持动作"（首次实测：`kb verify` 的巡检项挂掉）。
+      坑2. `kb-healthcheck.py` 的**位置参数** `check` 是 argparse choices 且
+           不含 "check"（合法值 all/summary/deadlinks/...），原插件
+           `ACTION_MAP={"check": None}` 明确不传子命令。误传 → invalid choice。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import plugins.ops_plugin as _ops
+        import plugin_registry
+        cls.ops = _ops
+        cls.reg = plugin_registry.PluginRegistry
+        # 用真实模板库做 vault_root（子进程/进程内都会去 pipeline/ 下找脚本）
+        cls.vault = str(REPO / "template-vault")
+
+    def _routes(self, plugin_name, actions, params):
+        """执行指定插件的每一个 action，返回每次构造的 cmd。"""
+        built = []
+        import _subprocess_plugin as spmod
+        import plugins.ops_plugin as opsmod
+
+        reg = self.reg(str(REPO / "template-vault" / "pipeline" / "plugins"),
+                       self.vault, config_path=None)
+        reg.discover()
+        reg.initialize_all(PluginContext(vault_root=self.vault))
+
+        real_inproc = opsmod.SubprocessPlugin._execute_in_process
+        real_run = spmod.subprocess.run
+
+        def spy_inproc(cmd, script_path):
+            built.append(list(cmd))
+            return 0
+
+        def spy_run(cmd, **kw):
+            built.append(list(cmd))
+            class _R:
+                returncode = 0
+            return _R()
+
+        opsmod.SubprocessPlugin._execute_in_process = staticmethod(spy_inproc)
+        spmod.subprocess.run = spy_run
+        try:
+            for a in actions:
+                reg.execute(plugin_name, a, params)
+        finally:
+            opsmod.SubprocessPlugin._execute_in_process = real_inproc
+            spmod.subprocess.run = real_run
+        return built
+
+    def test_shim_actions_all_route(self):
+        """坑1：每个 shim 的原 action 都必须能路由（不能报"不支持动作"）。"""
+        ops = self.ops.OpsPlugin
+        missing = [a for a in ops._COMPAT_ACTIONS
+                   if ops._COMPAT_ACTIONS[a] not in ops._ROUTES]
+        self.assertEqual(missing, [],
+                         f"_COMPAT_ACTIONS 指向了不存在的路由键: {missing}")
+
+    def test_healthcheck_passes_no_positional(self):
+        """坑2：healthcheck 的 action 不得被当位置参数传给 kb-healthcheck.py。
+
+        kb-healthcheck.py 的 `check` 位置参数 choices 是
+        all/summary/deadlinks/...，不含 "check" —— 传了就 invalid choice。
+        原插件 ACTION_MAP={"check": None} 也是不传。
+        """
+        cmds = self._routes("healthcheck", ["check"], {"root": self.vault})
+        self.assertEqual(len(cmds), 1, "healthcheck.check 应执行一次")
+        self.assertEqual(
+            cmds[0][1:],
+            [f"{self.vault}/pipeline/kb-healthcheck.py", "--root", self.vault],
+            "healthcheck 不得传位置子命令；必须与原插件 ACTION_MAP={'check': None} 一致")
+
+    def test_every_ops_action_builds_expected_cli(self):
+        """全量对照：23 个 action 的 CLI 构造必须与原 per-plugin 壳逐字节一致。"""
+        V = self.vault
+        EXPECTED = {
+            "backup":       [f"{V}/pipeline/backup.py", "--root", V],
+            "dry-run":      [f"{V}/pipeline/sync.py", "dry-run", "--root", V],
+            "apply":        [f"{V}/pipeline/sync.py", "apply", "--root", V],
+            "rollback":     [f"{V}/pipeline/sync.py", "rollback", "--root", V],
+            "history":      [f"{V}/pipeline/sync.py", "history", "--root", V],
+            "ingest-any":   [f"{V}/pipeline/sync.py", "ingest-any", "--root", V],
+            "review":       [f"{V}/pipeline/memory_sync.py", "review", "--root", V],
+            "promote":      [f"{V}/pipeline/memory_sync.py", "promote", "--root", V],
+            "check":        [f"{V}/pipeline/kb-healthcheck.py", "--root", V],
+            "metrics":      [f"{V}/pipeline/kb_health.py", "--root", V],
+            "kpi":          [f"{V}/pipeline/kb_health.py", "kpi", "--root", V],
+            "generate":     [f"{V}/pipeline/dashboard.py", "--root", V],
+            "scan":         [f"{V}/pipeline/kb_audit.py", "scan", "--root", V],
+            "fix":          [f"{V}/pipeline/kb_audit.py", "fix", "--root", V],
+            "log":          [f"{V}/pipeline/kb_audit.py", "log", "--root", V],
+            "run":          [f"{V}/pipeline/kb_eval_judge.py", "run", "--root", V],
+            "gold":         [f"{V}/pipeline/kb_eval_judge.py", "gold", "--root", V],
+            "compare":      [f"{V}/pipeline/kb_eval_judge.py", "compare", "--root", V],
+            "all":          [f"{V}/pipeline/kb_verify.py", "--root", V],
+            "add":          [f"{V}/pipeline/user_manager.py", "add", "--root", V],
+            "list":         [f"{V}/pipeline/user_manager.py", "list", "--root", V],
+            "remove":       [f"{V}/pipeline/user_manager.py", "remove", "--root", V],
+            "check-perm":   [f"{V}/pipeline/user_manager.py", "check-perm", "--root", V],
+        }
+        # 注意键是各 shim 的原 action 名；backup 的 "backup" 与 user_manager 的无冲突
+        by_plugin = {
+            "backup": ["backup"],
+            "sync": ["dry-run", "apply", "rollback", "history", "ingest-any"],
+            "memory_sync": ["review", "promote"],
+            "healthcheck": ["check"],
+            "health_metrics": ["metrics", "kpi"],
+            "dashboard": ["generate"],
+            "audit": ["scan", "fix", "log"],
+            "eval": ["run", "gold", "compare"],
+            "verify": ["all"],
+            "user_manager": ["add", "list", "remove", "check-perm"],
+        }
+        for plugin_name, actions in by_plugin.items():
+            cmds = self._routes(plugin_name, actions, {"root": self.vault})
+            for action, cmd in zip(actions, cmds):
+                self.assertEqual(cmd[1:], EXPECTED[action],
+                                 f"{plugin_name}.{action} 的 CLI 构造漂移")
+
+    def test_ops_aggregate_actions_are_prefixed(self):
+        """聚合入口（kb ops …）的 action 必须带前缀，避免与原名混用。"""
+        ops = self.ops.OpsPlugin
+        prefixed = {a for a in ops._ROUTES if "_" in a or "-" in a}
+        self.assertIn("audit_scan", prefixed)
+        self.assertIn("verify_all", prefixed)
+        # 原名走 _COMPAT_ACTIONS，不是 _ROUTES 的键
+        self.assertNotIn("scan", ops._ROUTES,
+                         "聚合路由不应再把裸 'scan' 当键（那是 shim 兼容面）")
+        self.assertIn("scan", ops._COMPAT_ACTIONS)

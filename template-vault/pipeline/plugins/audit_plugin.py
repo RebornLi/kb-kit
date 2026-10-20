@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""audit_plugin.py — 知识库审计与确认后修复（P5）。"""
+"""audit_plugin.py — @deprecated shim（P2-1 域合并试点）。
+
+实现已迁入 `ops_plugin.OpsPlugin`（name="ops"）；本文件只保留原插件名
+`audit` 与 CLI 别名，保证 `kb audit` / `plugin-config.json` / 外部 import
+继续可用。新代码请直接用 `ops` 域聚合入口。
+
+`fix` 是写动作，仍走 subprocess；`scan`/`log` 只读，保留进程内快路径
+（由 OpsPlugin._ROUTES 的 in_process 字段承载）。
+"""
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.ops_plugin import OpsPlugin
 
 
-class AuditPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "kb_audit.py"
-    ACTION_MAP = {"scan": "scan", "fix": "fix", "log": "log"}
-    IN_PROCESS_ACTIONS = {"scan", "log"}     # fix 是写，走 subprocess
-
+class AuditPlugin(OpsPlugin):
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="audit", version="1.0", plugin_type="kb_module",

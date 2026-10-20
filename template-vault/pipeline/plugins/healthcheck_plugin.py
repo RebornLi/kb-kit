@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""healthcheck_plugin.py — 健康巡检插件。封装 kb-healthcheck.py。
+"""healthcheck_plugin.py — @deprecated shim（P2-1 域合并试点）。
+
+实现已迁入 `ops_plugin.OpsPlugin`（name="ops"）；本文件只保留原插件名
+`healthcheck` 与 CLI 别名，保证 `kb healthcheck` / `kb kb-healthcheck` /
+`plugin-config.json` / 外部 import 继续可用。新代码请直接用 `ops` 域聚合入口。
 
 注意：原模块名含连字符（kb-healthcheck.py），不能直接 import，
-通过 subprocess 调用。
+`check` 只读走进程内快路径（由 OpsPlugin._ROUTES 的 in_process 字段承载）。
 """
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.ops_plugin import OpsPlugin
 
 
-class HealthcheckPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "kb-healthcheck.py"
-    ACTION_MAP = {"check": None}  # kb-healthcheck.py 无子命令
-    IN_PROCESS_ACTIONS = {"check"}       # 只读
-
+class HealthcheckPlugin(OpsPlugin):
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="healthcheck",

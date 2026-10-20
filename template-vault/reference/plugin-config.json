@@ -1,9 +1,10 @@
 {
   "_meta": {
     "version": 2,
-    "description": "插件启用/禁用配置（39 个插件全覆盖）"
+    "description": "插件启用/禁用配置（40 个插件全覆盖：原 39 个 + P2-1 ops 域聚合）"
   },
   "rag": { "enabled": true, "description": "本地 TF-IDF 语义检索" },
+  "ops": { "enabled": true, "description": "运维域聚合入口：备份/同步/巡检/度量/仪表盘/审计/评测/验收/用户管理（P2-1 试点，与原名单手并存）" },
   "intake": { "enabled": true, "description": "收件箱摄入 triage" },
   "feedback": { "enabled": true, "description": "命中信号反馈循环" },
   "link": { "enabled": true, "description": "孤岛补链引擎" },

@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""memory_sync_plugin.py — 记忆同步插件。封装 memory_sync.py。"""
+"""memory_sync_plugin.py — @deprecated shim（P2-1 域合并试点）。
+
+实现已迁入 `ops_plugin.OpsPlugin`（name="ops"）；本文件只保留原插件名
+`memory_sync` 与 CLI 别名，保证 `kb memory-sync` / `plugin-config.json` /
+外部 import 继续可用。新代码请直接用 `ops` 域聚合入口。
+"""
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.ops_plugin import OpsPlugin
 
 
-class MemorySyncPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "memory_sync.py"
-    ACTION_MAP = {"review": "review", "promote": "promote"}
-
+class MemorySyncPlugin(OpsPlugin):
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="memory_sync",

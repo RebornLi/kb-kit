@@ -1,20 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""sync_plugin.py — 同步插件。封装 sync.py。"""
+"""sync_plugin.py — @deprecated shim（P2-1 域合并试点）。
+
+实现已迁入 `ops_plugin.OpsPlugin`（name="ops"）；本文件只保留原插件名
+`sync` 与 CLI 别名，保证 `kb sync` / `plugin-config.json` / 外部 import
+继续可用。新代码请直接用 `ops` 域聚合入口。
+"""
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.ops_plugin import OpsPlugin
 
 
-class SyncPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "sync.py"
-    ACTION_MAP = {
-        "dry-run": "dry-run",
-        "apply": "apply",
-        "rollback": "rollback",
-        "history": "history",
-        "ingest-any": "ingest-any",
-    }
-
+class SyncPlugin(OpsPlugin):
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="sync",
