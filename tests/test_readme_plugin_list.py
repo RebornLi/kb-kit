@@ -15,6 +15,7 @@
 """
 import contextlib
 import io
+import json
 import re
 import sys
 import unittest
@@ -29,6 +30,8 @@ sys.path.insert(0, str(PIPELINE / "plugins"))
 from kb_launcher import COMPAT_MAP          # noqa: E402
 from plugin_base import PluginContext       # noqa: E402
 from plugin_registry import PluginRegistry  # noqa: E402
+
+PLUGIN_CONFIG = TEMPLATE / "reference" / "plugin-config.json"
 
 # 插件清单段里允许出现的非插件记号（分类小标题、路径、「实测 N 个」等）
 NON_PLUGIN_TOKENS = {
@@ -108,6 +111,46 @@ class ReadmeCommandCoverageTest(unittest.TestCase):
         text = _readme()
         self.assertNotIn("KB 模块（24）", text)
         self.assertNotIn("（66 条", text)
+
+
+class PluginConfigCoverageTest(unittest.TestCase):
+    """plugin-config.json 覆盖率守卫（P0-2 防漂移）。
+
+    历史问题：配置只覆盖 26 个插件，13 个插件走默认启用、无法通过配置禁用。
+    本测试把 plugin-config.json 绑到注册中心实测的插件集合上：
+
+      1. 每个真实插件的 metadata().name 都必须有对应配置条目；
+      2. 配置里不得出现不存在的插件名（防手写臆造/旧名残留）；
+      3. 每个条目必须能正确解析 enabled 布尔值。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.agent, cls.kb = real_plugins()
+        cls.real_names = set(cls.agent) | set(cls.kb)
+        cfg = json.loads(PLUGIN_CONFIG.read_text(encoding="utf-8"))
+        cfg.pop("_meta", None)
+        cls.config = cfg
+
+    def test_every_real_plugin_has_config_entry(self):
+        missing = sorted(self.real_names - set(self.config))
+        self.assertEqual(
+            missing, [],
+            f"plugin-config.json 漏掉了实际存在的插件：{missing}")
+
+    def test_no_phantom_plugin_in_config(self):
+        phantom = sorted(set(self.config) - self.real_names)
+        self.assertEqual(
+            phantom, [],
+            f"plugin-config.json 里出现了不存在的插件：{phantom}")
+
+    def test_every_entry_has_valid_enabled_flag(self):
+        bad = [n for n, v in self.config.items()
+               if not isinstance(v, dict)
+               or not isinstance(v.get("enabled"), bool)]
+        self.assertEqual(
+            bad, [],
+            f"plugin-config.json 的 enabled 字段非法（非布尔/缺字段）：{bad}")
 
 
 if __name__ == "__main__":

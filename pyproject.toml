@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kb-kit-pure"
+version = "0.1.0"
+description = "纯 Python 标准库实现的 Obsidian 风格 PARA 知识库引擎"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "kb-kit-pure contributors" }]
+keywords = ["obsidian", "vault", "para", "knowledge-base", "rag", "note-management"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: Markup :: Markdown",
+    "Topic :: Office/Business :: Groupware",
+]
+
+# 运行时零依赖：引擎只用 Python 标准库（os/re/json/math/hashlib/pathlib/datetime/
+# collections/typing/pickle/urllib 等），不需要 pip install 任何包。
+dependencies = []
+
+[project.optional-dependencies]
+# 上下文强化检索（Contextual Retrieval）：rag.py 顶部 try-except 导入 contextual.cch，
+# 缺失则索引文本不拼接上下文字符串，功能降级但不报错。
+# 注：contextual 当前为项目内部模块（同目录），留此占位以便未来抽成独立包后一行启用。
+embed = [
+    "contextual",
+]
+
+# 嵌入重排：rag.py cmd_query 内 try-except 导入 embed_rerank.EmbedReranker /
+# CrossEncoderReranker，缺失则跳过 rerank 阶段，回退纯稀疏检索。
+# 注：embed_rerank 当前为项目内部模块，同上留占位。
+rerank = [
+    "embed_rerank",
+]
+
+# 开发与测试工具链。
+dev = [
+    "pytest>=7.0",
+]
+
+[project.urls]
+Documentation = "README.md"
+
+[tool.setuptools]
+# 代码在 template-vault/pipeline/ 下，按 flat 模块组织（非标准包结构）。
+# 测试通过 sys.path.insert 手动注入路径，pyproject 仅用于声明元数据与可选依赖。
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*", "*Test"]
+python_functions = ["test_*"]

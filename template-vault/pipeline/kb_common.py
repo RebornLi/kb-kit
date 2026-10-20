@@ -1,244 +1,63 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""kb_common.py — 公共工具：frontmatter 解析 + ROOT_DEFAULT + EXCLUDE 集合。
+"""kb_common — 兼容 shim（P1-1 拆分后）。
 
-各 pipeline 模块 `from kb_common import ...` 复用，消除重复定义。
+本模块原为 1236 行的 god-module，已在 P1-1 中按职责拆分：
+  - kb_io.py：文件 I/O（atomic_write_text / parse_frontmatter / load_meta / load_note / iter_notes / safe_*）
+  - kb_text.py：文本处理（tokenize / count_tokens / content_fingerprint / norm / cos / char_vec / 倒排索引）
+  - kb_metautil.py：领域元数据（kb_layer_of / root_of / parent_of / is_stale / retrievable_status / record_lineage）
 
-本模块提供以下公共能力:
-    - 文本处理: tokenize / parse_frontmatter / count_tokens / text_entropy
-    - 文件 I/O: iter_notes / load_note / load_meta / safe_read_text / safe_load_note / safe_json_load
-    - 向量运算: norm / cos / char_vec
-    - 日期解析: parse_date / parse_date_safe
-    - 重要性解析: parse_importance
-    - 倒排索引: build_inverted_index / candidate_pairs
-    - 原子写入: atomic_write_text
-    - 配置加载: load_config / load_domain_taxonomy / load_tag_taxonomy / load_dedup_config
-    - 关系管理: extract_relations / add_relation
+本文件保留：
+  1. 上述三个模块的 re-export（from … import *），确保所有现有 `from kb_common import X` 调用者零改动可用。
+  2. 尚未迁出的函数与常量（config / domain / date / inference / dedup 等）——后续迭代可继续拆分。
+
+迁移策略（ARCHITECTURE-REVIEW.md §P1-1）：保留 shim → 分批迁移调用者 → 最后删除 shim。
 """
-import os, re, math, json, hashlib
+import os
+import re
+import math
+import json
+import hashlib
 from pathlib import Path
 from datetime import datetime, date
 from collections import Counter
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union
 
-# ── vault 根默认值（所有模块共用）────────────────────────────
-ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents[1])
+# ── re-export：让 `from kb_common import X` 继续工作 ──────────
+from kb_io import *        # noqa: F401,F403  I/O 层
+from kb_text import *      # noqa: F401,F403  文本/向量层
+from kb_metautil import *  # noqa: F401,F403  领域元数据层
 
-# ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
-EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
-           ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer",
-           "_curate",
-           # `.kb` 是**运行态目录**（状态文件 + 报告），永远不是笔记。
-           # 漏排的实测后果：consolidate 把报告写成 `.kb/state/consolidate_report.md` 后，
-           # `kb validate` 把它当笔记扫进去 → 报「缺少 frontmatter」硬错误。
-           ".kb"}
+# ── 以下为尚未迁出的定义（config / domain / date / inference / dedup）──
+
+
 
 # ── domain 白名单（frontmatter domain 字段合法取值，clean/validate 共用）──
 DOMAIN_WHITELIST = {"运维", "开发", "安全", "产品", "数据", "管理", "综合"}
 
-# ── frontmatter 边界正则 ────────────────────────────────────
-FM = re.compile(r"^---\s*$", re.M)
-
-# ── 分词正则（CJK unigram+bigram + 拉丁词）────────────────────
-CJK = re.compile(r"[\u4e00-\u9fff]")
-LAT = re.compile(r"[A-Za-z0-9]+")
 
 
-def atomic_write_text(path, text: str) -> None:
-    """原子写入文本：先写同目录临时文件，再 os.replace 覆盖目标。
-
-    为什么必须这样写：直接 `p.write_text(...)` 在写到一半时崩溃/断电会留下**半截文件**，
-    而状态文件（旋钮、用户表、agent 注册表、反馈状态）一旦半截就无法解析，
-    轻则配置回退默认、重则整表丢失。
-    为什么用 os.replace 而不是 Path.rename：Windows 上 rename 在目标已存在时会抛
-    FileExistsError，导致第二次起写入静默失败（调用方多吞异常）。
-    os.replace 在 POSIX/Windows 均为原子覆盖；失败时清理残留临时文件。
-    顺带确保父目录存在（原先多处调用方各自 mkdir，漏一处就写失败）。
-    """
-    p = Path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(p.name + ".tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
-    finally:
-        if tmp.exists():
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
 
 
-def tokenize(s):
-    """分词：拉丁词 lower + 中文字符 unigram + bigram（无 jieba 兜底）。
-
-    rag/intake/link/recall/kb_health 共用此实现，保证去重判定与 RAG 索引同构。
-    """
-    toks = [m.lower() for m in LAT.findall(s)]
-    cjk = CJK.findall(s)
-    for i, c in enumerate(cjk):
-        toks.append(c)
-        if i + 1 < len(cjk):
-            toks.append(c + cjk[i + 1])
-    return toks
 
 
-def parse_frontmatter(text):
-    """解析 markdown frontmatter，返回 (fm_dict, body_str)。
-
-    - 无 frontmatter → ({}, text)
-    - 有 frontmatter → ({key: value, ...}, body)
-
-    value 做 strip + 去引号；支持嵌套键（line 以 ":" 结尾时设为 None）。
-    """
-    fm, body = {}, text
-    m = FM.search(text)
-    if not m:
-        return fm, body
-    end = FM.search(text, m.end())
-    if not end:
-        return fm, body
-    block = text[m.end():end.start()]
-    body = text[end.end():]
-    cur = None
-    for line in block.splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.endswith(":"):
-            cur = line[:-1].strip()
-            fm[cur] = None
-            continue
-        if ":" in line:
-            k, _, v = line.partition(":")
-            fm[k.strip()] = v.strip().strip('"\'')
-    return fm, body
 
 
-def load_meta(path):
-    """从文件路径读取并解析 frontmatter，返回 (fm_dict, body_str)。
-
-    读取失败 → ({}, "")。
-    """
-    try:
-        text = Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return {}, ""
-    return parse_frontmatter(text)
 
 
-def load_note(path):
-    """读取笔记并解析 frontmatter，返回 (fm_dict, text, body) 三元组。
-
-    feedback_loop/link_engine/kb_health 共用此实现。
-    与 load_meta 的区别：额外返回原始 text（调用方需用于写回/正则匹配）。
-    """
-    text = Path(path).read_text(encoding="utf-8")
-    fm, body = parse_frontmatter(text)
-    return fm, text, body
 
 
-def iter_notes(root):
-    """遍历 root 下所有 .md 文件（排除 EXCLUDE 目录、嵌套 git 仓库）。
-
-    注意：root 统一转成字符串再交给 os.walk —— 在部分受限执行环境中，
-    传 Path 对象时 os.walk 的第一个元组可能回传 str 形式的 dp，
-    使 `dp != root` 判定为真、误触发"嵌套 git 仓库"剪枝，整库遍历静默返回 0。
-    """
-    root = os.fspath(root)
-    for dp, dn, fn in os.walk(root):
-        dn[:] = [d for d in dn if d not in EXCLUDE]
-        if dp != root and os.path.exists(os.path.join(dp, ".git")):
-            dn[:] = []
-            continue
-        for f in fn:
-            if f.endswith(".md"):
-                yield Path(dp) / f
 
 
-def count_tokens(text):
-    """粗略 token 计数：CJK 1 字 = 1 token，拉丁 4 字符 = 1 token。
-
-    零依赖（不依赖 tiktoken），用于上下文预算控制。
-    rag.py --context-budget 用此函数计算拼接 token 数，确保不超限。
-    """
-    if not text:
-        return 0
-    cjk = len(CJK.findall(text))
-    lat_chars = sum(len(m) for m in LAT.findall(text))
-    return cjk + lat_chars // 4
 
 
-def text_entropy(text):
-    """Shannon 信息熵，0-1 归一化。
-
-    用 Python 标准库 math + collections.Counter 计算。
-    空文本返回 0.0，单字符重复返回 0.0，每字符不同返回 1.0。
-    高熵 = 信息丰富，低熵 = 重复/模板化内容。
-    """
-    if not text:
-        return 0.0
-    freq = Counter(text)
-    n = len(text)
-    num_types = len(freq)
-    if num_types <= 1:
-        return 0.0
-    h = -sum((c / n) * math.log2(c / n) for c in freq.values())
-    return h / math.log2(num_types)
 
 
-def content_fingerprint(body):
-    """内容指纹：body 的 sha256 哈希（64 字符十六进制）。
-
-    用于精确去重和变更检测。零依赖（hashlib 标准库）。
-    """
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
-# ── 分块族：根文档解析（父子块 / 同族排除 共用）──────────────────
-_CHUNK_SUFFIX = re.compile(r"-(?:p|c)\d+$")
 
 
-def parent_of(rel: str, fm: dict, root: Optional[Union[str, Path]] = None) -> str:
-    """块的直接父文档（chunk_of 优先，文件名逐层兜底）；非块返回空串。"""
-    base = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
-    co = str((fm or {}).get("chunk_of", "") or "").strip()
-    if co:
-        cand = co if co.endswith(".md") else co + ".md"
-        d = str(Path(rel).parent)
-        p1 = f"{d}/{cand}" if d != "." else cand
-        if (base / p1).exists():
-            return p1
-        if (base / cand).exists():
-            return cand
-    cur = Path(rel)
-    for _ in range(8):
-        if not _CHUNK_SUFFIX.search(cur.stem):
-            return ""
-        nxt = cur.with_name(_CHUNK_SUFFIX.sub("", cur.stem) + ".md")
-        if (base / str(nxt)).exists():
-            return str(nxt)
-        cur = nxt
-    return ""
 
 
-def root_of(rel: str, fm: dict, root: Optional[Union[str, Path]] = None) -> str:
-    """沿 parent 链回溯到最顶层文档（无父则返回自身）。"""
-    base = Path(root).resolve() if root else Path(__file__).resolve().parents[1]
-    cur, cur_fm, seen = rel, fm or {}, set()
-    for _ in range(8):
-        if cur in seen:
-            break
-        seen.add(cur)
-        par = parent_of(cur, cur_fm, base)
-        if not par or par == cur:
-            break
-        try:
-            cur_fm = load_meta(base / par)[0]
-        except Exception:
-            break
-        cur = par
-    return cur
+
 
 
 # ── 模型端点配置（P2）：环境变量优先，回退库内 .kb/model.json ──────
@@ -278,238 +97,42 @@ def model_config(root: Union[str, Path, None] = None) -> Dict[str, str]:
     return cfg
 
 
-# ── 索引纳入判定（raw/来源归档不参与检索，防噪声与超长污染）──────
-def is_source_note(fm) -> bool:
-    """是否为「原始来源」笔记（如 raw/ 抓取物）：`is_source: true` 或 `kind: source`。"""
-    v = fm.get("is_source")
-    if v is True or str(v).strip().lower() in ("true", "yes", "1"):
-        return True
-    return str(fm.get("kind", "")).strip().lower() == "source"
 
 
-# ── 来源权威 + 新鲜度（生命周期治理）────────────────────────
-RETRIEVABLE_STATUSES = {"active", "stable", "legacy"}  # 可检索状态（draft/archived 除外）
-DEFAULT_STALE_DAYS = 180                      # updated/created 超过此天数视为陈旧
 
 
-def retrievable_status(fm) -> bool:
-    """来源权威：仅 active/stable 可检索；无 status 宽松放行（兼容旧笔记）。"""
-    st = str(fm.get("status", "") or "").strip().lower()
-    return True if not st else st in RETRIEVABLE_STATUSES
 
 
-def _parse_day(v):
-    s = str(v or "")[:10]
-    try:
-        return date.fromisoformat(s)
-    except ValueError:
-        return None
 
 
-def freshness(fm, today=None) -> dict:
-    """新鲜度：内容年龄 + review_after 到期。返回 {age_days, review_after, review_due, stale}。"""
-    today = today or date.today()
-    upd = _parse_day(fm.get("updated")) or _parse_day(fm.get("created"))
-    age = (today - upd).days if upd else None
-    ra = _parse_day(fm.get("review_after"))
-    review_due = bool(ra and ra <= today)
-    stale = review_due or (age is not None and age > DEFAULT_STALE_DAYS)
-    return {"age_days": age, "review_after": str(fm.get("review_after") or ""),
-            "review_due": review_due, "stale": stale}
 
 
-def is_stale(fm, today=None) -> bool:
-    """笔记是否陈旧（review_after 到期，或 updated/created 超过 DEFAULT_STALE_DAYS）。"""
-    return freshness(fm, today)["stale"]
 
 
-def index_excluded(fm) -> bool:
-    """是否应从 RAG 索引排除：归档(retire)、显式 kb_index:false、非可检索状态、
-    原始来源(source)、分块索引页/指针空壳（防空壳顶替真内容）。"""
-    if fm.get("kb_action") == "retire":
-        return True
-    if str(fm.get("kb_index", "")).strip().lower() in ("false", "no", "0"):
-        return True
-    if not retrievable_status(fm):
-        return True
-    if is_source_note(fm):
-        return True
-    # P0：分块索引页（父页被改写成"指向子块的目录"）不入索引——
-    #   它们与子块文本高度同构、TF-IDF 分数几乎相同，会把真内容顶下去。
-    return is_index_stub(fm)
 
 
-# ── 空壳/指针页识别（P0：检索降噪 + 防二次分块）─────────────────
-STUB_MARKERS = ("{name} · 块{i}", "已按 §3.3 颗粒度分块为")
-# 指标题/表头/链接行：说明这一行只是"指向别处"，不承载知识
-_POINTER_LINE = re.compile(
-    r"^\s*(?:"
-    r"#{1,6}\s*\S{0,80}"                       # 孤单标题
-    r"|[-*>]\s*\[\[[^\]]+\]\]"                 # 列表 + wikilink
-    r"|[-*>]\s*\S{0,80}→\s*\S+"                # 列表 + 箭头指针
-    r"|\[\[[^\]]+\]\]"                         # 纯 wikilink
-    r"|\S{0,80}→\s*\S+\.md"                    # A → B.md
-    r"|\|.*\|"                                 # 表格行
-    r"|---+"                                   # 表格分隔
-    r")\s*$"
-)
 
 
-def is_index_stub(fm, body: str = "") -> bool:
-    """是否「分块索引页 / 目录页」（无正文、只指向子块）：
-    显式 `is_chunk_index: true`，或 `chunk_of` 存在但无 `chunk: N`（=父页被改写成目录）。
-
-    注意：子块（`chunk: 1..N`）**不是** stub，它们携带正文。
-    """
-    v = fm.get("is_chunk_index")
-    if v is True or str(v).strip().lower() in ("true", "yes", "1"):
-        return True
-    if fm.get("chunk_of") and not fm.get("chunk"):
-        return True
-    # 级联分块的"中间层目录页"：chunk_of 存在、正文却极短（正文都指向别的块）
-    if fm.get("chunk_of") and body and len(str(body).replace("\n", "").strip()) < 200:
-        return True
-    if str(fm.get("kb_layer", "")).strip().lower() == "index":
-        return True
-    return False
 
 
-def is_pointer_page(body: str, rel: str = "", min_lines: int = 3) -> bool:
-    """正文是否为「空壳/指针页」：几乎全是链接/标题/表格行，或带分块模板残留。
-
-    判据（启发式，供 kb clean / kb curate 提示用，不做物理删除）：
-      · 正文含分块模板残留标记（如未插值的 `## {name} · 块{i}`）
-      · 去空行后行数 < min_lines，且每行都是指针型
-      · 指针型行占比 >= 0.6
-    文件名以 `-index.md` 结尾的直接视为指针页。
-    """
-    if Path(str(rel)).name.endswith("-index.md"):
-        return True
-    lines = [l.strip() for l in str(body or "").splitlines() if l.strip()]
-    if not lines:
-        return True
-    for mk in STUB_MARKERS:
-        if mk in "\n".join(lines[:6]):  # 只在开头附近命中，避免正文引用该句式时误判
-            return True
-    ptr = sum(1 for l in lines if _POINTER_LINE.match(l))
-    if len(lines) < min_lines:
-        return ptr == len(lines)
-    return ptr / len(lines) >= 0.6
 
 
-# ── 知识分层（kb_layer）：排序权重 + 检索降级 ─────────────────
-#   canon  正典层（agent 结晶后的干净知识）        → 排序提升
-#   index  分块索引页/目录页                       → 不入索引
-#   raw    原记忆/网页抓取等证据层                 → 保留可调用，默认排序降级
-STUB_WORDS = ("未过滤", "原始记录")
-LAYER_MULTIPLIER = {
-    "canon": 1.25,
-    "": 1.00,
-    "page": 1.00,
-    "raw": 0.72,
-    "index": 0.60,
-    # ⚠️ "noise" 这一项**按契约永远不可达**，别据此以为噪声笔记"降权可检索"：
-    #   `kb_schema` 强制 noise 层必须带 `kb_index: false`（curate 判定噪声时就写入
-    #   `{"kb_layer": "noise", "kb_index": "false"}`），而 `index_excluded` 见到
-    #   `kb_index:false` 直接不入索引 —— 于是 rag.py 里 `layer in ("index","noise")`
-    #   的降权分支对 noise 永远不会触发。保留仅为防御性默认值（万一有人手写
-    #   `kb_layer: noise` 却忘了 `kb_index: false`）。
-    "noise": 0.60,
-}
-DEFAULT_LAYER = "page"
 
 
-def kb_layer_of(fm, rel: str = "", body: str = "") -> str:
-    """笔记所属知识层：显式 `kb_layer` 优先，否则按 is_source / index stub 推断。"""
-    v = str(fm.get("kb_layer", "") or "").strip().lower()
-    if v:
-        return v
-    if is_source_note(fm):
-        return "raw"
-    if is_index_stub(fm, body):
-        return "index"
-    if rel and is_raw_path(rel):
-        return "raw"
-    return DEFAULT_LAYER
 
 
-def layer_multiplier(fm, rel: str = "") -> float:
-    """按知识层返回排序权重乘数（canon 提升 / raw、空壳降级）。"""
-    return float(LAYER_MULTIPLIER.get(kb_layer_of(fm, rel), 1.0))
 
 
-def is_raw_path(rel) -> bool:
-    """rel 是否位于 raw/ 证据层内（只看顶层目录，避免 `a/raw/b` 误判）。"""
-    try:
-        parts = [str(x).lower() for x in Path(str(rel)).parts]
-        return bool(parts) and parts[0] == "raw"
-    except (TypeError, ValueError, AttributeError):
-        return False
 
 
-# 运行期生成的报告文件（非知识内容）：不入检索 / 不参与补链 / 不再分块
-GENERATED_REPORTS = {
-    "intake_triage.md", "feedback_hits.md", "recall_deck.md",
-    "recall_schedule.md", "link_suggestions.md", "_INDEX.md",
-    "clean_suggestions.md", "_MOC.md", "_graph.md", "_graph_kg.md",
-}
 
 
-def is_generated_report(rel) -> bool:
-    """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（审计/提案目录）。
-
-    注：`_MOC.md` / `_INDEX.md` 属于生成产物（语义不变）。
-    但它们是**知识导航**、最容易积累悬空链接，所以**死链巡检单独把它们纳入**
-    （见 kb-healthcheck 的 NAV_FILES），而不是改这里的语义。
-    """
-    if Path(str(rel)).name in GENERATED_REPORTS:
-        return True
-    # 结晶提案（_curate/b*.md）与审计产物（_audit/*.md 含 log.md）：人读产物，不是知识笔记
-    _parts = [str(x) for x in Path(str(rel)).parts[:-1]]
-    if "_curate" in _parts or "_audit" in _parts:
-        return True
-    return False
 
 
-# ── 归档生命周期：别名重定向 + lineage（合并/去重可回溯，旧链接不失效）──
-def _alias_items(val: str):
-    s = str(val or "").strip().strip("[]")
-    return [t.strip().strip('"\'') for t in re.split(r"[,\s]+", s) if t.strip()]
 
 
-def add_alias_text(text: str, alias: str):
-    """在 frontmatter 的 aliases 中追加 alias（幂等）；无 frontmatter 返回 None。"""
-    m = FM.search(text)
-    if not m:
-        return None
-    end = FM.search(text, m.end())
-    if not end:
-        return None
-    block = text[m.end():end.start()]
-    body = text[end.end():]
-    mm = re.search(r"^aliases:.*$", block, re.M)
-    if mm:
-        items = _alias_items(mm.group(0).split(":", 1)[1])
-        if alias not in items:
-            items.append(alias)
-        block = re.sub(r"^aliases:.*$", "aliases: [" + ", ".join(items) + "]",
-                       block, count=1, flags=re.M)
-    else:
-        block = f"aliases: [{alias}]\n" + block.lstrip("\n")
-    return "---\n" + block + "\n---\n" + body
 
 
-def record_lineage(root, src: str, dst: str, action: str) -> None:
-    """记录合并/去重的血缘（from→to），写入 .kb/state/lineage.jsonl。"""
-    try:
-        p = Path(root) / ".kb" / "state" / "lineage.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
-                                "action": action, "from": src, "to": dst},
-                               ensure_ascii=False) + "\n")
-    except OSError:
-        pass
 
 
 # ── P2: domain 两级解析 + 配置加载（FR-3.3.3 + FR-3.3.4）──────
@@ -612,8 +235,6 @@ def is_valid_tag(tag, root=None):
     return True
 
 
-# ── P2: frontmatter 关系型字段（FR-3.3.1）──────────────────
-RELATION_FIELDS = ("related_to", "prerequisite", "supersedes", "superseded_by")
 
 
 def extract_relations(fm):
@@ -646,70 +267,10 @@ def add_relation(fm, field, target_rel):
             fm[field] = [current, target_rel]
 
 
-# ── P2: 三级去重阈值校准（FR-3.3.11）──────────────────────────
-def norm(vec: Dict[str, float]) -> Dict[str, float]:
-    """L2 归一化稀疏向量。
-
-    Args:
-        vec: 稀疏向量 {token: weight}
-
-    Returns:
-        归一化后的稀疏向量，使 L2 范数为 1。
-        空向量或零向量返回原向量（不除以 0）。
-
-    Examples:
-        >>> norm({"a": 3.0, "b": 4.0})
-        {'a': 0.6, 'b': 0.8}
-    """
-    if not vec:
-        return vec
-    n = math.sqrt(sum(v * v for v in vec.values())) or 1.0
-    return {k: v / n for k, v in vec.items()}
 
 
-def cos(a: Dict[str, float], b: Dict[str, float]) -> float:
-    """计算两个稀疏向量的余弦相似度。
-
-    假设输入已归一化（或仅关心点积相对大小）。
-    自动选择较短向量遍历以提升性能。
-
-    Args:
-        a: 稀疏向量 {token: weight}
-        b: 稀疏向量 {token: weight}
-
-    Returns:
-        余弦相似度（点积，若输入已归一化则为余弦值）。
-
-    Examples:
-        >>> cos({"a": 0.6, "b": 0.8}, {"a": 0.6, "b": 0.8})
-        1.0
-    """
-    if not a or not b:
-        return 0.0
-    # 自动 swap 使 a 为较短向量
-    if len(b) < len(a):
-        a, b = b, a
-    return sum(av * b.get(k, 0.0) for k, av in a.items())
 
 
-def char_vec(text: str) -> Dict[str, float]:
-    """从文本构建归一化字符向量（tokenize → Counter → norm）。
-
-    Args:
-        text: 输入文本
-
-    Returns:
-        归一化稀疏向量 {token: weight}，L2 范数为 1。
-        空文本返回 {}。
-
-    Examples:
-        >>> v = char_vec("hello world")
-        >>> abs(sum(x * x for x in v.values()) - 1.0) < 1e-9
-        True
-    """
-    if not text:
-        return {}
-    return norm(dict(Counter(tokenize(text))))
 
 
 # ── 日期解析（parse_date / parse_date_safe）──────────────────
@@ -808,120 +369,14 @@ def parse_importance(s: Any) -> float:
         return 0.0
 
 
-# ── 安全 I/O（safe_read_text / safe_load_note / safe_json_load）──
-def safe_read_text(path: Union[str, Path]) -> Optional[str]:
-    """安全读取文本文件，失败返回 None。
-
-    统一捕获 (OSError, UnicodeDecodeError)，替代各模块重复的 try-except 读取模式。
-
-    Args:
-        path: 文件路径
-
-    Returns:
-        文件文本内容，读取失败返回 None。
-    """
-    try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
 
 
-def safe_load_note(
-    path: Union[str, Path]
-) -> Optional[Tuple[Dict[str, Any], str, str]]:
-    """安全加载笔记，失败返回 None。
-
-    Args:
-        path: 笔记文件路径
-
-    Returns:
-        (frontmatter_dict, raw_text, body_str) 三元组，读取/解析失败返回 None。
-    """
-    text = safe_read_text(path)
-    if text is None:
-        return None
-    fm, body = parse_frontmatter(text)
-    return fm, text, body
 
 
-def safe_json_load(path: Union[str, Path]) -> Optional[Dict[str, Any]]:
-    """安全加载 JSON 文件，失败返回 None。
-
-    统一捕获 (OSError, json.JSONDecodeError)。
-
-    Args:
-        path: JSON 文件路径
-
-    Returns:
-        解析后的 dict，读取/解析失败返回 None。
-    """
-    text = safe_read_text(path)
-    if text is None:
-        return None
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return None
 
 
-# ── 倒排索引（build_inverted_index / candidate_pairs）─────────
-def build_inverted_index(vecs: Dict[str, Dict[str, float]]) -> Dict[str, Set[str]]:
-    """构建 token → {rel} 倒排索引。
-
-    用于 O(n²) 成对比较的预过滤：仅对共享至少 1 个 token 的笔记对计算余弦相似度。
-
-    Args:
-        vecs: {rel: 归一化向量} 字典
-
-    Returns:
-        {token: {rel1, rel2, ...}} 倒排索引。
-
-    Examples:
-        >>> idx = build_inverted_index({"a.md": {"x": 0.6, "y": 0.8},
-        ...                              "b.md": {"y": 0.5, "z": 0.9}})
-        >>> idx["y"] == {"a.md", "b.md"}
-        True
-    """
-    index: Dict[str, Set[str]] = {}
-    for rel, vec in vecs.items():
-        for token in vec:
-            if token not in index:
-                index[token] = set()
-            index[token].add(rel)
-    return index
 
 
-def candidate_pairs(
-    index: Dict[str, Set[str]], rels: Optional[List[str]] = None
-) -> Iterator[Tuple[str, str]]:
-    """生成候选对（共享至少 1 个 token 的笔记对）。
-
-    每对仅生成一次（按 (a, b) 顺序，a < b 字典序）。
-    若提供 rels 参数，仅生成 rels 内部的候选对。
-
-    Args:
-        index: build_inverted_index 构建的倒排索引
-        rels: 限制候选对范围的笔记列表（None 表示全部）
-
-    Yields:
-        (rel_a, rel_b) 候选对，rel_a < rel_b（字典序）。
-    """
-    rel_set = set(rels) if rels is not None else None
-    seen: Set[Tuple[str, str]] = set()
-    for token_rels in index.values():
-        # 过滤到目标范围
-        if rel_set is not None:
-            token_rels = token_rels & rel_set
-        if len(token_rels) < 2:
-            continue
-        # 生成有序对
-        sorted_rels = sorted(token_rels)
-        for i, a in enumerate(sorted_rels):
-            for b in sorted_rels[i + 1:]:
-                pair = (a, b)
-                if pair not in seen:
-                    seen.add(pair)
-                    yield pair
 
 
 # ── 从 clean.py 迁入的复用函数 + 常量（Task 1 解耦）──────────────
