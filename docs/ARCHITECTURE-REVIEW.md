@@ -2,7 +2,7 @@
 
 > 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，297 tracked files，171 .py）
 > 初查：2026-10-19 · 方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
-> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成 / P2-1 已落地 ops 域试点**
+> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成（含 shim 收尾，`kb_common.py` 已删）/ P2-1 已落地 ops 域试点**
 > ⚠️ §四、§五 保留初查时点视角；每项当前状态见 **§九 状态总账**
 
 ---
@@ -48,8 +48,8 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
 │  引擎层 (template-vault/pipeline/，84个.py，~28970行)                    │
 │                                                                          │
 │  ┌─ 公共基础 ─────────────────────────────────────────────────────────┐ │
-│  │ kb_common.py (691行, shim — P1-1 已拆, 见 §九)                       │ │
-│  │   → re-export kb_io / kb_text / kb_metautil 三模块                  │ │
+│  │ 六模块公共层（P1-1 收尾后，kb_common.py 已删）                    │ │
+│  │   kb_io(文件I/O) / kb_text(文本向量) / kb_metautil(领域元数据)       │ │
 │  │   tokenize(72) · load_meta(118) · load_note(130) · iter_notes(141) │ │
 │  │   load_note_full(992) · parse_frontmatter(86) · content_fingerprint│ │
 │  │   count_tokens(159) · root_of(225) · parent_of(202) · kb_layer_of │ │
@@ -217,9 +217,9 @@ consolidate.run(max_seconds预算)
 | 初查排名 | 文件 | 初查行数 | → 现状 |
 |---|---|---|---|
 | 1 | `tests/test_p0_fixes.py` | 2260 | ✅ 拆为 32 个 `test_*.py`，本文件降至 400 行 / 7% |
-| 2 | `pipeline/rag.py` | 1768 | ✅ 拆为 `rag_index`/`rag_score`/`rag_query`，本文件 106 行 shim |
+| 2 | `pipeline/rag.py` | 1768 | ✅ 拆为 `rag_index`/`rag_score`/`rag_query`；本文件保留 `main()`（CLI 入口不可删）+ 显式门面 |
 | 3 | `pipeline/curate.py` | 1288 | ❌ **仍是 1288 行** — 现役最大单文件（P2-3 目标） |
-| 4 | `pipeline/kb_common.py` | 1236 | 🔶 拆出 `kb_io`/`kb_text`/`kb_metautil`，本文件 691 行 shim 待删 |
+| 4 | `pipeline/kb_common.py` | 1236 | ✅ **已删除** —— 拆为 `kb_io`/`kb_text`/`kb_metautil`/`kb_config`/`kb_domain`/`kb_infer` 六个模块 |
 | 5 | `pipeline/kb_engine.py` | 771 | ❌ 未动（研究层；P2-2 固化边界而非拆分） |
 | 6 | `pipeline/clean.py` | 705 | ❌ 未动 |
 | 7 | `pipeline/memory_ingest.py` | 656 | ❌ 未动 |
@@ -245,10 +245,11 @@ consolidate.run(max_seconds预算)
 > 承担 CLI 兼容（COMPAT_MAP）、错误隔离、per-action 快路径选路三项真实职责。
 > P2-1 仅把 ops 域 10 个薄壳合并为单一 `OpsPlugin` 作试点。
 
-### 5.3 kb_common.py god-module 🔶 已部分解决（P1-1 主体完成，shim 待删）
+### 5.3 kb_common.py god-module ✅ 已彻底解决（文件已删）
 1236 行、9 个高频工具函数被 20-59 个模块依赖。`tokenize`(59调用者) / `iter_notes`(59) / `load_note_full`(35) / `load_meta`(22) 是事实上的公共基础设施，但它们与 `content_fingerprint` / `record_lineage` / `is_stale` / `kb_layer_of` 等领域函数混在一个文件里。任何改动都有巨大爆炸半径。
-> **现状**：已拆 `kb_io`/`kb_text`/`kb_metautil`，`kb_common.py` 降为 691 行 shim，
-> 仍有 74 个调用者走旧路径（删除 shim 是未完成的收尾项）。
+> **现状**：已拆为 `kb_io`/`kb_text`/`kb_metautil`/`kb_config`/`kb_domain`/`kb_infer`
+> 六个模块，`kb_common.py` 已删除；原 74 个引用它的调用者全部直引真实 owner
+> （commit `de292e0`），爆炸半径从"1 个 god-module"降到"6 个按职责分的模块"。
 
 ### 5.4 memory_ingest_session.mirror_session 死代码 ✅ 已解决（P0-1）
 `mirror_session()`（:183）产生 `dsh-*` session日志，上游 `_ingest_session` 已改为仅蒸馏。该函数不再被调用，但模块（321行）仍保留供其他 utils 引用。明确的清理候选。
@@ -259,7 +260,7 @@ consolidate.run(max_seconds预算)
 > **现状**：已拆为 32 个 `test_*.py`，本文件 400 行 / 7%。
 
 ### 5.6 研究层边界 ❌ 未动（P2-2）
-`kb_l4` / `kb_l5` / `kb_meta` / `kb_selfweight` / `kb_claim` / `kb_usage` / `kb_contradiction` 等 8 个研究层模块共 ~4000 行，无 CLI 入口，仅由 `tests/test_reachability.py` 守护。它们与核心引擎共享 `kb_common` / `state_manager`，但边界模糊——是否有实验代码混入了生产路径需要确认。
+`kb_l4` / `kb_l5` / `kb_meta` / `kb_selfweight` / `kb_claim` / `kb_usage` / `kb_contradiction` 等 8 个研究层模块共 ~4000 行，无 CLI 入口，仅由 `tests/test_reachability.py` 守护。它们与核心引擎共享六个公共模块 / `state_manager`，但边界模糊——是否有实验代码混入了生产路径需要确认。
 > **现状**：仍未动。已实测确认这 8 个模块无任何插件注册（无 CLI 入口）。
 
 ### 5.7 无依赖声明 ✅ 已解决（P1-2）
@@ -292,9 +293,9 @@ consolidate.run(max_seconds预算)
 - **风险**：低——纯文件移动 + import 调整，行为不变。
 - **验证**：拆分前后 `pytest` 用例数与通过数一致。
 
-### 🥈 P1 — 中等风险中高收益 ✅ 全部完成（3/3；P1-1/P1-3 有 shim 待删）
+### 🥈 P1 — 中等风险中高收益 ✅ 全部完成（3/3，含 shim 收尾）
 
-#### P1-1：拆分 `kb_common.py` god-module 🔶 主体完成，shim 待删
+#### P1-1：拆分 `kb_common.py` god-module ✅ 已完成（含 shim 删除）
 - **动作**：按职责拆为 3 个模块：
   - `kb_io.py`：`iter_notes` / `load_meta` / `load_note` / `load_note_full` / `parse_frontmatter` / `atomic_write_text`（文件 I/O）
   - `kb_text.py`：`tokenize` / `count_tokens` / `content_fingerprint` / `_parse_tags`（文本处理）
@@ -309,7 +310,7 @@ consolidate.run(max_seconds预算)
 - **风险**：低——不引入新依赖，只是声明已有的可选依赖。
 - **验证**：`pip install -e .` 成功；现有纯标准库路径不受影响。
 
-#### P1-3：拆分 `rag.py`（1768行）✅ 已完成（shim 待删）
+#### P1-3：拆分 `rag.py`（1768行）✅ 已完成
 - **动作**：按职责拆为：
   - `rag_index.py`：`cmd_index` / 索引构建 / `_SafeUnpickler` / `load_index` / `index_file`
   - `rag_score.py`：`_score_cosine_postings` / `_bm25_postings` / `_rrf_fuse` / `_inverted_lookup`
@@ -628,7 +629,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 3. 不减少插件文件数量、不减少动态 import 数，收益不明确但风险触及引擎层核心。
 
 #### P2-2：研究层边界固化 ❌ 未动
-- **动作**：为 8 个研究层模块建立明确的 internal 包边界（如移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal），并在 `kb_common` 中加 `import guard` 防止生产路径意外依赖。
+- **动作**：为 8 个研究层模块建立明确的 internal 包边界（如移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal），并加 `import guard` 防止生产路径意外依赖。
 - **收益**：防止实验代码污染生产路径；明确哪些可以安全删除。
 - **风险**：中——需确认无生产模块 import 研究层符号。
 - **验证**：`test_reachability.py` + codegraph 反向依赖检查。
@@ -646,7 +647,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 | 阶段 | 内容 | 预估工作量 | 前置条件 |
 |------|------|-----------|---------|
 | 第1周 | P0-1 + P0-2 + P0-3 | 1-2人天 | 无 |
-| 第2-3周 | P1-1（kb_common拆分, 含shim过渡） | 3-5人天 | P0-3完成（测试已拆, 有安全网） |
+| 第2-3周 | ~~P1-1（kb_common拆分, 含shim过渡）~~ | 3-5人天 | ✅ 已完成 |
 | 第3周 | P1-2 + P1-3（pyproject + rag拆分） | 3-4人天 | P1-1的shim模式可复用 |
 | 视资源 | P2-1/P2-2/P2-3 | 各5+人天 | P1全部完成, 有充分测试覆盖 |
 
@@ -661,7 +662,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 1. **改 X 功能波及哪些模块？**
    - 改检索评分 → `rag_score.py`（P1-3 已拆分），外加 `memory_sync`（调 `rag.cmd_index`）与 `kb_engine`（调 `rag.cmd_query`）
    - 改结晶逻辑 → `curate.py` 内部 + `curate_plugin.py`（薄包装）+ `ladder.py`（调用方）
-   - 改公共工具 → `kb_common` 的 74 个调用者（shim 收敛后分别指向 `kb_io` / `kb_text` / `kb_metautil`）
+   - 改公共工具 → 六个公共模块的调用者（`kb_io` / `kb_text` / `kb_metautil` / `kb_config` / `kb_domain` / `kb_infer`）
 
 2. **数据怎么流、存哪里？**
    - 证据/记忆 → `raw/` + `memory/`（markdown 文件）
@@ -673,7 +674,8 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 3. **哪个文件最脆弱、最要先动？**
    - `curate.py`（**1288 行**，现役最大单文件，且**无独立 `test_curate.py`**）—— P2-3 前先补测试
    - `clean.py`（705 行，MinHash/LSH/分块/分类修复混合）
-   - `kb_common.py` / `rag.py` 两个 re-export shim（74 / 25 个调用者仍在走旧路径）
+   - `curate.py`（1288 行，**无独立 `test_curate.py`**）、`clean.py`（705 行）
+   - `rag.py` 门面（33 个回归测试经它覆盖检索域契约——保留，但要知道它是门面不是实现）
 
 ---
 
@@ -686,26 +688,83 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 | P0-1 `mirror_session` 清理 | ✅ | `memory_ingest_session.py` 已无 `def mirror_session` |
 | P0-2 plugin-config 补齐 | ✅ | 实测注册 40 ↔ 配置 40，双向无缺口 |
 | P0-3 测试拆分 | ✅ | 2260 行/37% → 400 行/7%，共 32 个 `test_*.py` |
-| P1-1 `kb_common` 拆分 | ✅ 主体 | 1236 → 691 行 shim；拆出 `kb_io`/`kb_text`/`kb_metautil` |
+| P1-1 `kb_common` 拆分 | ✅ **已彻底完成** | 1236 → **0 行（文件已删）**；拆出 `kb_io`/`kb_text`/`kb_metautil`/`kb_config`/`kb_domain`/`kb_infer` 六个模块，全部调用者直引（commit `de292e0`） |
 | P1-2 `pyproject.toml` | ✅ | `[project]` + `optional-dependencies`（embed/llm/dev） |
-| P1-3 `rag.py` 拆分 | ✅ | 1768 → 106 行 shim；拆出 `rag_index`/`rag_score`/`rag_query` |
+| P1-3 `rag.py` 拆分 | ✅ | 1768 行 → `rag_index`/`rag_score`/`rag_query`；`rag.py` 保留 `main()`（CLI 入口，不可删）+ 显式门面 |
+| **P1-1/1-3 shim 收尾** | ✅ **已完成** | `kb_common.py` 已删除；294 passed；86 个引擎模块全部可独立 import |
 | P2-1 插件层评估+试点 | ✅ | ops 域 10→1 `OpsPlugin`，CLI 契约零变更，294 passed |
+
+**P0 / P1 全部收官。** 剩余未完成项见下。
 
 ### 9.2 未完成清单（按建议顺序）
 
-#### ① P1-1 / P1-3 收尾：删除两个 re-export shim 🔶 中收益、低风险 —— 建议先做
-`kb_common.py`（691 行）与 `rag.py`（106 行）现为 re-export shim，
-仍有 **74 个** / **25 个**调用者走旧 import 路径。
+#### ① P1-1 / P1-3 收尾：删除两个 re-export shim ✅ 已完成（commit `de292e0`）
 
-- **动作**：分批把 `from kb_common import X` 按归属改为 `from kb_io|kb_text|kb_metautil import X`，
-  `import rag` 改为直引三个子模块；每批跑 `pytest`，全绿后删 shim。
-- **收益**：依赖关系从"74 个调用者指向一个假模块"变为指向真实模块，
-  codegraph / IDE 跳转恢复准确，消除"改 shim 不知改了哪个真实模块"的误导。
-- **风险**：低（纯 import 路径改写，行为不变）。
-- **验证**：`pytest` 仍 294 passed + `grep -rn "from kb_common import"` 归零。
-- ⚠️ **注意**：`kb_metautil.py` 是 §P1-1 原文规划之外新增的**第 4 个模块**，
-  `record_lineage` / `is_stale` / `retrievable_status` / `kb_layer_of` / `root_of` /
-  `parent_of` 归它管；迁移时按此归属拆分。
+> **动工前的关键纠偏（记录在案，防再次"想当然"）**：原计划写的是「只改 import 路径」。
+> 实测推翻——`kb_common.py` 691 行里有 **29 个只存在于本文件的符号**，无处可改。
+> 若按原计划动手，第一句 `from kb_common import load_note_full` 就会失败。
+
+**实测 62 个被导入符号的归属**：
+
+| 归属 | 符号数 | 处置 |
+|---|---|---|
+| `kb_io` | 8 | 调用者改指真实 owner |
+| `kb_text` | 10 | 同上 |
+| `kb_metautil` | 15 | 同上（另接收 `parse_date`/`parse_importance`/`parse_date_safe`） |
+| `kb_common` 本地残部 | **29** | **必须先拆出新模块**（原计划完全漏了这步） |
+
+残部 29 个拆出的新模块：
+- `kb_config.py`（9）：`model_config` / `load_config` / `load_domain_taxonomy` /
+  `load_tag_taxonomy` / `load_dedup_config` / `is_valid_domain` / `is_valid_tag` /
+  `get_dedup_thresholds` / `DOMAIN_WHITELIST`
+- `kb_domain.py`（9）：`DOMAIN_MAP` / `FOLDER_DOMAIN` / `KEYWORD_DOMAIN` / `domain_primary` /
+  `parse_domain` / `domain_secondary` / `infer_domain` / `add_relation` / `extract_relations`
+- `kb_infer.py`（10）：`infer_status` / `infer_summary` / `infer_tags` / `base_fm` / `list_of` /
+  `fmt_value` / `aggregate_bucket` / `load_note_full` / `AGGREGATE_*` 常量
+- `kb_metautil.py` 追加：`parse_date` / `parse_date_safe` / `parse_importance`
+
+**`rag.py` 为何仍在**：它是**真实 CLI 入口**（`rag_plugin.py` 的 `SCRIPT_NAME="rag.py"`
+按文件名 subprocess 调它；`tests/deploy.py` 按路径 `exec_module` 加载它）——
+**这个文件永远不能删**。已把 `from rag_score import *` ×3 改为显式名单
+（原 `import *` 会把 `os`/`re`/`Counter` 这类 stdlib 名一并泄露出去，
+`rag.Counter` 意外可用，且从模块看不出真实依赖边）。显式后与拆分前 HEAD 版
+逐名比对**真实 API 缺失 0**。
+
+**落地过程**：
+
+| commit | 内容 |
+|---|---|
+| `b456d81` | A：拆出 `kb_config`/`kb_domain`/`kb_infer`，`parse_*` 归位 `kb_metautil`；`kb_common` 缩为纯 shim。62 符号可导出 + 21 函数与 HEAD 逐参数对照一致 |
+| `e9770c9` | `rag_score.py` 的 `cos` 从 `kb_common` 改直引 `kb_text`（最短的一条假依赖边） |
+| `1d39093` | `rag.py` 的 `import *` 显式化，真实 API 缺失 0 |
+| `de292e0` | B+C：按「符号→owner」映射改写全部调用者（生产 12 个 `from kb_common import` + 4 处模块式 + 9 个测试文件 + 2 个 `scripts/`），**删除 `kb_common.py`** |
+
+⚠️ **踩坑记录（可复用的教训）**：自动改写 import 在「函数内延迟 import」处会丢缩进
+（多行块被替换成顶格的新 import 行），6 个文件 `IndentationError`。
+**教训：改写 import 后必须逐文件 `ast.parse` 校验，不能只跑 pytest**——
+pytest 的收集错误会把真正的问题埋掉。已修并补了全文件语法校验。
+
+**测试锚点的正确处理**（断言本身有价值，改指 owner 而非删除）：
+- `test_intentional_divergence.py` 26 处引用改按 owner 直引。它钉的是
+  「四套分词 / frontmatter 口径必须有意义地不同」，与中间层无关。
+- `test_p0_kb_engine.py` 的 `assertIn("from kb_common import atomic_write_text")`
+  改为断言 `state_manager` 委托 `kb_io` 的原子写（不再绑死中间层模块名）。
+- `tests/deploy.py` 清 `sys.modules` 缓存的名单从 `kb_common` 改为六个 owner。
+- 顺带清掉 `kb_ingest.py` 的死 import（import 了从未使用）。
+
+**最终依赖方向（无环）**：
+
+```
+kb_config  → kb_domain（延迟 import）
+kb_domain  → kb_metautil（延迟 import，RELATION_FIELDS）
+kb_infer   → kb_config + kb_domain + kb_text
+kb_metautil→ kb_io
+kb_text / kb_io：无内部依赖
+```
+
+**收益**：依赖从"74 个调用者指向一个假模块"变为指向真实模块，
+codegraph / IDE 跳转恢复准确；pipeline 模块数 87 → 86，无死模块残留。
+
 
 #### ② P2-2 研究层边界固化 ❌ 未动 —— 中等收益、中等风险
 8 个研究层模块（~4000 行）无 CLI 入口（已实测确认无任何插件注册），
@@ -736,9 +795,11 @@ crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 
 - `agent_detect_plugin.py` / `agent_json_plugin.py` / `agent_md_plugin.py` /
   `agent_sqlite_plugin.py` 各 4-6 行 `sys.path.insert(0, pipeline_dir)`
   实测恒为 no-op（见 §六 P2-1 E 节），约 24 行装饰代码。
+- `rag.py` 门面的 33 个测试引用（`test_p0_rag.py` 等）——**不建议改**：
+  它们验证的是检索域整体契约，是有意的单入口测试设计。
 - 热点表已重排（见 §四）；`kb_engine.py`(771) / `clean.py`(705) /
-  `memory_ingest.py`(656) 尚未治理，优先级低于 ①②③。
+  `memory_ingest.py`(656) 尚未治理，优先级低于 ②③。
 
 ---
 
-*本报告初查于 HEAD `5c9bd41`（2026-10-19）；§九 状态总账核对于 2026-10-21。改码后重跑 codegraph sync 复核。*
+*本报告初查于 HEAD `5c9bd41`（2026-10-19）；§九 状态总账核对于 2026-10-21（当前 HEAD 见 `git log`）。改码后重跑 codegraph sync 复核。*
