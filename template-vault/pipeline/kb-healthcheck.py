@@ -109,9 +109,14 @@ def collect_titles(root):
 
 
 def cached_stems(root):
-    """内容层 stem 集合（排除系统目录），供裸名匹配。"""
+    """内容层 stem 集合（排除系统目录），供裸名匹配。
+
+    `include_reports=True` 是**必须的**：`_INDEX.md` / `_MOC.md` 在 REPORT_NAMES 里，
+    而它们正是最常被链接的导航页。漏传会让所有指向 `[[_INDEX]]` 的链判为死链
+    （2026-10-22 实测：Resources 下 7 个新建主题索引全部误报）。
+    """
     stems = set()
-    for fp in collect_md(root):
+    for fp in collect_md(root, include_reports=True):
         s = str(fp.relative_to(root))
         if any(h in s for h in SYSTEM_HINTS):
             continue
@@ -375,6 +380,21 @@ def check_discipline(root):
     return len(viol)
 
 
+def _wiki_stem(tgt: str) -> str:
+    """wikilink 目标 → 用于比对的 stem。
+
+    必须**只剥 `.md` 后缀**，不能用 `Path(tgt).stem`：
+    `Path("Ornith vLLM 0.27 三坑（08-21）").stem` 会把第一个 `.` 之后全当扩展名
+    剥掉 → "Ornith vLLM 0"，于是带 `.` 的文件名永远匹配不上
+    （实测：`Ornith vLLM 0.27 三坑（08-21）.md` 挂在索引里仍是孤儿）。
+    与另一侧 `fp.stem`（真实文件 stem，只剥 .md）口径保持一致。
+    """
+    tgt = tgt.strip()
+    if tgt.lower().endswith(".md"):
+        tgt = tgt[:-3]
+    return tgt
+
+
 def check_orphans(root):
     """孤儿笔记（无 [[...]] 出链，SOP-03 巡检项）。
     排除系统目录/模板；MOC/索引页不视为孤儿（它们是导航节点）。"""
@@ -390,8 +410,11 @@ def check_orphans(root):
         if any(h in r for h in SYSTEM_HINTS):
             continue
         present.add(Path(r).stem)
+    # include_reports=True：`_INDEX.md` / `_MOC.md` 这类导航页在 REPORT_NAMES 里，
+    # 而它们正是给笔记提供**入链**的主要来源。漏传会让"已被主题索引收录"的笔记
+    # 继续被算成孤儿（2026-10-22 实测：Resources 下 137 篇全部误报）。
     linked = set()
-    for fp in collect_md(root):
+    for fp in collect_md(root, include_reports=True):
         r = str(fp.relative_to(root))
         if r.startswith(("raw/", "memory/")) or "_curated" in r:
             continue
@@ -401,7 +424,7 @@ def check_orphans(root):
             continue
         for m in re.finditer(r"\[\[([^\]|#]+)", t):
             tgt = m.group(1).strip()
-            linked.add(Path(tgt).stem)
+            linked.add(_wiki_stem(tgt))
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
         if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板"):
