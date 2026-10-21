@@ -9,41 +9,63 @@
 #   python3 pipeline/rag.py index  [--root R]
 #   python3 pipeline/rag.py query  "<问题>" [--top 3] [--root R] [--answer]
 # ============================================================
-# ── P1-3 拆分过渡 shim ───────────────────────────────────
-# 本文件已拆分为三个模块（行为不变，shim 过渡）：
+# ── 检索域门面（P1-3 拆分后）────────────────────────────────
+# 实现已拆到三个模块：
 #   rag_score  — 评分原语（向量相似度 / BM25 / RRF / 调整 / 去重）
 #   rag_index  — 索引构建与持久化（增量更新 / 加载 / 保存）
 #   rag_query  — 查询执行与结果组装（过滤 / 命中 / JSON / LLM 答案）
-# rag.py 保留 main（CLI 入口）并重新导出全部公共名称，
-# 所有 `import rag` / `from rag import X` 调用者无需修改。
-# 下游批次迁移完成后删除此 shim。
+#
+# 本文件承担**两个不可删的职责**：
+#   1. `main()` —— CLI 入口。plugins/rag_plugin.py 的 SCRIPT_NAME="rag.py"
+#      按文件名 subprocess 调它；tests/deploy.py 也按路径加载。**不能删**。
+#   2. 兼容门面 —— 显式列出对外暴露的名称（原先是 `import *` 隐式泄露，
+#      连 Counter 这类 stdlib 名都会被带出去，看模块看不出真实依赖）。
+#
+# 关于「为什么不删门面」：`tests/test_p0_rag.py` 等 33 个回归测试以
+# `rag.<X>` 单入口覆盖整个检索 API（IDX_VERSION / load_index / _vec /
+# _SafeUnpickler …），这是**有意的**测试设计——它们验证的是检索域整体契约，
+# 不该被迫知道内部模块边界。故保留显式 re-export，但把依赖边写清楚。
+# 生产代码（memory_sync / recall_schedule / feedback_loop …）请直引子模块。
 # ============================================================
 import argparse
 import sys
 
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 
-# ── 重新导出公共名称（from X import * 涵盖公共名） ────────
-from rag_score import *       # noqa: F401, F403
-from rag_index import *       # noqa: F401, F403
-from rag_query import *       # noqa: F401, F403
-
-# ── 下划线名称需显式重新导出（from X import * 不含下划线名） ──
+# ── 显式 re-export（原 `from rag_score import *` 的显式化）────
+# 名单与拆分前逐一核对：原 `import *` 带出的全部公开名 + 原显式块的下划线名。
+# 评分常量 + 原语
 from rag_score import (       # noqa: F401
-    _score_cosine_postings, _bm25_postings, _score_cosine_fast,
-    _vec, _cos, _bm25_scores, _adjust_key,
+    ADJUST_MIN_SIM, ADJUST_BOOST, ADJUST_MAX,
+    DENSE_M, DENSE_SLOTS_FRAC,
+    HYBRID_ALPHA, RRF_CAP, RRF_K,
+    CHUNK_FAMILY_MAX, CONF_WEIGHT,
+    INVERTED_HIT_BOOST, PRIORITY_MULTIPLIER,
+    dense_fill_tail, dense_rank, load_retrieval_adjustments,
+    _score_cosine_postings, _score_cosine_fast,
+    _bm25_postings, _bm25_scores,
+    _vec, _cos, _adjust_key,
     _apply_retrieval_adjustments, _inverted_lookup,
     _rrf_fuse, _root_of, _dedup_chunks,
     _parse_importance, _parse_tags, _has_any_tag,
 )
+# 索引层
 from rag_index import (       # noqa: F401
-    _SAFE_PICKLE_GLOBALS, _SafeUnpickler, _CHUNK_SUFFIX,
+    IDX_DIR, IDX_JSON, IDX_PICKLE, IDX_VERSION, IDX_STEM,
+    CONTEXT_IN_INDEX,
+    all_doc_vectors, cmd_index, index_file, indexed_docs,
+    load_index, save_index, strip_body, tf_from_postings,
+    _SafeUnpickler, _SAFE_PICKLE_GLOBALS, _CHUNK_SUFFIX,
     _infer_parent_from_name, _title_text, _imp_of, _ts_of,
     _conf_of, _parent_path, _root_path, _build_dense,
     _full_rebuild, _incremental_update, _doc_norm,
     _build_norms, _build_postings, _build_inverted_index,
 )
+# 查询层
 from rag_query import (       # noqa: F401
+    CONCLUSION_WORDS, PARENT_WINDOW,
+    TITLE_BOOST, TITLE_BOOST_CAP, SYNONYMS_PATH,
+    best_sentence, cmd_query, llm_answer,
     _synonyms_cache, _synonyms_reverse,
     _apply_filters, _is_index_like, _parent_block, _read_head,
     _title_boost, _build_hit, _build_json_output,
@@ -51,6 +73,22 @@ from rag_query import (       # noqa: F401
     _record_hits, _load_synonyms, _expand_query,
     _snippet_candidate,
 )
+# 检索域间接依赖的领域工具（原 `import *` 从子模块的 import 语句里带出）。
+# 这些名字 rag 本身不用，但历史上经 rag 暴露，测试与旧调用方在用；
+# 显式声明比继续隐式泄露更好维护。
+from kb_io import EXCLUDE, FM, iter_notes, load_meta             # noqa: F401
+from kb_metautil import (LAYER_MULTIPLIER, index_excluded,       # noqa: F401
+                         is_index_stub, is_stale, kb_layer_of,
+                         parent_of, retrievable_status, root_of)
+from kb_text import content_fingerprint, count_tokens            # noqa: F401
+
+# ── 兼容转发：这些名字以前经 `import *` 从子模块的 import 语句里
+#    被**无意**带出（如 kb_text.tokenize / Counter / kb_metautil.*）。
+#    有测试与旧调用方在用，显式声明比继续隐式泄露更好维护。
+from collections import Counter                                    # noqa: F401
+from kb_metautil import is_generated_report                        # noqa: F401
+from kb_io import iter_notes, load_meta                            # noqa: F401
+from kb_text import tokenize                                       # noqa: F401
 
 
 def main() -> int:
