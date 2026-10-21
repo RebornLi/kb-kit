@@ -283,3 +283,99 @@ def record_lineage(root, src: str, dst: str, action: str) -> None:
 
 # ── P2: frontmatter 关系型字段（FR-3.3.1）──────────────────
 RELATION_FIELDS = ("related_to", "prerequisite", "supersedes", "superseded_by")
+
+
+# ── 日期解析（parse_date / parse_date_safe）──────────────────
+_DATE_RE = re.compile(r"(\d{4})-(\d{1,2})-(\d{1,2})")
+
+
+def parse_date(v: Optional[str]) -> Optional[datetime]:
+    """解析 YYYY-MM-DD 格式日期字符串。
+
+    Args:
+        v: 日期字符串（如 "2024-01-15"），None 或空字符串返回 None
+
+    Returns:
+        datetime 对象，解析失败返回 None。
+
+    Examples:
+        >>> parse_date("2024-01-15")
+        datetime.datetime(2024, 1, 15, 0, 0)
+        >>> parse_date(None) is None
+        True
+        >>> parse_date("invalid") is None
+        True
+    """
+    if not v:
+        return None
+    try:
+        return datetime.strptime(str(v).strip()[:10], "%Y-%m-%d")
+    except (ValueError, TypeError):
+        # 尝试从字符串中提取日期（如 "2024-01-15T10:30:00"）
+        m = _DATE_RE.search(str(v))
+        if m:
+            try:
+                return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+            except (ValueError, TypeError):
+                return None
+        return None
+
+
+def parse_date_safe(
+    v: Optional[str], default: Optional[datetime] = None
+) -> datetime:
+    """安全解析日期，失败返回 default。
+
+    Args:
+        v: 日期字符串
+        default: 解析失败时的默认值（None 时使用 datetime(1970,1,1)）
+
+    Returns:
+        datetime 对象。
+
+    Examples:
+        >>> parse_date_safe("2024-01-15")
+        datetime.datetime(2024, 1, 15, 0, 0)
+        >>> parse_date_safe("invalid")
+        datetime.datetime(1970, 1, 1, 0, 0)
+    """
+    result = parse_date(v)
+    if result is not None:
+        return result
+    return default if default is not None else datetime(1970, 1, 1)
+
+
+# ── 重要性解析（parse_importance）─────────────────────────────
+_IMPORTANCE_RE = re.compile(r"[-+]?\d*\.?\d+")
+
+
+def parse_importance(s: Any) -> float:
+    """从 frontmatter importance 字段解析浮点值。
+
+    支持纯数字字符串、带前缀的字符串（如 "P0"、"0.85"）、数字类型。
+
+    Args:
+        s: 重要性值（str / int / float / None）
+
+    Returns:
+        浮点值，解析失败返回 0.0。
+
+    Examples:
+        >>> parse_importance("0.85")
+        0.85
+        >>> parse_importance("P0")
+        0.0
+        >>> parse_importance(None)
+        0.0
+    """
+    if s is None:
+        return 0.0
+    if isinstance(s, (int, float)):
+        return float(s)
+    m = _IMPORTANCE_RE.search(str(s))
+    if not m:
+        return 0.0
+    try:
+        return float(m.group())
+    except (ValueError, TypeError):
+        return 0.0
