@@ -227,6 +227,12 @@ GENERATED_REPORTS = {
     "recall_schedule.md", "link_suggestions.md", "_INDEX.md",
     "clean_suggestions.md", "_MOC.md", "_graph.md", "_graph_kg.md",
 }
+# 图谱/报告产物会被**分批生成**：`_graph_kg.md`、`_graph_kg-c1.md`、`_graph_kg-c2.md`…
+# 只按精确文件名匹配会漏掉带 `-cN` 后缀的那批（生产库实测踩到：
+# `_graph_kg-c1.md` 被 check_skeletons 报成"骨架笔记"）。
+_GENERATED_STEM_RE = re.compile(
+    r"^_(?:graph|graph_kg|MOC|INDEX)(?:-c\d+)?$")
+
 
 def is_generated_report(rel) -> bool:
     """rel 是否为运行期生成的报告产物：按文件名判定，或位于 _curate/（审计/提案目录）。
@@ -235,10 +241,14 @@ def is_generated_report(rel) -> bool:
     但它们是**知识导航**、最容易积累悬空链接，所以**死链巡检单独把它们纳入**
     （见 kb-healthcheck 的 NAV_FILES），而不是改这里的语义。
     """
-    if Path(str(rel)).name in GENERATED_REPORTS:
+    p = Path(str(rel))
+    if p.name in GENERATED_REPORTS:
+        return True
+    # 分批生成变体：`_graph_kg-c1.md` 等（stem 去掉 .md 后匹配）
+    if _GENERATED_STEM_RE.match(p.stem):
         return True
     # 结晶提案（_curate/b*.md）与审计产物（_audit/*.md 含 log.md）：人读产物，不是知识笔记
-    _parts = [str(x) for x in Path(str(rel)).parts[:-1]]
+    _parts = [str(x) for x in p.parts[:-1]]
     if "_curate" in _parts or "_audit" in _parts:
         return True
     return False

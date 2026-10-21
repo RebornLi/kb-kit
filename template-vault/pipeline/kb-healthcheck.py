@@ -246,14 +246,24 @@ def check_deadlinks(root):
 
 
 def check_skeletons(root):
+    """骨架笔记：<500B 且创建超过 7 天（排除系统目录/模板/运行产物）。
+
+    运行产物必须排除：`_graph_kg*.md`（图谱生成）、`_audit/*.md`（审计日志）、
+    `_curate/*.md`（结晶提案）都是引擎写的、天然很小，算"骨架"是误报。
+    2026-10-22 生产库实测踩到：`_graph_kg-c1.md`(454B) 与 `_audit/log.md`(423B)
+    被报成骨架 —— 它们 10-01 生成后就没再变过，`SYSTEM_HINTS` 覆盖不到。
+    """
+    from kb_metautil import is_generated_report
     skels, now = [], datetime.now(timezone.utc)
     for fp in collect_md(root):
         s = str(fp.relative_to(root))
         if any(h in s for h in SYSTEM_HINTS) or s.startswith("50-模板"):
             continue
+        if is_generated_report(s):
+            continue          # 运行产物不是"写了一半的笔记"
         if fp.stat().st_size < 500 and (now - datetime.fromtimestamp(fp.stat().st_ctime, tz=timezone.utc)).days > 7:
             skels.append((s, fp.stat().st_size))
-    print(f"🦴 骨架笔记: {len(skels)} 个(<500B 且 >7天，排除系统目录/模板)\n   阈值: 0")
+    print(f"🦴 骨架笔记: {len(skels)} 个(<500B 且 >7天，排除系统目录/模板/运行产物)\n   阈值: 0")
     for s, sz in skels[:20]:
         print(f"   ⚠ {s} ({sz}B)")
     return len(skels)
