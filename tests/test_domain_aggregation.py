@@ -76,50 +76,253 @@ def _all_subclasses(base):
     return out
 
 
-def _extract_dict_body(src: str, name: str):
-    r"""从源码里取 `name = { ... }` 的**字典体**（括号配平，单行多行都认）。
-
-    为什么不用非贪婪正则：`ACTION_MAP` 有单行（`{"a": "a", "b": "b"}`）与多行
-    （每行一个键）两种写法，非贪婪 `\{.*?\}` 在单行场景下匹配不到（实测：
-    37 个插件里 36 个解析为空，对账直接失效）。
-    """
-    m = re.search(rf"\b{name}\s*=\s*\{{", src)
-    if not m:
-        return None
-    depth, i = 1, m.end()
-    while i < len(src) and depth:
-        c = src[i]
-        if c == "{":
-            depth += 1
-        elif c == "}":
-            depth -= 1
-        i += 1
-    return src[m.end():i - 1] if depth == 0 else None
-
-
-def _head_action_map(shim_file: str) -> dict:
-    """从 git HEAD 解析原插件的 ACTION_MAP（P2-1 之前的事实源）。
-
-    返回 {action: 原子子命令 或 None}。解析失败返回 {}（该插件本来就没有
-    ACTION_MAP，如 ops 域那些用 `SCRIPT_NAME`+`ACTION_MAP` 的薄壳都有的除外）。
-    """
-    try:
-        src = subprocess.run(
-            ["git", "show", f"HEAD:template-vault/pipeline/plugins/{shim_file}"],
-            capture_output=True, text=True, cwd=str(REPO), timeout=30).stdout
-    except (OSError, subprocess.SubprocessError):
-        return {}
-    if not src:
-        return {}
-    import re
-    body = _extract_dict_body(src, "ACTION_MAP")
-    if body is None:
-        return {}
-    out = {}
-    for mm in re.finditer(r'"([^"]+)"\s*:\s*(None|"[^"]*"|\'[^\']*\')', body):
-        v = mm.group(2)
-        out[mm.group(1)] = None if v == "None" else v.strip("\"'")
-    return out
+# ── 基线快照（冻结于 P2-1 第二期改造前，commit eaa5708）─────────────
+#
+# 为什么把基线写死在测试里、而不是每次 `git show HEAD:` 读：
+#   P2-1 的改动一旦提交，HEAD 就变成了 shim 版本 —— 用 HEAD 当"改造前基线"
+#   会自指（实测：提交后对账 0 条，测试自己把自己判红）。
+#   固化快照后，这条守卫与 git 历史解耦，永远比对"合并前的事实"。
+#
+# 结构：{插件名: {"routes": {action: 原子子命令或None},
+#              "in_proc": [进程内快路径的 action],
+#              "aliases": [cli 别名],
+#              "meta_actions": [metadata().actions]}}
+PLUGIN_SNAPSHOT = {
+    "agent_json": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['ingest'],
+    },
+    "agent_md": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['extract', 'mirror', 'mirror-core', 'sync'],
+    },
+    "agent_registry": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['agent', 'ingest-agent'],
+        "meta_actions": ['add', 'detect', 'enable', 'ingest', 'list', 'setup'],
+    },
+    "agent_sqlite": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['ingest'],
+    },
+    "audit": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['audit'],
+        "meta_actions": ['fix', 'log', 'scan'],
+    },
+    "backup": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['backup'],
+        "meta_actions": ['backup'],
+    },
+    "classify": {
+        "routes": {"classify": None},
+        "in_proc": [],
+        "aliases": ['classify'],
+        "meta_actions": ['classify'],
+    },
+    "clean": {
+        "routes": {"dry-run": 'dry-run', "apply": 'apply', "report": 'report', "chunk": 'chunk', "refine": 'refine', "taxonomy": 'taxonomy', "repair": 'repair', "repair-headings": 'repair-headings'},
+        "in_proc": [],
+        "aliases": ['clean'],
+        "meta_actions": ['apply', 'chunk', 'dry-run', 'refine', 'repair', 'repair-headings', 'report', 'taxonomy'],
+    },
+    "compile": {
+        "routes": {"query": 'query', "apply": 'apply', "status": 'status'},
+        "in_proc": [],
+        "aliases": ['compile'],
+        "meta_actions": ['apply', 'query', 'status'],
+    },
+    "confidence": {
+        "routes": {"show": 'show', "audit": 'audit', "apply": 'apply', "decay": 'decay'},
+        "in_proc": ['audit', 'show'],
+        "aliases": ['confidence'],
+        "meta_actions": ['apply', 'audit', 'decay', 'show'],
+    },
+    "consolidate": {
+        "routes": {"run": 'run', "status": 'status'},
+        "in_proc": [],
+        "aliases": ['consolidate'],
+        "meta_actions": ['run', 'status'],
+    },
+    "contextual": {
+        "routes": {"build": 'build', "show": 'show'},
+        "in_proc": [],
+        "aliases": ['contextual'],
+        "meta_actions": ['build', 'show'],
+    },
+    "contradict": {
+        "routes": {"scan": 'scan', "apply": 'apply'},
+        "in_proc": [],
+        "aliases": ['contradict'],
+        "meta_actions": ['apply', 'scan'],
+    },
+    "curate": {
+        "routes": {"plan": 'plan', "run": 'run', "verify": 'verify', "report": 'report', "review": 'review'},
+        "in_proc": [],
+        "aliases": ['curate'],
+        "meta_actions": ['plan', 'report', 'review', 'run', 'verify'],
+    },
+    "dashboard": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['dashboard'],
+        "meta_actions": ['generate'],
+    },
+    "eval": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['eval'],
+        "meta_actions": ['compare', 'gold', 'run'],
+    },
+    "feedback": {
+        "routes": {"ingest": 'ingest', "hit": 'hit', "apply": 'apply'},
+        "in_proc": [],
+        "aliases": ['feedback'],
+        "meta_actions": ['apply', 'hit', 'ingest'],
+    },
+    "gate": {
+        "routes": {"check": 'check'},
+        "in_proc": ['check'],
+        "aliases": ['gate'],
+        "meta_actions": ['check'],
+    },
+    "graph": {
+        "routes": {"build": None},
+        "in_proc": [],
+        "aliases": ['graph'],
+        "meta_actions": ['build'],
+    },
+    "health_metrics": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['health-metrics'],
+        "meta_actions": ['kpi', 'metrics'],
+    },
+    "healthcheck": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['healthcheck', 'kb-healthcheck'],
+        "meta_actions": ['check'],
+    },
+    "ingest_chat": {
+        "routes": {"parse": None},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['parse'],
+    },
+    "ingest_convert": {
+        "routes": {"convert": None},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['convert'],
+    },
+    "intake": {
+        "routes": {"review": 'review', "apply": 'apply', "move": 'apply', "trash": 'apply'},
+        "in_proc": [],
+        "aliases": ['ingest'],
+        "meta_actions": ['apply', 'move', 'review', 'trash'],
+    },
+    "ladder": {
+        "routes": {"status": 'status', "propose": 'propose', "run": 'run', "apply": 'apply', "adjudicate": 'adjudicate', "verdicts": 'verdicts'},
+        "in_proc": [],
+        "aliases": ['ladder'],
+        "meta_actions": ['adjudicate', 'apply', 'propose', 'run', 'status', 'verdicts'],
+    },
+    "link": {
+        "routes": {"suggestions": 'suggestions', "apply": 'apply', "moc": 'moc'},
+        "in_proc": [],
+        "aliases": ['link'],
+        "meta_actions": ['apply', 'moc', 'suggestions'],
+    },
+    "memory_sync": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['promote', 'review'],
+    },
+    "rag": {
+        "routes": {"index": 'index', "query": 'query'},
+        "in_proc": ['query'],
+        "aliases": ['query', 'rag'],
+        "meta_actions": ['index', 'query'],
+    },
+    "raw": {
+        "routes": {"show": 'show', "find": 'find', "list": 'list', "path": 'path'},
+        "in_proc": [],
+        "aliases": ['raw'],
+        "meta_actions": ['find', 'list', 'path', 'show'],
+    },
+    "recall": {
+        "routes": {"deck": 'deck', "mark": 'mark', "status": 'status'},
+        "in_proc": ['deck', 'status'],
+        "aliases": ['recall'],
+        "meta_actions": ['deck', 'mark', 'status'],
+    },
+    "rerank": {
+        "routes": {"rerank": None},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['rerank'],
+    },
+    "rsi": {
+        "routes": {"probe": None},
+        "in_proc": [],
+        "aliases": ['rsi'],
+        "meta_actions": ['probe'],
+    },
+    "schema": {
+        "routes": {"check": 'check', "fields": 'fields', "bitemporal": 'bitemporal'},
+        "in_proc": ['check', 'fields'],
+        "aliases": ['schema'],
+        "meta_actions": ['bitemporal', 'check', 'fields'],
+    },
+    "semantic_chunk": {
+        "routes": {"chunk": None},
+        "in_proc": [],
+        "aliases": [],
+        "meta_actions": ['chunk'],
+    },
+    "sync": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['ingest-any', 'sync'],
+        "meta_actions": ['apply', 'dry-run', 'history', 'ingest-any', 'rollback'],
+    },
+    "tagfix": {
+        "routes": {"scan": 'scan', "fix": 'fix'},
+        "in_proc": [],
+        "aliases": ['tagfix'],
+        "meta_actions": ['fix', 'scan'],
+    },
+    "user_manager": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['user'],
+        "meta_actions": ['add', 'check-perm', 'list', 'remove'],
+    },
+    "validate": {
+        "routes": {"validate": None},
+        "in_proc": ['validate'],
+        "aliases": ['validate'],
+        "meta_actions": ['validate'],
+    },
+    "verify": {
+        "routes": {},
+        "in_proc": [],
+        "aliases": ['verify'],
+        "meta_actions": ['all'],
+    },
+}
 
 
 def _aggregate_routes():
@@ -132,6 +335,7 @@ def _aggregate_routes():
 
 
 def _aggregate_delegates():
+    """全部聚合类的委派表合并视图（自定义 execute 的插件走这里）。"""
     merged = {}
     for cls in AGGREGATES:
         for key, val in (getattr(cls, "CUSTOM_DELEGATES", {}) or {}).items():
@@ -140,15 +344,15 @@ def _aggregate_delegates():
 
 
 class AggregateRouteCompletenessTest(unittest.TestCase):
-    """全量对账：HEAD 里每个 (plugin, action) 都必须仍能路由。"""
+    """全量对账：快照里每个 (plugin, action) 都必须仍能路由。"""
 
-    def test_every_head_action_is_still_routable(self):
+    def test_every_snapshot_action_is_still_routable(self):
         routes = _aggregate_routes()
         delegates = _aggregate_delegates()
         missing = []
         checked = 0
-        for plug, shim_file in sorted(SHIM_FILE_OF.items()):
-            for action, sub in _head_action_map(shim_file).items():
+        for plug, info in sorted(PLUGIN_SNAPSHOT.items()):
+            for action, sub in info["routes"].items():
                 checked += 1
                 key = (plug, action)
                 if key in delegates:
@@ -159,31 +363,17 @@ class AggregateRouteCompletenessTest(unittest.TestCase):
                 got = routes[key]
                 # 原子子命令必须一致（None 表示不传位置参数 —— 传错会 invalid choice）
                 if len(got) >= 2 and got[1] != sub:
-                    missing.append(f"{plug}.{action}: 子命令 {got[1]!r} != HEAD {sub!r}")
+                    missing.append(f"{plug}.{action}: 子命令 {got[1]!r} != 基线 {sub!r}")
         self.assertEqual(missing, [], f"路由丢失或退化: {missing}")
-        # 65 条 = 29 个插件里 25 个用 ACTION_MAP 的动作总数
-        # （4 个 agent 插件走自定义 execute，其动作由 CUSTOM_DELEGATES 覆盖，
-        #   单独在 DelegationTest 里校验）
-        self.assertGreaterEqual(checked, 60,
-                                f"只对账了 {checked} 条动作，解析可能失败（应 ≥60）")
+        self.assertGreaterEqual(checked, 60, f"只对账了 {checked} 条动作（应 ≥60）")
 
-    def test_every_head_alias_is_still_present(self):
+    def test_every_snapshot_alias_is_still_present(self):
         """cli 别名漏搬 → `kb ladder` 这类命令悄悄失效。"""
-        import re
         missing = []
-        for plug, shim_file in sorted(SHIM_FILE_OF.items()):
-            try:
-                src = subprocess.run(
-                    ["git", "show", f"HEAD:template-vault/pipeline/plugins/{shim_file}"],
-                    capture_output=True, text=True, cwd=str(REPO), timeout=30).stdout
-            except (OSError, subprocess.SubprocessError):
-                continue
-            body = _extract_dict_body(src or "", "cli_aliases")
-            if body is None:
-                continue
-            for cli in re.findall(r'"([^"]+)"\s*:', body):
-                # 两种聚合形态：DomainPlugin 用 `_ALIASES`（第一期 OpsPlugin 没有，
-                # 它的别名直接写在 metadata().cli_aliases 里），故两处都要查。
+        for plug, info in sorted(PLUGIN_SNAPSHOT.items()):
+            for cli in info["aliases"]:
+                # 两种聚合形态：DomainPlugin 用 `_ALIASES`；第一期 OpsPlugin
+                # 的别名直接写在 metadata().cli_aliases 里，故两处都要查。
                 found = any(cli in (getattr(cls, "_ALIASES", None) or {})
                             or cli in (cls().metadata().cli_aliases or {})
                             for cls in AGGREGATES)
@@ -191,31 +381,47 @@ class AggregateRouteCompletenessTest(unittest.TestCase):
                     missing.append(f"{plug}: 别名 {cli!r} 丢失")
         self.assertEqual(missing, [], f"cli 别名丢失: {missing}")
 
-    def test_in_process_whitelist_matches_head(self):
-        """进程内快路径标记必须与 HEAD 的 IN_PROCESS_ACTIONS 一致。
+    def test_every_custom_execute_action_is_delegated(self):
+        """自定义 execute 的 4 个 agent 插件：每个 action 都必须有委派条目。
 
-        误标成 False = 静默性能退化（rag.query 每次多 spawn 一个解释器 ~40ms）；
+        只查"插件名在不在委派表里"是不够的 —— 实测把 `("agent_json","ingest")`
+        整行删掉，既有测试全绿（插件名确实还在表里，但那个 action 已不可达）。
+        这里按快照逐 action 对账。
+        """
+        delegates = _aggregate_delegates()
+        missing = []
+        for plug in ("agent_registry", "agent_json", "agent_md", "agent_sqlite"):
+            for action in PLUGIN_SNAPSHOT[plug]["meta_actions"]:
+                # agent_json 的 metadata 声明是 "ingest"，但原实现的 execute()
+                # 从不检查 action 名；历史调用方（含测试）写的是 "json"。
+                # **两个名字都必须各自有委派条目**（不能互相兜底）——
+                # 实测只删 "ingest" 那条时测试全绿，因为 "json" 还能路由到，
+                # 于是按 metadata 契约调用的 `execute("ingest")` 静默失效。
+                keys_to_require = [(plug, action)]
+                if plug == "agent_json" and action == "ingest":
+                    keys_to_require.append(("agent_json", "json"))
+                for k in keys_to_require:
+                    if k not in delegates:
+                        missing.append(f"{k[0]}.{k[1]}")
+        self.assertEqual(missing, [], f"自定义 execute 的动作没有委派条目: {missing}")
+
+    def test_in_process_whitelist_matches_snapshot(self):
+        """进程内快路径标记必须与基线一致。
+
+        误标成 False = 静默性能退化（rag.query 每次多 spawn 解释器 ~40ms）；
         误标成 True = 写动作进进程内，隔离性丢失。
         """
-        import re
         routes = _aggregate_routes()
         wrong = []
-        for plug, shim_file in sorted(SHIM_FILE_OF.items()):
-            try:
-                src = subprocess.run(
-                    ["git", "show", f"HEAD:template-vault/pipeline/plugins/{shim_file}"],
-                    capture_output=True, text=True, cwd=str(REPO), timeout=30).stdout
-            except (OSError, subprocess.SubprocessError):
-                continue
-            m = re.search(r"IN_PROCESS_ACTIONS\s*=\s*\{([^}]*)\}", src or "")
-            head_inproc = set(re.findall(r'"([^"]+)"', m.group(1))) if m else set()
-            for action in _head_action_map(shim_file):
+        for plug, info in sorted(PLUGIN_SNAPSHOT.items()):
+            head_inproc = set(info["in_proc"])
+            for action in info["routes"]:
                 key = (plug, action)
                 if key not in routes:
                     continue
                 got = routes[key][2] if len(routes[key]) >= 3 else False
                 if bool(got) != (action in head_inproc):
-                    wrong.append(f"{plug}.{action}: in_proc={got}，HEAD={action in head_inproc}")
+                    wrong.append(f"{plug}.{action}: in_proc={got}，基线={action in head_inproc}")
         self.assertEqual(wrong, [], f"进程内快路径标记不一致: {wrong}")
 
 
