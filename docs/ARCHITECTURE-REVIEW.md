@@ -2,7 +2,7 @@
 
 > 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，297 tracked files，171 .py）
 > 初查：2026-10-19 · 方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
-> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成（含 shim 收尾）/ P2-1、P2-2 已落地**；剩 P2-3
+> 状态核对：2026-10-21 — **P0 / P1 / P2-1 / P2-2 / P2-3 全部完成**；仅剩「不建议主动做」的 ④ 与零散遗留 ⑤
 > ⚠️ §四、§五 保留初查时点视角；每项当前状态见 **§九 状态总账**
 
 ---
@@ -218,7 +218,7 @@ consolidate.run(max_seconds预算)
 |---|---|---|---|
 | 1 | `tests/test_p0_fixes.py` | 2260 | ✅ 拆为 32 个 `test_*.py`，本文件降至 400 行 / 7% |
 | 2 | `pipeline/rag.py` | 1768 | ✅ 拆为 `rag_index`/`rag_score`/`rag_query`；本文件保留 `main()`（CLI 入口不可删）+ 显式门面 |
-| 3 | `pipeline/curate.py` | 1288 | ❌ **仍是 1288 行** — 现役最大单文件（P2-3 目标） |
+| 3 | `pipeline/curate.py` | 1288 | ✅ **已拆** → 核心 1023 行 + `curate_cmds.py` 370 行；且有 `test_curate.py`（55 例） |
 | 4 | `pipeline/kb_common.py` | 1236 | ✅ **已删除** —— 拆为 `kb_io`/`kb_text`/`kb_metautil`/`kb_config`/`kb_domain`/`kb_infer` 六个模块 |
 | 5 | `pipeline/kb_engine.py` | 771 | ❌ 未动（研究层；P2-2 固化边界而非拆分） |
 | 6 | `pipeline/clean.py` | 705 | ❌ 未动 |
@@ -637,7 +637,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 - **风险**：中——需确认无生产模块 import 研究层符号。
 - **验证**：`test_reachability.py` + codegraph 反向依赖检查。
 
-#### P2-3：`curate.py` 子命令提取 ❌ 未动
+#### P2-3：`curate.py` 子命令提取 ✅ 已完成
 - **动作**：把 `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_recheck` / `cmd_review` 拆为独立函数文件或 class，`curate.py` 保留 `curate_one` / `verify_note` / `apply_canon` 核心。
 - **收益**：1288 行→核心 ~500 行 + 子命令各 ~150 行，可读性显著提升。
 - **风险**：中——子命令间共享状态（state/ledger/proposals），拆分需传递上下文。
@@ -677,7 +677,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 3. **哪个文件最脆弱、最要先动？**
    - `curate.py`（**1288 行**，现役最大单文件，且**无独立 `test_curate.py`**）—— P2-3 前先补测试
    - `clean.py`（705 行，MinHash/LSH/分块/分类修复混合）
-   - `curate.py`（1288 行，**无独立 `test_curate.py`**）、`clean.py`（705 行）
+   - `curate.py`（1023 行核心，**已有 `test_curate.py` 55 例安全网**）、`clean.py`（705 行）
    - `rag.py` 门面（33 个回归测试经它覆盖检索域契约——保留，但要知道它是门面不是实现）
 
 ---
@@ -697,6 +697,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 | **P1-1/1-3 shim 收尾** | ✅ **已完成** | `kb_common.py` 已删除；294 passed；86 个引擎模块全部可独立 import |
 | P2-1 插件层评估+试点 | ✅ | ops 域 10→1 `OpsPlugin`，CLI 契约零变更，294 passed |
 | P2-2 研究层边界固化 | ✅ | 17 个模块移入 `pipeline/_research/`；internal 改目录推导；3 条新守卫（变异验证有效）；297 passed |
+| P2-3 `curate.py` 拆分 | ✅ | 先补 `test_curate.py`（55 例，抓到 2 个既有 bug）；1289 → 1023 核心行 + `curate_cmds.py` 370 行；352 passed |
 
 **P0 / P1 全部收官。** 剩余未完成项见下。
 
@@ -819,14 +820,56 @@ codegraph / IDE 跳转恢复准确；pipeline 模块数 87 → 86，无死模块
 `kb ladder status` rc=0（6 个研究层模块经动态导入全部工作）· `kb list` 40 插件 ·
 17 个模块从任意 CWD 跑「包内路径」与「垫片路径」两条路都通。
 
-#### ③ P2-3 `curate.py` 子命令提取 ❌ 未动 —— 中等收益、中等风险（唯一剩余 P2 实质项）
-`curate.py` 仍 1288 行，现役最大单文件。
+#### ③ P2-3 `curate.py` 子命令提取 ✅ 已完成（commit `83ce4fe` + `6402b3c`）
 
-- **动作**：拆出 `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_recheck` / `cmd_review`，
-  保留 `curate_one` / `verify_note` / `apply_canon` 核心。
-- ⚠️ **这是唯一没有测试安全网的 P2 项**：P0-3 拆的是 `test_p0_fixes.py`，
-  并无独立 `test_curate.py`。**先补 `test_curate.py` 再拆分**。
-- **验证**：`scripts/verify_curate.py` + 手动 `kb curate run/recheck/report` 冒烟。
+**先补安全网，再拆分**（这是原计划就要求的顺序，也是这次做对的关键）。
+
+**第 1 步：`test_curate.py`（55 例，commit `83ce4fe`）**
+
+拆之前 `curate.py` 1289 行**没有独立测试文件**——拿掉子命令后无法证明行为未变。
+新测试覆盖五层：
+
+| 层 | 覆盖 |
+|---|---|
+| A 纯函数 | `render_canon` 节序/空节/项目符号、`_body_of`、`_jaccard` |
+| B 三关校验 | 接地/守恒/引用判定、`inferred` 不计分母、wikilink 剥离、全编造硬失败 |
+| C `curate_one` | noise/raw-only 的 apply 门控、低置信转人工队列、截断重试一次、重复正典闸门、模型错误路径 |
+| D `apply_canon` | 原文保号归档逐字一致、归档冲突加 `-N`、溯源字段、chunk 字段剔除、lineage |
+| E 五子命令 | plan/run/verify/report/review/recheck + 账本精简 vs 提案旁路完整 + L4 冻结 |
+
+**写测试时抓到 2 个既有 bug**（都是"新装库第一次用就遇到"，此前零覆盖）：
+1. **`kb curate report` 在全新库上必崩** —— `_read_only()` 文件不存在时返回 `None`，
+   代码直接 `.exists()` → `AttributeError`。已修（判空后按"无记录"处理）。
+2. 同一处 `ok_rate` 为 `None` 时打印成「通过校验 0 次（**None**）」。已修（显示 `—`）。
+
+安全网有效性：3 个变异（接地关失效 / apply 门控失效 / 原文不归档）**全部变红**。
+
+**第 2 步：拆出 `curate_cmds.py`（commit `6402b3c`）**
+
+| 文件 | 行数 | 职责 |
+|---|---|---|
+| `curate.py` | 1289 → **1023**（核心 985） | `curate_one` / `verify_note` / `apply_canon` / `render_canon` / `select_batch` / `find_dup_canon` / `mark_evidence_verdict` / `l4_frozen` + `cmd_plan`（仅 `select_batch` 的 26 行门面，留核心层更好读） |
+| `curate_cmds.py` | **370** | `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_review` / `cmd_recheck` / `_write_proposals` |
+
+依赖单向：`curate_cmds → curate`，核心不反向依赖子命令。
+
+⚠️ **拆的两个坑，都是「pytest 绿但 CLI 坏」，靠实机冒烟才抓到**：
+1. **循环导入**：`curate.py` 顶层 re-export + `curate_cmds` 顶层 `from curate import`
+   → 直接 `python3 pipeline/curate.py` 报
+   `ImportError: cannot import name '_write_proposals' from partially initialized module`。
+   **pytest 下侥幸能过**（测试先 import `curate`，初始化顺序不同）。
+   改用 PEP 562 模块级 `__getattr__` 延迟导入。
+2. **模块内裸名不触发 `__getattr__`**：`main()` 写 `cmd_verify(...)` →
+   `NameError`。改为 `import curate_cmds as _c` 后 `_c.cmd_verify(...)`。
+
+**安全网当场抓到的回归**：`cmd_run` 里的裸 `LLM(model=model)` 在 import 时
+就把类对象绑死了，`curate.LLM = StubLLM` 打桩对它无效 → 永远走真实 LLM。
+已改为 `_curate.LLM(...)` 走模块属性查找。**这条如果没有安全网，会被静默带进生产。**
+
+**验证**：`pytest` **352 passed**（与拆分前逐字一致）· 6 个子命令 CLI 实机 rc 全 0
+（`recheck` 无提案时 rc=3 是设计值）· `kb curate plan/report/review/verify` 经
+launcher→plugin 全链路 rc=0 · `scripts/verify_curate.py` PASS 11 ·
+两模块任意顺序独立 import 均无环。
 
 #### ④ P2-1 剩余 4 域真合并 🔶 已试点未扩展 —— 建议**不主动做**
 ops 域已跑通（可复制模板），其余 4 域各有 action 撞名（retrieval 3 /
@@ -843,8 +886,11 @@ crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 
 - `pipeline/` 根下 17 个研究层**兼容垫片**（P2-2 留的桥）：待 `ladder`/`adjudicate`
   的 `__import__` 与测试全部迁到 `_research.*` 后删除；`test_shims_are_only_re_exports`
   已保证它们在等待期间不长胖。
-- 热点表已重排（见 §四）；`kb_engine.py`(771) / `clean.py`(705) /
-  `memory_ingest.py`(656) 尚未治理，优先级低于 ③。
+- `curate.py` 的 `from curate import cmd_run` 兼容层（PEP 562 `__getattr__`）：
+  待调用方都迁到 `curate_cmds` 后可删；它保证 `kb curate ...` 与
+  `tests/test_curate.py` 的稳定入口不变。
+- 热点表现役前三：`curate.py`(1023，已有安全网) / `clean.py`(705) /
+  `memory_ingest.py`(656)。后两者尚未治理。
 
 ---
 
