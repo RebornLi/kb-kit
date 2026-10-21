@@ -1115,7 +1115,10 @@ def cmd_report(root: Path, as_json: bool) -> int:
             n_index += 1
     led = _read_only("curate_ledger.jsonl")(root)
     n_runs = n_ok = n_drop = 0
-    if led.exists():
+    # `_read_only` 在文件不存在时返回 None（不是 Path）—— 以前没判空，
+    # 于是**全新库上 `kb curate report` 必崩** AttributeError: 'NoneType' has no
+    # attribute 'exists'。这里按"没有结晶记录"处理（报告应为全 0，不是异常）。
+    if led is not None and led.exists():
         for line in led.read_text(encoding="utf-8").splitlines():
             try:
                 r = json.loads(line)
@@ -1146,7 +1149,10 @@ def cmd_report(root: Path, as_json: bool) -> int:
     if data["compression"] is not None:
         print(f"   压缩比（正典/原文）: {data['compression']:.1%}"
               f"（目标区间 {MIN_RATIO:.0%}–{MAX_RATIO:.0%}）")
-    print(f"   结晶运行 {n_runs} 次，通过校验 {n_ok} 次（{data['ok_rate']}），"
+    # ok_rate 在 n_runs=0 时是 None（分母为 0）—— 直接插值会打印 "（None）"，
+    # 读起来像 bug。没有记录时就不显示通过率。
+    rate_txt = f"{data['ok_rate']}" if data["ok_rate"] is not None else "—"
+    print(f"   结晶运行 {n_runs} 次，通过校验 {n_ok} 次（{rate_txt}），"
           f"累计丢弃未接地事实 {n_drop} 条")
     if n_review:
         print(f"   待人工裁决 {n_review} 条（低置信）：kb curate review")
