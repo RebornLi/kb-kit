@@ -2,7 +2,7 @@
 
 > 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，297 tracked files，171 .py）
 > 初查：2026-10-19 · 方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
-> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成（含 shim 收尾，`kb_common.py` 已删）/ P2-1 已落地 ops 域试点**
+> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成（含 shim 收尾）/ P2-1、P2-2 已落地**；剩 P2-3
 > ⚠️ §四、§五 保留初查时点视角；每项当前状态见 **§九 状态总账**
 
 ---
@@ -72,7 +72,7 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
 │  │ recall_schedule + fsrs_core  FSRS-6间隔重复调度                     │ │
 │  └────────────────────────────────────────────────────────────────────┘ │
 │                                                                          │
-│  ┌─ 研究层 (内部实验, 无CLI入口, test_reachability守护) ──────────────┐ │
+│  ┌─ 研究层 _research/ (内部实验, 无CLI入口, 目录即边界) ────────────┐ │
 │  │ kb_engine.py(771) · kb_l4.py(580) · kb_l5.py · kb_meta.py(524)     │ │
 │  │ kb_selfweight.py · kb_claim.py(513) · kb_usage.py · kb_contradiction│ │
 │  └────────────────────────────────────────────────────────────────────┘ │
@@ -259,9 +259,12 @@ consolidate.run(max_seconds预算)
 `test_p0_fixes.py` 单文件 2260 行占全部测试（6085行）的 37%。缺少按模块拆分的测试文件（如 `test_rag.py` / `test_curate.py`），导致定位"哪个模块的测试失败"需要在全文件内搜索。
 > **现状**：已拆为 32 个 `test_*.py`，本文件 400 行 / 7%。
 
-### 5.6 研究层边界 ❌ 未动（P2-2）
+### 5.6 研究层边界 ✅ 已解决（P2-2：移入 `_research/` 子包）
 `kb_l4` / `kb_l5` / `kb_meta` / `kb_selfweight` / `kb_claim` / `kb_usage` / `kb_contradiction` 等 8 个研究层模块共 ~4000 行，无 CLI 入口，仅由 `tests/test_reachability.py` 守护。它们与核心引擎共享六个公共模块 / `state_manager`，但边界模糊——是否有实验代码混入了生产路径需要确认。
-> **现状**：仍未动。已实测确认这 8 个模块无任何插件注册（无 CLI 入口）。
+> **现状**：17 个模块已移入 `pipeline/_research/`，`INTERNAL_MODULES` 改为目录推导
+> （`_research/` 下自动算 internal）；`kb_worker.py` 因外部按绝对路径 spawn 而留在
+> `pipeline/` 根，单独声明为 internal。边界由 3 条守卫保证（含"生产模块不得静态
+> import 研究层"与"垫片不得长出实现"）。
 
 ### 5.7 无依赖声明 ✅ 已解决（P1-2）
 项目无 `requirements.txt` / `pyproject.toml`。虽然设计目标是纯标准库，但 `rag.py` 可选依赖 `contextual` / `embed_rerank`，`curate.py` 依赖外部 LLM（`llm.ask_json`）。这些可选依赖的发现方式是"运行时 try-except"，缺乏声明式的外部依赖契约。
@@ -628,7 +631,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
    并无分散在各插件中的冗余。下沉不会减少代码，只会搬移位置。
 3. 不减少插件文件数量、不减少动态 import 数，收益不明确但风险触及引擎层核心。
 
-#### P2-2：研究层边界固化 ❌ 未动
+#### P2-2：研究层边界固化 ✅ 已完成
 - **动作**：为 8 个研究层模块建立明确的 internal 包边界（如移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal），并加 `import guard` 防止生产路径意外依赖。
 - **收益**：防止实验代码污染生产路径；明确哪些可以安全删除。
 - **风险**：中——需确认无生产模块 import 研究层符号。
@@ -693,6 +696,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 | P1-3 `rag.py` 拆分 | ✅ | 1768 行 → `rag_index`/`rag_score`/`rag_query`；`rag.py` 保留 `main()`（CLI 入口，不可删）+ 显式门面 |
 | **P1-1/1-3 shim 收尾** | ✅ **已完成** | `kb_common.py` 已删除；294 passed；86 个引擎模块全部可独立 import |
 | P2-1 插件层评估+试点 | ✅ | ops 域 10→1 `OpsPlugin`，CLI 契约零变更，294 passed |
+| P2-2 研究层边界固化 | ✅ | 17 个模块移入 `pipeline/_research/`；internal 改目录推导；3 条新守卫（变异验证有效）；297 passed |
 
 **P0 / P1 全部收官。** 剩余未完成项见下。
 
@@ -766,17 +770,56 @@ kb_text / kb_io：无内部依赖
 codegraph / IDE 跳转恢复准确；pipeline 模块数 87 → 86，无死模块残留。
 
 
-#### ② P2-2 研究层边界固化 ❌ 未动 —— 中等收益、中等风险
-8 个研究层模块（~4000 行）无 CLI 入口（已实测确认无任何插件注册），
-仅靠 `test_reachability.py` 的 `INTERNAL_MODULES` **手写清单**守护——会腐化。
+#### ② P2-2 研究层边界固化 ✅ 已完成（commit `62c6f72`）
 
-- **动作**：移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal；
-  把 `INTERNAL_MODULES` 改为从目录结构推导（`_research/` 下即 internal），
-  `test_internal_list_not_stale` 已有的"清单不腐化"断言天然承接。
-- **前置确认**：查生产模块是否 import 研究层符号（§P2-2 原文要求）。
-- **验证**：`test_reachability.py` 全绿 + codegraph 反向依赖。
+**动工前的关键发现（原方案不可行，记录在案）**：研究层**不是**游离层——
+「整体移走 + 清单目录推导」会直接打断生产入口：
 
-#### ③ P2-3 `curate.py` 子命令提取 ❌ 未动 —— 中等收益、中等风险
+| 依赖形态 | 详情 |
+|---|---|
+| CLI 入口动态导入 | `ladder.py:56` / `adjudicate.py:337` 用 `__import__("kb_l4")` **裸模块名**导入 6 个研究层模块（`kb_retriage`/`kb_adaptretrieve`/`kb_selfweight`/`kb_meta`/`kb_l4`/`kb_l5`） |
+| 研究层内部互链 | 5 条静态边：`kb_usage` ← `kb_adaptretrieve`/`kb_fitness`/`kb_meta`/`kb_selfweight`，`kb_engine` ← `kb_contradiction` |
+| **外部绝对路径约束** | `kb_worker.py` 被 `kb-context-dsh/src/worker.js:170` 按 `${kbRoot}/pipeline/kb_worker.py` **spawn** —— 移动路径会打断外部进程 |
+| 零生产引用 | 其余 10 个（`kb_calibrate`/`kb_consistency`/`kb_contradiction`/`kb_drift`/`kb_eval`/`kb_fitness`/`kb_ingest`/`kb_scale`/`kb_types`/`kb_worker`）只有测试引用 |
+
+**实现**：
+
+1. **`pipeline/_research/` 收 17 个模块**（`kb_worker` 留根）。
+   `__init__.py` 声明边界规则（允许/禁止的依赖方向），并把 `pipeline/` 注入
+   `sys.path`、为研究层同伴注册 `sys.modules` 别名 —— **17 个文件的 import
+   语句一行未改**；`import kb_fitness` 与 `import _research.kb_fitness` 是同一个
+   模块对象（`isinstance`/单例缓存不分裂）。
+2. **原路径留 17 个兼容垫片**：`re-export` + CLI 转发
+   （`if __name__ == "__main__"` → `from _research.X import main`）。
+   每个 `_research` 模块顶部加路径自举，直接跑包内文件也成立。
+3. **`INTERNAL_MODULES` 从 18 条手写清单改为目录推导**：`_research/` 下全部
+   自动算 internal，只留 `kb_worker.py` 一条真例外（外部 spawn）。
+4. **新增 `tests/conftest.py::research_src()`**：源码守卫测试穿透垫片读真实实现。
+
+**为什么必须有第 4 条**：一批 P0 源码守卫用 `(PIPELINE / "kb_contradiction.py").read_text()`
+钉实现细节（常量存在、取尾部而非头部…）。移包后直接读会读到**垫片本身**，
+守卫集体失效——**"看起来绿了但什么都没验"**。已把 8 处改为经 `research_src()`。
+
+**新增 3 条守卫（均做过变异验证，确认能变红）**：
+
+| 守卫 | 拦什么 |
+|---|---|
+| `test_internal_is_not_still_a_handwritten_pile` | 手写清单涨回 18 条（回退到"逐模块声明"） |
+| `test_research_dir_has_no_production_reverse_import` | 生产模块静态 import `_research`（应经 ladder/adjudicate 动态入口）；垫片除外 |
+| `test_shims_are_only_re_exports` | 垫片长出独立实现（"改了垫片以为改了实现"的静默分叉） |
+
+⚠️ **两个让守卫一度静默失效的坑（已修，教训可复用）**：
+1. `if text.lstrip().startswith("#"): continue` 想跳过"纯注释文件"，但生产模块
+   几乎都带 shebang → **80/81 个文件被跳过，边界守卫形同虚设**。改为逐行剥注释。
+2. 垫片"是否长胖"的检测第一版把跨行 `from x import (` 括号块的内容当成残留
+   代码 → 17 个正常垫片全被误报。改为先把 import 语句整体剥掉再判定。
+
+**验证**：`pytest` **297 passed**（基线 294 + 新守卫 3，0 条既有断言被弱化）·
+3 个变异测试全部让对应守卫变红 · `kb verify` 五项全绿 rc=0（结晶探针 PASS 11）·
+`kb ladder status` rc=0（6 个研究层模块经动态导入全部工作）· `kb list` 40 插件 ·
+17 个模块从任意 CWD 跑「包内路径」与「垫片路径」两条路都通。
+
+#### ③ P2-3 `curate.py` 子命令提取 ❌ 未动 —— 中等收益、中等风险（唯一剩余 P2 实质项）
 `curate.py` 仍 1288 行，现役最大单文件。
 
 - **动作**：拆出 `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_recheck` / `cmd_review`，
@@ -797,8 +840,11 @@ crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 
   实测恒为 no-op（见 §六 P2-1 E 节），约 24 行装饰代码。
 - `rag.py` 门面的 33 个测试引用（`test_p0_rag.py` 等）——**不建议改**：
   它们验证的是检索域整体契约，是有意的单入口测试设计。
+- `pipeline/` 根下 17 个研究层**兼容垫片**（P2-2 留的桥）：待 `ladder`/`adjudicate`
+  的 `__import__` 与测试全部迁到 `_research.*` 后删除；`test_shims_are_only_re_exports`
+  已保证它们在等待期间不长胖。
 - 热点表已重排（见 §四）；`kb_engine.py`(771) / `clean.py`(705) /
-  `memory_ingest.py`(656) 尚未治理，优先级低于 ②③。
+  `memory_ingest.py`(656) 尚未治理，优先级低于 ③。
 
 ---
 
