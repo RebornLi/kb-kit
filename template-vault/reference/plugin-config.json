@@ -1,46 +1,182 @@
 {
   "_meta": {
     "version": 2,
-    "description": "插件启用/禁用配置（40 个插件全覆盖：原 39 个 + P2-1 ops 域聚合）"
+    "description": "插件启用/禁用配置（44 个插件全覆盖：原 39 + 5 个域聚合）"
   },
-  "rag": { "enabled": true, "description": "本地 TF-IDF 语义检索" },
-  "ops": { "enabled": true, "description": "运维域聚合入口：备份/同步/巡检/度量/仪表盘/审计/评测/验收/用户管理（P2-1 试点，与原名单手并存）" },
-  "intake": { "enabled": true, "description": "收件箱摄入 triage" },
-  "feedback": { "enabled": true, "description": "命中信号反馈循环" },
-  "link": { "enabled": true, "description": "孤岛补链引擎" },
-  "recall": { "enabled": true, "description": "回忆排期与间隔重复" },
-  "healthcheck": { "enabled": true, "description": "健康巡检（死链/缺字段/空目录/超长）" },
-  "health_metrics": { "enabled": true, "description": "健康度量指标" },
-  "dashboard": { "enabled": true, "description": "治理仪表盘生成" },
-  "clean": { "enabled": true, "description": "知识库清洗、分块与历史残留修复" },
-  "validate": { "enabled": true, "description": "frontmatter 校验" },
-  "backup": { "enabled": true, "description": "全量快照（zip + sha256，跨平台）" },
-  "sync": { "enabled": true, "description": "知识同步管道" },
-  "memory_sync": { "enabled": true, "description": "记忆晋升与五问门禁" },
-  "classify": { "enabled": true, "description": "笔记自动分类" },
-  "compile": { "enabled": true, "description": "查询→知识 正回路（写提案，人工在环 apply）" },
-  "rsi": { "enabled": true, "description": "递归式自我改进（RSI）只读探针" },
-  "graph": { "enabled": true, "description": "知识图谱构建" },
-  "rerank": { "enabled": true, "description": "检索结果重排序" },
-  "semantic_chunk": { "enabled": true, "description": "语义分块" },
-  "ingest_chat": { "enabled": true, "description": "对话记录摄入" },
-  "ingest_convert": { "enabled": true, "description": "笔记格式转换" },
-  "user_manager": { "enabled": true, "description": "用户与权限管理" },
-  "agent_md": { "enabled": true, "description": "MD 记忆源适配器（OpenClaw/Hermes）" },
-  "agent_json": { "enabled": true, "description": "JSON 记忆源适配器（DSH）" },
-  "agent_sqlite": { "enabled": true, "description": "SQLite 记忆源适配器（Codex）" },
-  "agent_registry": { "enabled": true, "description": "Agent 探测与注册表管理" },
-  "audit": { "enabled": true, "description": "结构审计（溯源漂移/标签簇内聚/索引一致性/孤儿/死链）+ 确认后修复" },
-  "confidence": { "enabled": true, "description": "复合置信分（四因子可审计）+ 原则性遗忘审计（只降层不删文件）" },
-  "consolidate": { "enabled": true, "description": "睡眠时整理：空闲期算近重复/冲突/陈旧，只产提议不改笔记" },
-  "contextual": { "enabled": true, "description": "上下文强化：确定性 CCH（零成本）+ 可选 LLM 定位语（只进索引，不改正文）" },
-  "contradict": { "enabled": true, "description": "矛盾在环：主题重合+变更信号 → 冲突标注入人工队列（区分真冲突与近似重复）" },
-  "curate": { "enabled": true, "description": "知识结晶：空闲本地 Agent 把日志炼成可调用正典（接地校验 + 可溯源）" },
-  "eval": { "enabled": true, "description": "RAGAS 式四指标（faithfulness/relevancy/precision/recall，本地裁判）" },
-  "gate": { "enabled": true, "description": "写入前质量门禁：pass / quarantine / reject 三态 + 来源分级" },
-  "ladder": { "enabled": true, "description": "L0–L5 反馈阶梯：状态 / 产出提案 / 本地模型自主裁决 / 人工落地" },
-  "raw": { "enabled": true, "description": "原记忆（证据层）按需调用：show/find/list/path" },
-  "schema": { "enabled": true, "description": "知识契约检查（reference/kb-schema.json）：只读对照，产出偏差清单" },
-  "tagfix": { "enabled": true, "description": "标签越界治理：删目录路径型 / 归一别名 / 扩受控词表（默认 dry-run）" },
-  "verify": { "enabled": true, "description": "一行验收：契约/校验/巡检/探针/单测 五项全绿（退出码 0=全绿）" }
+  "rag": {
+    "enabled": true,
+    "description": "本地 TF-IDF 语义检索"
+  },
+  "ops": {
+    "enabled": true,
+    "description": "运维域聚合入口：备份/同步/巡检/度量/仪表盘/审计/评测/验收/用户管理（P2-1 试点，与原名单手并存）"
+  },
+  "intake": {
+    "enabled": true,
+    "description": "收件箱摄入 triage"
+  },
+  "feedback": {
+    "enabled": true,
+    "description": "命中信号反馈循环"
+  },
+  "link": {
+    "enabled": true,
+    "description": "孤岛补链引擎"
+  },
+  "recall": {
+    "enabled": true,
+    "description": "回忆排期与间隔重复"
+  },
+  "healthcheck": {
+    "enabled": true,
+    "description": "健康巡检（死链/缺字段/空目录/超长）"
+  },
+  "health_metrics": {
+    "enabled": true,
+    "description": "健康度量指标"
+  },
+  "dashboard": {
+    "enabled": true,
+    "description": "治理仪表盘生成"
+  },
+  "clean": {
+    "enabled": true,
+    "description": "知识库清洗、分块与历史残留修复"
+  },
+  "validate": {
+    "enabled": true,
+    "description": "frontmatter 校验"
+  },
+  "backup": {
+    "enabled": true,
+    "description": "全量快照（zip + sha256，跨平台）"
+  },
+  "sync": {
+    "enabled": true,
+    "description": "知识同步管道"
+  },
+  "memory_sync": {
+    "enabled": true,
+    "description": "记忆晋升与五问门禁"
+  },
+  "classify": {
+    "enabled": true,
+    "description": "笔记自动分类"
+  },
+  "compile": {
+    "enabled": true,
+    "description": "查询→知识 正回路（写提案，人工在环 apply）"
+  },
+  "rsi": {
+    "enabled": true,
+    "description": "递归式自我改进（RSI）只读探针"
+  },
+  "graph": {
+    "enabled": true,
+    "description": "知识图谱构建"
+  },
+  "rerank": {
+    "enabled": true,
+    "description": "检索结果重排序"
+  },
+  "semantic_chunk": {
+    "enabled": true,
+    "description": "语义分块"
+  },
+  "ingest_chat": {
+    "enabled": true,
+    "description": "对话记录摄入"
+  },
+  "ingest_convert": {
+    "enabled": true,
+    "description": "笔记格式转换"
+  },
+  "user_manager": {
+    "enabled": true,
+    "description": "用户与权限管理"
+  },
+  "agent_md": {
+    "enabled": true,
+    "description": "MD 记忆源适配器（OpenClaw/Hermes）"
+  },
+  "agent_json": {
+    "enabled": true,
+    "description": "JSON 记忆源适配器（DSH）"
+  },
+  "agent_sqlite": {
+    "enabled": true,
+    "description": "SQLite 记忆源适配器（Codex）"
+  },
+  "agent_registry": {
+    "enabled": true,
+    "description": "Agent 探测与注册表管理"
+  },
+  "audit": {
+    "enabled": true,
+    "description": "结构审计（溯源漂移/标签簇内聚/索引一致性/孤儿/死链）+ 确认后修复"
+  },
+  "confidence": {
+    "enabled": true,
+    "description": "复合置信分（四因子可审计）+ 原则性遗忘审计（只降层不删文件）"
+  },
+  "consolidate": {
+    "enabled": true,
+    "description": "睡眠时整理：空闲期算近重复/冲突/陈旧，只产提议不改笔记"
+  },
+  "contextual": {
+    "enabled": true,
+    "description": "上下文强化：确定性 CCH（零成本）+ 可选 LLM 定位语（只进索引，不改正文）"
+  },
+  "contradict": {
+    "enabled": true,
+    "description": "矛盾在环：主题重合+变更信号 → 冲突标注入人工队列（区分真冲突与近似重复）"
+  },
+  "curate": {
+    "enabled": true,
+    "description": "知识结晶：空闲本地 Agent 把日志炼成可调用正典（接地校验 + 可溯源）"
+  },
+  "eval": {
+    "enabled": true,
+    "description": "RAGAS 式四指标（faithfulness/relevancy/precision/recall，本地裁判）"
+  },
+  "gate": {
+    "enabled": true,
+    "description": "写入前质量门禁：pass / quarantine / reject 三态 + 来源分级"
+  },
+  "ladder": {
+    "enabled": true,
+    "description": "L0–L5 反馈阶梯：状态 / 产出提案 / 本地模型自主裁决 / 人工落地"
+  },
+  "raw": {
+    "enabled": true,
+    "description": "原记忆（证据层）按需调用：show/find/list/path"
+  },
+  "schema": {
+    "enabled": true,
+    "description": "知识契约检查（reference/kb-schema.json）：只读对照，产出偏差清单"
+  },
+  "tagfix": {
+    "enabled": true,
+    "description": "标签越界治理：删目录路径型 / 归一别名 / 扩受控词表（默认 dry-run）"
+  },
+  "verify": {
+    "enabled": true,
+    "description": "一行验收：契约/校验/巡检/探针/单测 五项全绿（退出码 0=全绿）"
+  },
+  "retrieval": {
+    "enabled": true,
+    "description": "检索域聚合入口：检索/召回/证据层/重排/上下文/查询编译/RSI（P2-1 第二期，与原名单手并存）"
+  },
+  "crystallization": {
+    "enabled": true,
+    "description": "结晶域聚合入口：结晶/反馈阶梯/置信分/矛盾在环/写入门禁/睡眠整理（P2-1 第二期，与原名单手并存）"
+  },
+  "ingestion": {
+    "enabled": true,
+    "description": "摄入域聚合入口：分诊/反馈/对话摄入/格式转换/Agent 注册表与记忆源（P2-1 第二期，与原名单手并存）"
+  },
+  "organization": {
+    "enabled": true,
+    "description": "整理域聚合入口：清洗/契约/补链/标签/分类/图谱/分块/校验（P2-1 第二期，与原名单手并存）"
+  }
 }

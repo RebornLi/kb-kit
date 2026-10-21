@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""rsi_plugin.py — RSI 只读探针插件。封装 kb_rsi.py。
+"""rsi_plugin.py — 兼容垫片（P2-1 第二期：retrieval 域已聚合）。
 
-kb_rsi 只做改进提议（唯一写入：pipeline/.kb_rsi_proposals.jsonl 追加一条运行记录），
-不改动任何笔记正文/元数据，故作为只读研究层入口暴露。
+实现已收进 `retrieval_plugin.RetrievalPlugin`；本文件只保留**原插件名 `rsi`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.rsi_plugin import RSIPlugin` 不受影响。
+
+新代码请直接用 `kb retrieval rsi.<action>`（复合键入口）。
 """
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.retrieval_plugin import RetrievalPlugin
 
 
-class RSIPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "kb_rsi.py"
-    ACTION_MAP = {"probe": None}
+class RSIPlugin(RetrievalPlugin):
+    """`rsi` 的兼容门面 —— 保留原名与 action，实现在 RetrievalPlugin。"""
+
+    SHIM_PLUGIN = "rsi"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="rsi",
             version="1.0",
             plugin_type="kb_module",
-            actions=["probe"],
-            cli_aliases={"rsi": "probe"},
+            actions=['probe'],
+            cli_aliases={'rsi': 'probe'},
             description="递归式自我改进（RSI）只读探针",
         )

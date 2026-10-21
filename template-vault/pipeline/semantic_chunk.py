@@ -6,6 +6,8 @@
 frontmatter 含 chunk_of / chunk_index / chunk_total 字段，可追溯父文档。
 """
 import re
+import sys          # 结尾 `sys.exit(main())` 要用 —— 以前缺这行，
+                    # 直接跑 `python3 pipeline/semantic_chunk.py` 必崩 NameError
 from dataclasses import dataclass
 from pathlib import Path
 

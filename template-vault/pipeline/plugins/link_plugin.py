@@ -1,20 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""link_plugin.py — 补链引擎插件。封装 link_engine.py。"""
+"""link_plugin.py — 兼容垫片（P2-1 第二期：organization 域已聚合）。
+
+实现已收进 `organization_plugin.OrganizationPlugin`；本文件只保留**原插件名 `link`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.link_plugin import LinkPlugin` 不受影响。
+
+新代码请直接用 `kb organization link.<action>`（复合键入口）。
+"""
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.organization_plugin import OrganizationPlugin
 
 
-class LinkPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "link_engine.py"
-    ACTION_MAP = {"suggestions": "suggestions", "apply": "apply", "moc": "moc"}
+class LinkPlugin(OrganizationPlugin):
+    """`link` 的兼容门面 —— 保留原名与 action，实现在 OrganizationPlugin。"""
+
+    SHIM_PLUGIN = "link"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="link",
             version="1.0",
             plugin_type="kb_module",
-            actions=["suggestions", "apply", "moc"],
-            cli_aliases={"link": "suggestions"},
+            actions=['suggestions', 'apply', 'moc'],
+            cli_aliases={'link': 'suggestions'},
             description="孤岛补链引擎",
         )

@@ -1,0 +1,250 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""_agent_impl.py — 四个 Agent 适配器的**原始实现**（P2-1 第二期）。
+
+为什么单独留在 `_` 前缀文件里（不直接放聚合插件）：
+
+这四个插件不是 `SubprocessPlugin` —— 它们自己 import 引擎函数、自己校验参数、
+自己把"写入条数"折成 0/1 退出码。把它们塞进 `IngestionPlugin` 会让聚合类变成
+第二个 god-class；而让聚合类**委派**给它们又必须避免一件事：
+
+    shim（AgentDetectPlugin 继承 IngestionPlugin）
+      → IngestionPlugin.execute 委派
+        → 再去找 "agent_registry" → 又拿到 shim → 无限递归
+
+P2-1 第二期实测踩到了这个 RecursionError。解法就是把实现放在本文件里、
+用 `Impl` 后缀命名，委派表指向 `*Impl`，与 shim 彻底分开：
+
+    测试/旧调用方 → agent_detect_plugin.AgentDetectPlugin（shim，继承聚合类）
+    聚合委派       → _agent_impl.AgentDetectPluginImpl（原始实现，无继承关系）
+
+`_` 前缀保证 `plugin_registry.discover()` 不会把它们当插件注册。
+"""
+import sys
+from pathlib import Path
+
+from plugin_base import PluginBase, PluginContext, PluginMetadata
+
+
+class AgentDetectPluginImpl(PluginBase):
+    """Agent 探测 + 注册表管理插件 — 封装 agent_registry.py。"""
+
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="agent_registry",
+            version="1.0",
+            plugin_type="agent",
+            actions=["detect", "list", "add", "enable", "setup", "ingest"],
+            cli_aliases={"agent": None, "ingest-agent": "ingest"},
+            description="Agent 探测与注册表管理",
+        )
+
+    def initialize(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
+
+    def execute(self, action: str, params: dict) -> int:
+        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
+        if pipeline_dir not in sys.path:
+            sys.path.insert(0, pipeline_dir)
+        import agent_registry as ar
+
+        root = params.get("root", self._ctx.vault_root)
+        out = []
+
+        if action == "detect":
+            r = ar.cmd_detect(root, out)
+        elif action == "list":
+            r = ar.cmd_list(root, out)
+        elif action == "setup":
+            r = ar.cmd_setup(root, out)
+        elif action == "ingest":
+            if params.get("list"):
+                # `--list` 在 agent_registry 的 ingest 子命令上注册了，但 cmd_ingest 从不检查它，
+                # 且默认 dry_run=False → 以前 `kb ingest agent --list` 不列清单而是**直接写库**。
+                r = ar.cmd_list(root, out)
+            else:
+                name = params.get("name")
+                dry_run = params.get("dry_run", False)
+                r = ar.cmd_ingest(root, name, dry_run, out)
+        elif action == "add":
+            name = params.get("name")
+            agent_type = params.get("type")
+            if not name or not agent_type:
+                print("❌ add 需要 --name 和 --type 参数", file=sys.stderr)
+                return 1
+            fields = {}
+            json_path = self._json_path(params)
+            if json_path is None and (params.get("json_path") or params.get("json") is True):
+                print("❌ --json 需要路径，但它的值被当成位置参数了。"
+                      "本命令请改用 `--json-path <文件>`（`--json` 是全局布尔旗标）。",
+                      file=sys.stderr)
+                return 1
+            if json_path:
+                fields["sources"] = {"json": json_path}
+            if params.get("daily_src"):
+                fields.setdefault("sources", {})["daily_src"] = params["daily_src"]
+            if params.get("root_src"):
+                fields.setdefault("sources", {})["root"] = params["root_src"]
+            if params.get("evolve_json"):
+                fields.setdefault("sources", {})["evolve_json"] = params["evolve_json"]
+            if params.get("opencode_db"):
+                fields.setdefault("sources", {})["db"] = params["opencode_db"]
+            if params.get("project_context_root"):
+                roots = params["project_context_root"]
+                fields.setdefault("sources", {})["roots"] = roots if isinstance(roots, list) else [roots]
+            r = ar.cmd_add(root, name, agent_type, out, **fields)
+        elif action == "enable":
+            name = params.get("name")
+            if not name:
+                print("❌ enable 需要 --name 参数", file=sys.stderr)
+                return 1
+            enabled_str = params.get("enable", "true")
+            if enabled_str is True:           # `--enable` 裸布尔（launcher 会解析成 True）
+                enabled = True
+            elif enabled_str is False:
+                enabled = False
+            else:
+                enabled = str(enabled_str).lower() not in ("false", "0", "no")
+            r = ar.cmd_enable(root, name, enabled, out)
+        else:
+            print(f"❓ 未知动作: {action}", file=sys.stderr)
+            return 1
+
+        if out:
+            print("\n".join(out))
+        return r
+
+    @staticmethod
+    def _json_path(params: dict):
+        """解析 JSON 记忆源路径。
+
+        `--json` 在 BOOL_FLAGS 里（全局布尔旗标），所以 `kb agent add --json <path>`
+        会被解析成 `json=True`，真正的路径落到 `_positional`。这里把它回收回来；
+        取不到就返回 None，由调用方给出可读报错 —— 绝不写出 `sources.json = true`。
+        """
+        v = params.get("json_path")
+        if isinstance(v, str) and v:
+            return v
+        v = params.get("json")
+        if isinstance(v, str) and v:
+            return v
+        if v is True:
+            rest = params.get("_positional") or []
+            if rest:
+                return rest[0]
+        return None
+
+
+class AgentJSONPluginImpl(PluginBase):
+    """JSON 记忆源适配器插件 — 封装 memory_ingest_json.py。"""
+
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="agent_json",
+            version="1.0",
+            plugin_type="agent",
+            actions=["ingest"],
+            description="JSON 记忆源适配器（DSH）",
+        )
+
+    def initialize(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
+
+    def execute(self, action: str, params: dict) -> int:
+        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
+        if pipeline_dir not in sys.path:
+            sys.path.insert(0, pipeline_dir)
+        from memory_ingest_json import ingest
+
+        root = params.get("root", self._ctx.vault_root)
+        json_path = params.get("json_path") or params.get("json")
+        dry_run = params.get("dry_run", False)
+        if not json_path or json_path is True:
+            print("❌ 缺少 --json-path 参数（`--json` 是全局布尔旗标，本命令请用 --json-path）",
+                  file=sys.stderr)
+            return 1
+        if not Path(json_path).exists():
+            # ingest() 对缺失源只打印一行并返回 0 → 命令「静默成功」（rc=0）。
+            print(f"❌ JSON 源不存在: {json_path}", file=sys.stderr)
+            return 1
+        n = ingest(root, Path(json_path), dry_run)
+        # ingest 返回的是**写入条数**，不能直接当进程退出码（成功写 5 条 → rc=5，
+        # 破坏 set -e / cron / `kb … && …`）。规范化为 0/1。
+        return 0 if not isinstance(n, int) or n >= 0 else 1
+
+
+class AgentMDPluginImpl(PluginBase):
+    """MD 记忆源适配器插件 — 封装 memory_ingest.py。"""
+
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="agent_md",
+            version="1.0",
+            plugin_type="agent",
+            actions=["mirror", "sync", "mirror-core", "extract"],
+            description="MD 记忆源适配器（OpenClaw/Hermes）",
+        )
+
+    def initialize(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
+
+    def execute(self, action: str, params: dict) -> int:
+        # 延迟 import 原模块（确保 pipeline 目录在 sys.path）
+        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
+        if pipeline_dir not in sys.path:
+            sys.path.insert(0, pipeline_dir)
+        import memory_ingest as mi
+
+        root = params.get("root", self._ctx.vault_root)
+        agent_name = params.get("agent_name", "openclaw")
+
+        if action == "mirror":
+            return mi.mirror(root, params["agent_src"], agent_name)
+        elif action == "sync":
+            return mi.sync(root, params["agent_src"], agent_name)
+        elif action == "mirror-core":
+            return mi.mirror_core(root, params["agent_root"], agent_name)
+        elif action == "extract":
+            return mi.extract(
+                root, params["agent_root"],
+                float(params.get("density", 0.15)),
+                int(params.get("min_chars", 80)),
+                params.get("semantic", False),
+                agent_name,
+            )
+        return 1
+
+
+class AgentSQLitePluginImpl(PluginBase):
+    """SQLite 记忆源适配器插件 — 封装 memory_ingest_sqlite.py。"""
+
+    def metadata(self) -> PluginMetadata:
+        return PluginMetadata(
+            name="agent_sqlite",
+            version="1.0",
+            plugin_type="agent",
+            actions=["ingest"],
+            description="SQLite 记忆源适配器（Codex）",
+        )
+
+    def initialize(self, ctx: PluginContext) -> None:
+        self._ctx = ctx
+
+    def execute(self, action: str, params: dict) -> int:
+        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
+        if pipeline_dir not in sys.path:
+            sys.path.insert(0, pipeline_dir)
+        from memory_ingest_sqlite import ingest
+
+        root = params.get("root", self._ctx.vault_root)
+        data_dir = params.get("data_dir")
+        dry_run = params.get("dry_run", False)
+        if not data_dir or data_dir is True:
+            print("❌ 缺少 --data-dir 参数", file=sys.stderr)
+            return 1
+        if not Path(data_dir).exists():
+            print(f"❌ SQLite 源目录不存在: {data_dir}", file=sys.stderr)
+            return 1
+        n = ingest(root, Path(data_dir), dry_run)
+        # ingest 返回写入条数，不能当退出码（成功写 5 条 → rc=5 会破坏 set -e/cron）
+        return 0 if not isinstance(n, int) or n >= 0 else 1

@@ -1,48 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agent_json_plugin.py — JSON 记忆源适配器插件。
+"""agent_json_plugin.py — 兼容垫片（P2-1 第二期：ingestion 域已聚合）。
 
-封装 memory_ingest_json.py，支持 DSH 等 JSON 格式记忆源。
+实现已收进 `ingestion_plugin.IngestionPlugin`；本文件只保留**原插件名 `agent_json`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.agent_json_plugin import AgentJSONPlugin` 不受影响。
+
+新代码请直接用 `kb ingestion agent_json.<action>`（复合键入口）。
 """
-import sys
-from pathlib import Path
-
-from plugin_base import PluginBase, PluginContext, PluginMetadata
+from plugin_base import PluginMetadata
+from plugins.ingestion_plugin import IngestionPlugin
 
 
-class AgentJSONPlugin(PluginBase):
-    """JSON 记忆源适配器插件 — 封装 memory_ingest_json.py。"""
+class AgentJSONPlugin(IngestionPlugin):
+    """`agent_json` 的兼容门面 —— 保留原名与 action，实现在 IngestionPlugin。"""
+
+    SHIM_PLUGIN = "agent_json"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="agent_json",
             version="1.0",
             plugin_type="agent",
-            actions=["ingest"],
+            actions=['ingest'],
             description="JSON 记忆源适配器（DSH）",
         )
-
-    def initialize(self, ctx: PluginContext) -> None:
-        self._ctx = ctx
-
-    def execute(self, action: str, params: dict) -> int:
-        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
-        if pipeline_dir not in sys.path:
-            sys.path.insert(0, pipeline_dir)
-        from memory_ingest_json import ingest
-
-        root = params.get("root", self._ctx.vault_root)
-        json_path = params.get("json_path") or params.get("json")
-        dry_run = params.get("dry_run", False)
-        if not json_path or json_path is True:
-            print("❌ 缺少 --json-path 参数（`--json` 是全局布尔旗标，本命令请用 --json-path）",
-                  file=sys.stderr)
-            return 1
-        if not Path(json_path).exists():
-            # ingest() 对缺失源只打印一行并返回 0 → 命令「静默成功」（rc=0）。
-            print(f"❌ JSON 源不存在: {json_path}", file=sys.stderr)
-            return 1
-        n = ingest(root, Path(json_path), dry_run)
-        # ingest 返回的是**写入条数**，不能直接当进程退出码（成功写 5 条 → rc=5，
-        # 破坏 set -e / cron / `kb … && …`）。规范化为 0/1。
-        return 0 if not isinstance(n, int) or n >= 0 else 1

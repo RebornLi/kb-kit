@@ -68,7 +68,10 @@ def plugin_scripts() -> set:
         text = p.read_text(encoding="utf-8")
         for m in re.finditer(r'SCRIPT_NAME\s*=\s*"([^"]+)"', text):
             out.add(m.group(1))
-        for m in re.finditer(r'\(\s*"([A-Za-z0-9_.-]+\.py)"\s*,', text):
+        # 元组首元素即脚本名；聚合插件的两种写法都要认：
+        #   第一期 OpsPlugin： ("kb_audit.py", "scan", True)     ← 双引号
+        #   第二期 DomainPlugin： ('rag.py', "index", False)      ← 单引号
+        for m in re.finditer(r'\(\s*["\']([A-Za-z0-9_.-]+\.py)["\']\s*,', text):
             out.add(m.group(1))
     return out
 

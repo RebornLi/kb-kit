@@ -1,28 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ladder_plugin.py — L0–L5 反馈阶梯入口插件。封装 ladder.py。
+"""ladder_plugin.py — 兼容垫片（P2-1 第二期：crystallization 域已聚合）。
 
-为什么这个插件必须存在：ladder.py 的 docstring 记录了那 26% 代码曾经的处境 ——
-L0–L5 六个模块合计 6743 行（占 pipeline 25.9%），却**没有任何插件**，
-于是 `kb l4`/`kb adaptretrieve`/`kb retriage` 全是「❓ 未知命令」，
-用户敲不出来、调度器也无从调用，生产库里这条阶梯的全部状态文件都不存在。
+实现已收进 `crystallization_plugin.CrystallizationPlugin`；本文件只保留**原插件名 `ladder`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.ladder_plugin import LadderPlugin` 不受影响。
+
+新代码请直接用 `kb crystallization ladder.<action>`（复合键入口）。
 """
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.crystallization_plugin import CrystallizationPlugin
 
 
-class LadderPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "ladder.py"
-#   注：adjudicate / verdicts 实际由 adjudicate.py 实现，ladder.action() 会转发。
-    ACTION_MAP = {"status": "status", "propose": "propose", "run": "run",
-                  "apply": "apply", "adjudicate": "adjudicate", "verdicts": "verdicts"}
+class LadderPlugin(CrystallizationPlugin):
+    """`ladder` 的兼容门面 —— 保留原名与 action，实现在 CrystallizationPlugin。"""
+
+    SHIM_PLUGIN = "ladder"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="ladder",
             version="1.0",
             plugin_type="kb_module",
-            actions=["status", "propose", "run", "apply", "adjudicate", "verdicts"],
-            cli_aliases={"ladder": "status"},
+            actions=['status', 'propose', 'run', 'apply', 'adjudicate', 'verdicts'],
+            cli_aliases={'ladder': 'status'},
             description="L0–L5 反馈阶梯：状态 / 产出提案 / 本地模型自主裁决 / 人工落地",
         )

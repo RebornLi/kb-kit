@@ -1,45 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agent_sqlite_plugin.py — SQLite 记忆源适配器插件。
+"""agent_sqlite_plugin.py — 兼容垫片（P2-1 第二期：ingestion 域已聚合）。
 
-封装 memory_ingest_sqlite.py，支持 Codex 等 SQLite 格式记忆源。
+实现已收进 `ingestion_plugin.IngestionPlugin`；本文件只保留**原插件名 `agent_sqlite`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.agent_sqlite_plugin import AgentSQLitePlugin` 不受影响。
+
+新代码请直接用 `kb ingestion agent_sqlite.<action>`（复合键入口）。
 """
-import sys
-from pathlib import Path
-
-from plugin_base import PluginBase, PluginContext, PluginMetadata
+from plugin_base import PluginMetadata
+from plugins.ingestion_plugin import IngestionPlugin
 
 
-class AgentSQLitePlugin(PluginBase):
-    """SQLite 记忆源适配器插件 — 封装 memory_ingest_sqlite.py。"""
+class AgentSQLitePlugin(IngestionPlugin):
+    """`agent_sqlite` 的兼容门面 —— 保留原名与 action，实现在 IngestionPlugin。"""
+
+    SHIM_PLUGIN = "agent_sqlite"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="agent_sqlite",
             version="1.0",
             plugin_type="agent",
-            actions=["ingest"],
+            actions=['ingest'],
             description="SQLite 记忆源适配器（Codex）",
         )
-
-    def initialize(self, ctx: PluginContext) -> None:
-        self._ctx = ctx
-
-    def execute(self, action: str, params: dict) -> int:
-        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
-        if pipeline_dir not in sys.path:
-            sys.path.insert(0, pipeline_dir)
-        from memory_ingest_sqlite import ingest
-
-        root = params.get("root", self._ctx.vault_root)
-        data_dir = params.get("data_dir")
-        dry_run = params.get("dry_run", False)
-        if not data_dir or data_dir is True:
-            print("❌ 缺少 --data-dir 参数", file=sys.stderr)
-            return 1
-        if not Path(data_dir).exists():
-            print(f"❌ SQLite 源目录不存在: {data_dir}", file=sys.stderr)
-            return 1
-        n = ingest(root, Path(data_dir), dry_run)
-        # ingest 返回写入条数，不能当退出码（成功写 5 条 → rc=5 会破坏 set -e/cron）
-        return 0 if not isinstance(n, int) or n >= 0 else 1

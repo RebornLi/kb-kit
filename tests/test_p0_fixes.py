@@ -240,21 +240,54 @@ class InProcessPluginTest(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_write_actions_are_not_in_process(self):
-        """静态护栏：写动作（index/apply/mark/fix/bitemporal/decay）不得进白名单。"""
-        import plugins.rag_plugin as rp
-        import plugins.recall_plugin as rcp
-        import plugins.schema_plugin as sp
-        import plugins.audit_plugin as ap
-        import plugins.confidence_plugin as cp
-        from plugins._subprocess_plugin import SubprocessPlugin
+        """静态护栏：写动作（index/apply/mark/fix/bitemporal/decay）不得进白名单。
+
+        P2-1 第二期后，`IN_PROCESS_ACTIONS` 的**唯一权威来源**是聚合插件的
+        `_ROUTES` 第三列（True = 进程内快路径）。旧插件的类级
+        `IN_PROCESS_ACTIONS` 一律为空 —— 它们已降为 shim（继承聚合类）。
+
+        故本测试改为直接扫 `_ROUTES`：这比原来的"扫类属性"更严格，
+        因为它覆盖全部 5 个域（含 ops），而不只是抽查 5 个旧插件文件。
+        """
+        from plugins._domain_plugin import DomainPlugin
+        from plugins.ops_plugin import OpsPlugin
+        # 必须先导入各域模块，否则聚合类还没定义，__subclasses__() 是空的
+        # （实测踩到：只数到 ops 的 23 条，其余 4 域完全没被检查）
+        import plugins.crystallization_plugin  # noqa: F401
+        import plugins.ingestion_plugin        # noqa: F401
+        import plugins.organization_plugin     # noqa: F401
+        import plugins.retrieval_plugin        # noqa: F401
         WRITE = {"index", "apply", "mark", "fix", "bitemporal", "decay", "run", "promote"}
-        for mod in (rp, rcp, sp, ap, cp):
-            for v in vars(mod).values():
-                if isinstance(v, type) and issubclass(v, SubprocessPlugin) \
-                        and v is not SubprocessPlugin and v.IN_PROCESS_ACTIONS:
-                    self.assertTrue(v.IN_PROCESS_ACTIONS.isdisjoint(WRITE),
-                                    f"{mod.__name__} 把写动作放进了进程内白名单")
-        self.assertIn("query", rp.RAGPlugin.IN_PROCESS_ACTIONS)
+        offenders = []
+        checked = 0
+
+        def _all_subclasses(base):
+            """递归收集全部后代类 —— `__subclasses__()` 只给直接子类，
+            IngestionPlugin 继承的是 DomainPluginWithDelegates（中间层），
+            用直接子类会漏掉它（实测只扫到 23 条）。"""
+            out = []
+            for sub in base.__subclasses__():
+                out.append(sub)
+                out.extend(_all_subclasses(sub))
+            return out
+
+        for cls in (OpsPlugin, *_all_subclasses(DomainPlugin)):
+            routes = getattr(cls, "_ROUTES", {}) or {}
+            for key, val in routes.items():
+                if not (isinstance(val, tuple) and len(val) >= 3):
+                    continue
+                _script, _sub, in_proc = val[0], val[1], val[2]
+                act = key[1] if isinstance(key, tuple) else key
+                checked += 1
+                if in_proc and act in WRITE:
+                    offenders.append(f"{cls.__name__}.{act}")
+        self.assertEqual(offenders, [], f"写动作被放进进程内白名单: {offenders}")
+        self.assertGreater(checked, 30, "没扫到路由表，护栏形同虚设")
+
+        # rag.query 仍必须保留快路径（它是唯一有实测收益的只读高频命令）
+        from plugins.retrieval_plugin import RetrievalPlugin
+        self.assertTrue(RetrievalPlugin._ROUTES[("rag", "query")][2],
+                        "rag.query 的进程内快路径被误删（读命令，省 ~40ms）")
 
 
 def subprocess_run(cmd, **kw):

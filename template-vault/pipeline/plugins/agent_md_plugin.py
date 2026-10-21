@@ -1,52 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""agent_md_plugin.py — MD 记忆源适配器插件。
+"""agent_md_plugin.py — 兼容垫片（P2-1 第二期：ingestion 域已聚合）。
 
-封装 memory_ingest.py，支持 OpenClaw / Hermes 等 MD 格式记忆源。
+实现已收进 `ingestion_plugin.IngestionPlugin`；本文件只保留**原插件名 `agent_md`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.agent_md_plugin import AgentMDPlugin` 不受影响。
+
+新代码请直接用 `kb ingestion agent_md.<action>`（复合键入口）。
 """
-import sys
-from pathlib import Path
-
-from plugin_base import PluginBase, PluginContext, PluginMetadata
+from plugin_base import PluginMetadata
+from plugins.ingestion_plugin import IngestionPlugin
 
 
-class AgentMDPlugin(PluginBase):
-    """MD 记忆源适配器插件 — 封装 memory_ingest.py。"""
+class AgentMDPlugin(IngestionPlugin):
+    """`agent_md` 的兼容门面 —— 保留原名与 action，实现在 IngestionPlugin。"""
+
+    SHIM_PLUGIN = "agent_md"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="agent_md",
             version="1.0",
             plugin_type="agent",
-            actions=["mirror", "sync", "mirror-core", "extract"],
+            actions=['mirror', 'sync', 'mirror-core', 'extract'],
             description="MD 记忆源适配器（OpenClaw/Hermes）",
         )
-
-    def initialize(self, ctx: PluginContext) -> None:
-        self._ctx = ctx
-
-    def execute(self, action: str, params: dict) -> int:
-        # 延迟 import 原模块（确保 pipeline 目录在 sys.path）
-        pipeline_dir = str(Path(self._ctx.vault_root) / "pipeline")
-        if pipeline_dir not in sys.path:
-            sys.path.insert(0, pipeline_dir)
-        import memory_ingest as mi
-
-        root = params.get("root", self._ctx.vault_root)
-        agent_name = params.get("agent_name", "openclaw")
-
-        if action == "mirror":
-            return mi.mirror(root, params["agent_src"], agent_name)
-        elif action == "sync":
-            return mi.sync(root, params["agent_src"], agent_name)
-        elif action == "mirror-core":
-            return mi.mirror_core(root, params["agent_root"], agent_name)
-        elif action == "extract":
-            return mi.extract(
-                root, params["agent_root"],
-                float(params.get("density", 0.15)),
-                int(params.get("min_chars", 80)),
-                params.get("semantic", False),
-                agent_name,
-            )
-        return 1

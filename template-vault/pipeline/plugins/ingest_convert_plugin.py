@@ -1,19 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""ingest_convert_plugin.py — 格式转换插件。封装 ingest_convert.py。"""
+"""ingest_convert_plugin.py — 兼容垫片（P2-1 第二期：ingestion 域已聚合）。
+
+实现已收进 `ingestion_plugin.IngestionPlugin`；本文件只保留**原插件名 `ingest_convert`** 与
+原 action 列表，使既有调用方零改动：
+  · `COMPAT_MAP` 仍指向原名（87 条路由一条未改）；
+  · `plugin-config.json` / `kb list` 仍显示原名；
+  · 测试里的 `from plugins.ingest_convert_plugin import IngestConvertPlugin` 不受影响。
+
+新代码请直接用 `kb ingestion ingest_convert.<action>`（复合键入口）。
+"""
 from plugin_base import PluginMetadata
-from plugins._subprocess_plugin import SubprocessPlugin
+from plugins.ingestion_plugin import IngestionPlugin
 
 
-class IngestConvertPlugin(SubprocessPlugin):
-    SCRIPT_NAME = "ingest_convert.py"
-    ACTION_MAP = {"convert": None}
+class IngestConvertPlugin(IngestionPlugin):
+    """`ingest_convert` 的兼容门面 —— 保留原名与 action，实现在 IngestionPlugin。"""
+
+    SHIM_PLUGIN = "ingest_convert"
 
     def metadata(self) -> PluginMetadata:
         return PluginMetadata(
             name="ingest_convert",
             version="1.0",
             plugin_type="kb_module",
-            actions=["convert"],
+            actions=['convert'],
             description="笔记格式转换",
         )
