@@ -1,7 +1,9 @@
 # kb-kit-pure 架构梳理与优化方案
 
-> 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，HEAD `5c9bd41`，281 tracked files，157 .py）
-> 调查时间：2026-10-19 · 调查方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
+> 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，297 tracked files，171 .py）
+> 初查：2026-10-19 · 方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
+> 状态核对：2026-10-21 — **P0 全完成 / P1 全完成 / P2-1 已落地 ops 域试点**
+> ⚠️ §四、§五 保留初查时点视角；每项当前状态见 **§九 状态总账**
 
 ---
 
@@ -26,15 +28,15 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
 │  kb / kb.cmd (bash launcher)                                            │
 │    │  exec kb_launcher.py                                               │
 │    ▼                                                                     │
-│  kb_launcher.py (545行)  ── COMPAT_MAP (~85条 tool+sub→plugin路由)       │
+│  kb_launcher.py (545行)  ── COMPAT_MAP (119条 tool+sub→plugin路由)        │
 │    │  BOOL_FLAGS / MULTI_FLAGS 参数解析                                  │
 │    ▼                                                                     │
 │  PluginRegistry (plugin_registry.py, 349行)                             │
 │    │  discover() 扫描 plugins/ → 动态 import → 拓扑初始化 → 按名分发      │
-│    │  _load_config() 读 reference/plugin-config.json (25条)              │
+│    │  _load_config() 读 reference/plugin-config.json (40条)              │
 │    │  _is_enabled() 判断启停 · 错误隔离                                   │
 │    ▼                                                                     │
-│  plugins/ (39个业务插件 + _subprocess_plugin.py + __init__.py)           │
+│  plugins/ (40个业务插件 + _subprocess_plugin.py + __init__.py)           │
 │    │                                                                      │
 │    ├── SubprocessPlugin (默认路径) ──子进程隔离──→ 引擎模块 main()       │
 │    └── IN_PROCESS_ACTIONS (快路径) ──同进程直调──→ 引擎模块函数           │
@@ -43,10 +45,11 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
                                     │
                                     ▼
 ┌─────────────────────────────────────────────────────────────────────────┐
-│  引擎层 (template-vault/pipeline/，78个.py，~29000行)                     │
+│  引擎层 (template-vault/pipeline/，84个.py，~28970行)                    │
 │                                                                          │
 │  ┌─ 公共基础 ─────────────────────────────────────────────────────────┐ │
-│  │ kb_common.py (1236行, god-module)                                  │ │
+│  │ kb_common.py (691行, shim — P1-1 已拆, 见 §九)                       │ │
+│  │   → re-export kb_io / kb_text / kb_metautil 三模块                  │ │
 │  │   tokenize(72) · load_meta(118) · load_note(130) · iter_notes(141) │ │
 │  │   load_note_full(992) · parse_frontmatter(86) · content_fingerprint│ │
 │  │   count_tokens(159) · root_of(225) · parent_of(202) · kb_layer_of │ │
@@ -56,8 +59,9 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
 │  └────────────────────────────────────────────────────────────────────┘ │
 │                                                                          │
 │  ┌─ 核心业务模块 ─────────────────────────────────────────────────────┐ │
-│  │ rag.py (1768行)        混合检索: TF-IDF余弦 + BM25 → RRF融合        │ │
-│  │                        + 倒排索引加成 + dense尾部填充 + 5min缓存     │ │
+│  │ rag.py (106行, shim — P1-3 已拆, 见 §九)                            │ │
+│  │   → re-export rag_index / rag_score / rag_query                     │ │
+│  │   (原1768行: TF-IDF余弦 + BM25 → RRF融合 + 倒排加成 + dense填充)     │ │
 │  │ curate.py (1288行)     LLM结晶: 三关校验→置信闸门→正典写回          │ │
 │  │ clean.py (705行)       去重/MinHash/LSH/分块/分类修复               │ │
 │  │ consolidate.py         夜间4阶段整理: 签名缓存增量预算               │ │
@@ -78,7 +82,7 @@ kb-kit-pure 是一个 **纯标准库 Python 实现的 Obsidian 风格知识库�
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  契约层 (template-vault/reference/，10个JSON = 单一事实源)                │
 │  kb-schema.json        页型→字段→枚举→生命周期 (canon-decision/sop/lesson)│
-│  plugin-config.json    39条插件启停配置（39个插件全覆盖，P0-2 已修）          │
+│  plugin-config.json    40条插件启停配置（40个插件全覆盖，P0-2 已修）          │
 │  taxonomy系列          domain-taxonomy / tag-taxonomy / taxonomy / synonyms│
 │  dedup-config.json     近重复检测阈值                                    │
 │  triage-config.json    分诊规则                                          │
@@ -208,43 +212,59 @@ consolidate.run(max_seconds预算)
 
 ## 四、热点清单（最脆弱/最高治理优先级）
 
-| 排名 | 文件 | 行数 | 职责 | 风险 |
-|------|------|------|------|------|
-| 1 | `tests/test_p0_fixes.py` | 2260 | 单文件巨型测试 | 改动慢、定位难、合并冲突高发 |
-| 2 | `pipeline/rag.py` | 1768 | 检索引擎全栈 | 索引/评分/缓存/反馈耦合在单文件 |
-| 3 | `pipeline/curate.py` | 1288 | 结晶主流程 | LLM/校验/写回/批次/子命令全揉在一起 |
-| 4 | `pipeline/kb_common.py` | 1236 | 公共工具god-module | 20+模块依赖, 改动爆炸半径最大 |
-| 5 | `pipeline/kb_engine.py` | 771 | 研究层引擎 | git备份/快照/成长调度混合 |
-| 6 | `pipeline/clean.py` | 705 | 去重清洗 | MinHash/LSH/分块/分类修复混合 |
-| 7 | `pipeline/memory_ingest.py` | 656 | 多源摄入 | 4种agent格式条件分支 |
-| 8 | `pipeline/kb-healthcheck.py` | 639 | 健康检查 | (非引擎, 独立脚本) |
+> 初查 2026-10-19 → 现状 2026-10-21。**初查前三名已全部拆分**。
 
-**git 改动频率**（近200 commits）：`rag.py` / `kb_launcher.py` / `curate.py` / `kb_common.py` 各 10-11 次改动——既是热点也是脆弱点。
+| 初查排名 | 文件 | 初查行数 | → 现状 |
+|---|---|---|---|
+| 1 | `tests/test_p0_fixes.py` | 2260 | ✅ 拆为 32 个 `test_*.py`，本文件降至 400 行 / 7% |
+| 2 | `pipeline/rag.py` | 1768 | ✅ 拆为 `rag_index`/`rag_score`/`rag_query`，本文件 106 行 shim |
+| 3 | `pipeline/curate.py` | 1288 | ❌ **仍是 1288 行** — 现役最大单文件（P2-3 目标） |
+| 4 | `pipeline/kb_common.py` | 1236 | 🔶 拆出 `kb_io`/`kb_text`/`kb_metautil`，本文件 691 行 shim 待删 |
+| 5 | `pipeline/kb_engine.py` | 771 | ❌ 未动（研究层；P2-2 固化边界而非拆分） |
+| 6 | `pipeline/clean.py` | 705 | ❌ 未动 |
+| 7 | `pipeline/memory_ingest.py` | 656 | ❌ 未动 |
+| 8 | `pipeline/kb-healthcheck.py` | 639 | ❌ 未动（独立脚本；已被 ops 域插件封装） |
+
+**git 改动频率**（初查近200 commits）：`rag.py` / `kb_launcher.py` / `curate.py` /
+`kb_common.py` 各 10-11 次改动——既是热点也是脆弱点。前者已因拆分降级。
 
 ---
 
 ## 五、待确认问题与已发现问题
 
-### 5.1 配置覆盖缺口
-`reference/plugin-config.json` 只有 **25 条**配置，但实际有 **39 个**插件——**14 个插件无配置条目**，意味着它们走默认启用、无法通过配置禁用。无配置的 14 个主要集中在研究层和部分新模块。
+> ⚠️ 本节保留 2026-10-19 **初查时点视角**（记录问题如何被发现）。
+> 每项**当前状态**见 §九 状态总账。
 
-### 5.2 插件层是薄兼容外壳
+### 5.1 配置覆盖缺口 ✅ 已解决（P0-2）
+`reference/plugin-config.json` 只有 **25 条**配置，但实际有 **39 个**插件——**14 个插件无配置条目**，意味着它们走默认启用、无法通过配置禁用。
+> **现状（10-21 实测）**：已补齐，注册 40 ↔ 配置 40，双无缺口。
+
+### 5.2 插件层是薄兼容外壳 ✅ 已评估（P2-1：非结构问题）
 39 个插件中绝大多数的 `ACTION_TABLE` 只是把 `(tool, sub)` 映射到 `(subprocess, module, sub)`——实际逻辑全在引擎 `main()` 里。插件层增加了 ~40 个文件、一层动态 import + 拓扑初始化的复杂度，但并未承担跨插件编排或状态共享职责。这是一层 **可简化的间接层**。
+> **现状（10-21 实测）**：结论相反——`discover()` 全量仅 3.4ms，且该层实际
+> 承担 CLI 兼容（COMPAT_MAP）、错误隔离、per-action 快路径选路三项真实职责。
+> P2-1 仅把 ops 域 10 个薄壳合并为单一 `OpsPlugin` 作试点。
 
-### 5.3 kb_common.py god-module
+### 5.3 kb_common.py god-module 🔶 已部分解决（P1-1 主体完成，shim 待删）
 1236 行、9 个高频工具函数被 20-59 个模块依赖。`tokenize`(59调用者) / `iter_notes`(59) / `load_note_full`(35) / `load_meta`(22) 是事实上的公共基础设施，但它们与 `content_fingerprint` / `record_lineage` / `is_stale` / `kb_layer_of` 等领域函数混在一个文件里。任何改动都有巨大爆炸半径。
+> **现状**：已拆 `kb_io`/`kb_text`/`kb_metautil`，`kb_common.py` 降为 691 行 shim，
+> 仍有 74 个调用者走旧路径（删除 shim 是未完成的收尾项）。
 
-### 5.4 memory_ingest_session.mirror_session 死代码
+### 5.4 memory_ingest_session.mirror_session 死代码 ✅ 已解决（P0-1）
 `mirror_session()`（:183）产生 `dsh-*` session日志，上游 `_ingest_session` 已改为仅蒸馏。该函数不再被调用，但模块（321行）仍保留供其他 utils 引用。明确的清理候选。
+> **现状**：`def mirror_session` 已删除，仅 docstring/注释解释停用原因。
 
-### 5.5 测试集中度
+### 5.5 测试集中度 ✅ 已解决（P0-3）
 `test_p0_fixes.py` 单文件 2260 行占全部测试（6085行）的 37%。缺少按模块拆分的测试文件（如 `test_rag.py` / `test_curate.py`），导致定位"哪个模块的测试失败"需要在全文件内搜索。
+> **现状**：已拆为 32 个 `test_*.py`，本文件 400 行 / 7%。
 
-### 5.6 研究层边界
+### 5.6 研究层边界 ❌ 未动（P2-2）
 `kb_l4` / `kb_l5` / `kb_meta` / `kb_selfweight` / `kb_claim` / `kb_usage` / `kb_contradiction` 等 8 个研究层模块共 ~4000 行，无 CLI 入口，仅由 `tests/test_reachability.py` 守护。它们与核心引擎共享 `kb_common` / `state_manager`，但边界模糊——是否有实验代码混入了生产路径需要确认。
+> **现状**：仍未动。已实测确认这 8 个模块无任何插件注册（无 CLI 入口）。
 
-### 5.7 无依赖声明
+### 5.7 无依赖声明 ✅ 已解决（P1-2）
 项目无 `requirements.txt` / `pyproject.toml`。虽然设计目标是纯标准库，但 `rag.py` 可选依赖 `contextual` / `embed_rerank`，`curate.py` 依赖外部 LLM（`llm.ask_json`）。这些可选依赖的发现方式是"运行时 try-except"，缺乏声明式的外部依赖契约。
+> **现状**：已补 `pyproject.toml`（`[project]` + `optional-dependencies`）。
 
 ---
 
@@ -252,29 +272,29 @@ consolidate.run(max_seconds预算)
 
 按 **收益/成本比** 排序，分为三档优先级。
 
-### 🥇 P0 — 低风险高收益（建议立即做）
+### 🥇 P0 — 低风险高收益 ✅ 全部完成（3/3）
 
-#### P0-1：清理 `mirror_session` 死代码
+#### P0-1：清理 `mirror_session` 死代码 ✅ 已完成
 - **动作**：删除 `memory_ingest_session.py:183` 的 `mirror_session()` 函数体；保留模块文件（仍有 utils 被引用）；更新 `_ingest_session` 确认无残留引用。
 - **收益**：消除"记忆 vs 日志"混淆的最后一个代码痕迹，减少新人理解成本。
 - **风险**：低——已被确认无调用方；`grep -rn "mirror_session"` 确认无外部引用即可。
 - **验证**：`python3 -m pytest tests/` 全绿。
 
-#### P0-2：补齐 `plugin-config.json` 的 14 个缺口
+#### P0-2：补齐 `plugin-config.json` 的 14 个缺口 ✅ 已完成
 - **动作**：为 14 个无配置的插件补齐 `{name, enabled, description}` 条目，使 39 个插件全部可配置。
 - **收益**：恢复配置完整性，用户可禁用任意插件（包括研究层模块），减少不必要的运行时初始化。
 - **风险**：低——纯数据补充，默认 `enabled: true` 不改变现有行为。
 - **验证**：`test_readme_plugin_list.py` 已有 drift guard，可扩展为校验 plugin-config 覆盖率。
 
-#### P0-3：拆分 `test_p0_fixes.py`
+#### P0-3：拆分 `test_p0_fixes.py` ✅ 已完成
 - **动作**：按被测模块拆分为 `test_rag.py` / `test_curate.py` / `test_state_manager.py` / `test_clean.py` 等，原文件保留跨模块的 P0 回归子集。
 - **收益**：测试定位速度从"全文件搜索"→"按模块直查"；合并冲突面缩小。
 - **风险**：低——纯文件移动 + import 调整，行为不变。
 - **验证**：拆分前后 `pytest` 用例数与通过数一致。
 
-### 🥈 P1 — 中等风险中高收益（建议下个迭代）
+### 🥈 P1 — 中等风险中高收益 ✅ 全部完成（3/3；P1-1/P1-3 有 shim 待删）
 
-#### P1-1：拆分 `kb_common.py` god-module
+#### P1-1：拆分 `kb_common.py` god-module 🔶 主体完成，shim 待删
 - **动作**：按职责拆为 3 个模块：
   - `kb_io.py`：`iter_notes` / `load_meta` / `load_note` / `load_note_full` / `parse_frontmatter` / `atomic_write_text`（文件 I/O）
   - `kb_text.py`：`tokenize` / `count_tokens` / `content_fingerprint` / `_parse_tags`（文本处理）
@@ -283,13 +303,13 @@ consolidate.run(max_seconds预算)
 - **风险**：中——59 个调用者的 import 路径需更新；建议用**兼容 shim** 过渡：`kb_common.py` 保留 `from kb_io import *` 等 re-export，分批迁移调用方，最后删除 shim。
 - **验证**：codegraph 跟踪 59 个 `iter_notes` 调用者逐批迁移；每批跑 `pytest`。
 
-#### P1-2：补一份 `pyproject.toml`（即使零运行时依赖）
+#### P1-2：补一份 `pyproject.toml`（即使零运行时依赖）✅ 已完成
 - **动作**：声明项目元数据 + Python 版本要求 + 可选依赖组（`[project.optional-dependencies]`）：`embed = ["contextual", "embed_rerank"]`，`llm = ["..."]`，`dev = ["pytest"]`。
 - **收益**：外部依赖契约从"读代码猜"→"声明式可查"；`pip install -e ".[dev]"` 一键搭环境。
 - **风险**：低——不引入新依赖，只是声明已有的可选依赖。
 - **验证**：`pip install -e .` 成功；现有纯标准库路径不受影响。
 
-#### P1-3：拆分 `rag.py`（1768行）
+#### P1-3：拆分 `rag.py`（1768行）✅ 已完成（shim 待删）
 - **动作**：按职责拆为：
   - `rag_index.py`：`cmd_index` / 索引构建 / `_SafeUnpickler` / `load_index` / `index_file`
   - `rag_score.py`：`_score_cosine_postings` / `_bm25_postings` / `_rrf_fuse` / `_inverted_lookup`
@@ -607,13 +627,13 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
    并无分散在各插件中的冗余。下沉不会减少代码，只会搬移位置。
 3. 不减少插件文件数量、不减少动态 import 数，收益不明确但风险触及引擎层核心。
 
-#### P2-2：研究层边界固化
+#### P2-2：研究层边界固化 ❌ 未动
 - **动作**：为 8 个研究层模块建立明确的 internal 包边界（如移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal），并在 `kb_common` 中加 `import guard` 防止生产路径意外依赖。
 - **收益**：防止实验代码污染生产路径；明确哪些可以安全删除。
 - **风险**：中——需确认无生产模块 import 研究层符号。
 - **验证**：`test_reachability.py` + codegraph 反向依赖检查。
 
-#### P2-3：`curate.py` 子命令提取
+#### P2-3：`curate.py` 子命令提取 ❌ 未动
 - **动作**：把 `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_recheck` / `cmd_review` 拆为独立函数文件或 class，`curate.py` 保留 `curate_one` / `verify_note` / `apply_canon` 核心。
 - **收益**：1288 行→核心 ~500 行 + 子命令各 ~150 行，可读性显著提升。
 - **风险**：中——子命令间共享状态（state/ledger/proposals），拆分需传递上下文。
@@ -639,9 +659,9 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 > 能直接回答三问，才算建立模型：
 
 1. **改 X 功能波及哪些模块？**
-   - 改检索评分 → `rag.py` 内部（已隔离在单文件），外加 `memory_sync.load_index`（调 `rag.cmd_index`）和 `kb_engine`（调 `rag.cmd_query`）
+   - 改检索评分 → `rag_score.py`（P1-3 已拆分），外加 `memory_sync`（调 `rag.cmd_index`）与 `kb_engine`（调 `rag.cmd_query`）
    - 改结晶逻辑 → `curate.py` 内部 + `curate_plugin.py`（薄包装）+ `ladder.py`（调用方）
-   - 改公共工具 → `kb_common.py` 的 20-59 个调用者（爆炸半径最大，优先拆分）
+   - 改公共工具 → `kb_common` 的 74 个调用者（shim 收敛后分别指向 `kb_io` / `kb_text` / `kb_metautil`）
 
 2. **数据怎么流、存哪里？**
    - 证据/记忆 → `raw/` + `memory/`（markdown 文件）
@@ -651,9 +671,74 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
    - 反馈 → `.kb/state/query_cache.json` + agent_hits
 
 3. **哪个文件最脆弱、最要先动？**
-   - `kb_common.py`（1236行 god-module，59个调用者，git高频改动）—— 拆分收益最大、风险可控（shim过渡）
-   - `test_p0_fixes.py`（2260行，占测试37%）—— 拆分是其他重构的安全网前提
+   - `curate.py`（**1288 行**，现役最大单文件，且**无独立 `test_curate.py`**）—— P2-3 前先补测试
+   - `clean.py`（705 行，MinHash/LSH/分块/分类修复混合）
+   - `kb_common.py` / `rag.py` 两个 re-export shim（74 / 25 个调用者仍在走旧路径）
 
 ---
 
-*本报告基于 HEAD `5c9bd41` 的代码状态。如需更新，重跑 codegraph sync 后复核。*
+## 九、状态总账（2026-10-21 逐项核对代码得出）
+
+### 9.1 已完成
+
+| 项 | 状态 | 证据 |
+|---|---|---|
+| P0-1 `mirror_session` 清理 | ✅ | `memory_ingest_session.py` 已无 `def mirror_session` |
+| P0-2 plugin-config 补齐 | ✅ | 实测注册 40 ↔ 配置 40，双向无缺口 |
+| P0-3 测试拆分 | ✅ | 2260 行/37% → 400 行/7%，共 32 个 `test_*.py` |
+| P1-1 `kb_common` 拆分 | ✅ 主体 | 1236 → 691 行 shim；拆出 `kb_io`/`kb_text`/`kb_metautil` |
+| P1-2 `pyproject.toml` | ✅ | `[project]` + `optional-dependencies`（embed/llm/dev） |
+| P1-3 `rag.py` 拆分 | ✅ | 1768 → 106 行 shim；拆出 `rag_index`/`rag_score`/`rag_query` |
+| P2-1 插件层评估+试点 | ✅ | ops 域 10→1 `OpsPlugin`，CLI 契约零变更，294 passed |
+
+### 9.2 未完成清单（按建议顺序）
+
+#### ① P1-1 / P1-3 收尾：删除两个 re-export shim 🔶 中收益、低风险 —— 建议先做
+`kb_common.py`（691 行）与 `rag.py`（106 行）现为 re-export shim，
+仍有 **74 个** / **25 个**调用者走旧 import 路径。
+
+- **动作**：分批把 `from kb_common import X` 按归属改为 `from kb_io|kb_text|kb_metautil import X`，
+  `import rag` 改为直引三个子模块；每批跑 `pytest`，全绿后删 shim。
+- **收益**：依赖关系从"74 个调用者指向一个假模块"变为指向真实模块，
+  codegraph / IDE 跳转恢复准确，消除"改 shim 不知改了哪个真实模块"的误导。
+- **风险**：低（纯 import 路径改写，行为不变）。
+- **验证**：`pytest` 仍 294 passed + `grep -rn "from kb_common import"` 归零。
+- ⚠️ **注意**：`kb_metautil.py` 是 §P1-1 原文规划之外新增的**第 4 个模块**，
+  `record_lineage` / `is_stale` / `retrievable_status` / `kb_layer_of` / `root_of` /
+  `parent_of` 归它管；迁移时按此归属拆分。
+
+#### ② P2-2 研究层边界固化 ❌ 未动 —— 中等收益、中等风险
+8 个研究层模块（~4000 行）无 CLI 入口（已实测确认无任何插件注册），
+仅靠 `test_reachability.py` 的 `INTERNAL_MODULES` **手写清单**守护——会腐化。
+
+- **动作**：移入 `pipeline/_research/` 子包 + `__init__.py` 标注 internal；
+  把 `INTERNAL_MODULES` 改为从目录结构推导（`_research/` 下即 internal），
+  `test_internal_list_not_stale` 已有的"清单不腐化"断言天然承接。
+- **前置确认**：查生产模块是否 import 研究层符号（§P2-2 原文要求）。
+- **验证**：`test_reachability.py` 全绿 + codegraph 反向依赖。
+
+#### ③ P2-3 `curate.py` 子命令提取 ❌ 未动 —— 中等收益、中等风险
+`curate.py` 仍 1288 行，现役最大单文件。
+
+- **动作**：拆出 `cmd_run` / `cmd_verify` / `cmd_report` / `cmd_recheck` / `cmd_review`，
+  保留 `curate_one` / `verify_note` / `apply_canon` 核心。
+- ⚠️ **这是唯一没有测试安全网的 P2 项**：P0-3 拆的是 `test_p0_fixes.py`，
+  并无独立 `test_curate.py`。**先补 `test_curate.py` 再拆分**。
+- **验证**：`scripts/verify_curate.py` + 手动 `kb curate run/recheck/report` 冒烟。
+
+#### ④ P2-1 剩余 4 域真合并 🔶 已试点未扩展 —— 建议**不主动做**
+ops 域已跑通（可复制模板），其余 4 域各有 action 撞名（retrieval 3 /
+crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 变更。
+收益只剩"文件数"，而撞名改名成本与 CLI 兼容风险显著更高（详见 §六 P2-1 推翻记录）。
+若将来要做：先逐一评审撞名 action 改名表，并复用 `OpsAggregatePluginTest` 守卫模式。
+
+#### ⑤ 遗留小项
+- `agent_detect_plugin.py` / `agent_json_plugin.py` / `agent_md_plugin.py` /
+  `agent_sqlite_plugin.py` 各 4-6 行 `sys.path.insert(0, pipeline_dir)`
+  实测恒为 no-op（见 §六 P2-1 E 节），约 24 行装饰代码。
+- 热点表已重排（见 §四）；`kb_engine.py`(771) / `clean.py`(705) /
+  `memory_ingest.py`(656) 尚未治理，优先级低于 ①②③。
+
+---
+
+*本报告初查于 HEAD `5c9bd41`（2026-10-19）；§九 状态总账核对于 2026-10-21。改码后重跑 codegraph sync 复核。*
