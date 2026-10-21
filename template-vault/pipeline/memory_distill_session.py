@@ -3,15 +3,19 @@
 memory_distill_session.py —— 用本地 LLM 把 DSH 会话「蒸馏」成声明式决定/经验
 
 为什么需要它：
-  memory_ingest_session.mirror_session 把人类轮【原样】落进 memory/ —— 那是任务请求
-  （"检查一下…"），密度低、无复用价值，只能当检索层。要让它够格成为知识库正典，
-  必须先蒸馏成声明式结论（决定/规则/经验/教训）。这一步用本地模型（ornith）完成，
-  不依赖外部 API。
+  DSH 运行时每天在 ~/.dsh/sessions/ 写原始对话日志（session.v4.jsonl.zstd），
+  其中人类轮是任务请求（"检查一下…"），密度低、无复用价值。要让它够格成为知识库
+  正典，必须先蒸馏成声明式结论（决定/规则/经验/教训）。这一步用本地模型（ornith）
+  完成，不依赖外部 API。
+
+  原始人类轮原样落盘（memory/dsh-*.md）的 mirror 流程已于 2026-10-19 永久停用；
+  本模块直接读会话日志、解析人类轮、蒸馏后落 memory/dshd-*.md。
 
 分工与状态隔离：
-  - 原始人类轮：memory_ingest_session → memory/dsh-<date>-<hash8>.md（status: staged，不晋升）
-  - 蒸馏结论：  本模块            → memory/dshd-<date>-<hash8>.md（status: active，可晋升）
-  - 独立 state：memory_distill_state.json（不污染 mirror/共享去重表）
+  - 蒸馏结论：  本模块 → memory/dshd-<date>-<hash8>.md（status: active，可晋升）
+  - 独立 state：memory_distill_state.json
+
+  解析工具（解压、人类轮抽取、噪声过滤、会话元信息）复用 memory_ingest_session。
 
 用法：
   python3 memory_distill_session.py distill-session --root R \

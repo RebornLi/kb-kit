@@ -13,9 +13,9 @@ import argparse, os, re, sys, json, math
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
-from kb_common import (ROOT_DEFAULT, EXCLUDE, FM, tokenize, load_note, iter_notes, norm, cos,
-                       build_inverted_index, candidate_pairs, parse_importance,
-                       is_source_note, is_generated_report)
+from kb_io import ROOT_DEFAULT, EXCLUDE, FM, load_note, iter_notes
+from kb_metautil import parse_importance, is_source_note, is_generated_report
+from kb_text import tokenize, norm, cos, build_inverted_index, candidate_pairs
 from kb_constants import PERF_WARN_THRESHOLD
 
 load = load_note  # 兼容本模块原有 load(p) 调用

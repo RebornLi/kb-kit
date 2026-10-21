@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 
 EVAL_DIR = Path(".kb") / "eval"
 GOLD = EVAL_DIR / "gold_set.jsonl"          # 人确认过的 ground truth
@@ -44,7 +44,7 @@ GOLD_Q = list(_er.GOLD)
 # ── 本地裁判 ────────────────────────────────────────────────
 class Judge:
     def __init__(self) -> None:
-        from kb_common import model_config
+        from kb_config import model_config
         c = model_config()
         self.base = (c.get("base_url") or "http://127.0.0.1:8000/v1").rstrip("/")
         self.key = c.get("api_key") or ""

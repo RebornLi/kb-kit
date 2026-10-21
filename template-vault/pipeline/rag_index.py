@@ -21,11 +21,9 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from kb_common import (
-    FM, ROOT_DEFAULT, EXCLUDE, load_meta, iter_notes, tokenize,
-    content_fingerprint, index_excluded, is_generated_report,
-    kb_layer_of, parent_of, root_of,
-)
+from kb_io import FM, ROOT_DEFAULT, EXCLUDE, load_meta, iter_notes
+from kb_metautil import index_excluded, is_generated_report, kb_layer_of, parent_of, root_of
+from kb_text import tokenize, content_fingerprint
 from rag_score import _parse_tags  # noqa: F401
 
 try:                       # 上下文强化（P2）：缺失/异常都不影响索引可用

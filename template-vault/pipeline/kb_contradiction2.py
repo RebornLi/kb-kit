@@ -28,8 +28,10 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
-                       is_raw_path, is_generated_report, tokenize, root_of)
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_raw_path, is_generated_report, root_of
+from kb_text import tokenize
 
 # 变更信号词：出现即说明"这事变了/被推翻了"
 CHANGE_KW = [

@@ -46,7 +46,7 @@ class StateStore:
         失败时清理残留临时文件。
         """
         # 实现已归一到 kb_common.atomic_write_text（原先这里有第二份同构实现）
-        from kb_common import atomic_write_text
+        from kb_io import atomic_write_text
         atomic_write_text(p, text)
 
     def _lock(self, path, exclusive=True):
@@ -198,9 +198,9 @@ def read_json(root, name, legacy=(), default=None):
 
 def write_json(root, name, data) -> Path:
     """写 JSON 状态到**规范**路径（原子写）。"""
-    import kb_common
+    from kb_io import atomic_write_text        # 延迟 import：避开模块级循环
     p = state_path(root, name)
-    kb_common.atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
+    atomic_write_text(p, json.dumps(data, ensure_ascii=False, indent=2))
     return p
 
 

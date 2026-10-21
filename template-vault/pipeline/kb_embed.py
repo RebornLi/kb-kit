@@ -38,7 +38,7 @@ _PROBE_INTERVAL = 300.0      # 两次探测的最小间隔（秒），避免每�
 def _cfg():
     """端点配置：环境变量优先，回退库内 .kb/model.json（cron/systemd 也拿得到）。"""
     try:
-        from kb_common import model_config
+        from kb_config import model_config
         return model_config()
     except Exception:
         return {}

@@ -28,7 +28,7 @@ PIPE = Path(__file__).resolve().parent
 
 def _cfg(root: Path) -> dict:
     sys.path.insert(0, str(root / "pipeline"))
-    from kb_common import model_config
+    from kb_config import model_config
     return model_config(root)
 
 

@@ -25,8 +25,9 @@ import subprocess, json, re, sys
 from collections import Counter, defaultdict
 from pathlib import Path
 
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
-                       is_generated_report, is_raw_path, kb_layer_of)
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_generated_report, is_raw_path, kb_layer_of
 
 SCHEMA_PATH = Path("reference") / "kb-schema.json"
 
@@ -184,7 +185,8 @@ def cmd_fields(root: Path) -> int:
 #
 #   **默认 dry-run**：要改几百篇笔记 frontmatter，必须先让人看到清单。
 def cmd_bitemporal(root: Path, apply: bool, limit: int) -> int:
-    from kb_common import iter_notes, load_meta, kb_layer_of
+    from kb_io import iter_notes, load_meta
+    from kb_metautil import kb_layer_of
     import kb_schema_migrate as mig
     try:
         from rag import is_generated_report

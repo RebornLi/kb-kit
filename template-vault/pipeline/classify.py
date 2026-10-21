@@ -187,7 +187,7 @@ def classify_quality(body, fm=None, signals_path=None):
     Returns:
         QualityResult(content_type, quality_score, should_ingest, reason)
     """
-    from kb_common import text_entropy
+    from kb_text import text_entropy
     signals = _load_signals(signals_path)
     nchars = len(body.replace("\n", "").replace(" ", ""))
 

@@ -21,7 +21,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import cos as _cos, CJK  # 余弦 + 中文字正则（全仓唯一定义）
+from kb_text import cos as _cos, CJK
 
 # ── 双轨字符向量（中文字按字 / 英文词）+ L2 归一化（与 kb_query 一致，避免长度稀释）──
 _LAT = re.compile(r"[A-Za-z0-9]+")

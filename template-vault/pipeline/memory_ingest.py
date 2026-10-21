@@ -16,7 +16,8 @@
 import argparse, os, re, sys, json, hashlib, subprocess, datetime
 from pathlib import Path
 from collections import Counter
-from kb_common import ROOT_DEFAULT, get_dedup_thresholds
+from kb_config import get_dedup_thresholds
+from kb_io import ROOT_DEFAULT
 import rag
 # 只导入真正用到的（DUP_SIM 曾在此但从未使用；阈值实际走 get_dedup_thresholds 动态加载）
 from memory_sync import signal_density, slug, load_index
@@ -49,7 +50,7 @@ def _text_sim(a: str, b: str, method: str = "tfidf") -> float:
         if not ta or not tb:
             return 0.0
         return len(ta & tb) / len(ta | tb)
-    from kb_common import char_vec, cos, tokenize, norm
+    from kb_text import char_vec, cos, tokenize, norm
     if method == "char_vec":
         return max(0.0, cos(char_vec(a), char_vec(b)))
     # tfidf 模式（默认）：token 频次向量归一化后余弦
@@ -249,7 +250,7 @@ def mirror(root, agent_src, agent_name="openclaw"):
             continue
         fm, block, body = parse_agent(p)
         # FR-3.3.9 内容指纹去重
-        from kb_common import content_fingerprint
+        from kb_text import content_fingerprint
         source_hash = content_fingerprint(body)
         if source_hash in content_seen:
             deduped += 1
@@ -383,7 +384,7 @@ def sync(root, agent_src, agent_name="openclaw"):
         print(f"✗ agent 记忆源不存在: {src}（先跑 mirror）")
         return 1
     # Task 6: 从 dedup-config.json 读取相似度计算方法
-    from kb_common import load_dedup_config
+    from kb_config import load_dedup_config
     sim_method = load_dedup_config(root).get("sim_method", "tfidf")
     for p in sorted(src.glob("*.md")):
         fm, block, body = parse_agent(p)

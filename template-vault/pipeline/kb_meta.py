@@ -45,7 +45,7 @@
 #     python3 pipeline/kb_meta.py status --root R [--json]  # 旋钮历史 + 回滚状态
 # ============================================================
 import argparse, json, subprocess, sys
-from kb_common import atomic_write_text
+from kb_io import atomic_write_text
 from state_manager import state_path, read_state_path
 from datetime import datetime
 from pathlib import Path

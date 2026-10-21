@@ -52,7 +52,7 @@ class CrossEncoderReranker:
     def available(self) -> bool:
         try:
             import urllib.request, json as _j
-            from kb_common import model_config
+            from kb_config import model_config
             cfg = model_config()
             base = self.url.split("/v1/")[0]
             req = urllib.request.Request(f"{base}/v1/models",
@@ -70,7 +70,7 @@ class CrossEncoderReranker:
         docs = [str(texts.get(rel) or rel)[:2000] for rel, _ in head]
         try:
             import urllib.request, json as _j, time
-            from kb_common import model_config
+            from kb_config import model_config
             cfg = model_config()
             payload = _j.dumps({"model": self.model, "query": query, "documents": docs}).encode()
             req = urllib.request.Request(self.url, data=payload,

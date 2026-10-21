@@ -28,17 +28,15 @@ import argparse, os, re, sys, json, subprocess, datetime, hashlib, unicodedata
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, iter_notes,
-                       aggregate_bucket, fmt_value, infer_domain, infer_tags,
-                       list_of, infer_status, infer_summary, base_fm,
-                       FOLDER_DOMAIN, DOMAIN_MAP, KEYWORD_DOMAIN,
-                       AGGREGATE_DIR, AGGREGATE_LIMIT, AGGREGATE_IMPORTANCE,
-                       is_generated_report, content_fingerprint, is_source_note, FM,
-                       add_alias_text, record_lineage,
-                       is_index_stub, is_pointer_page, is_raw_path)
-from kb_common import parse_date_str as parse_date
-from kb_common import CJK   # 中文字正则：全仓唯一定义（原先 9 份逐字相同的副本）
-from kb_common import load_note_full as load
+from kb_config import DOMAIN_WHITELIST
+from kb_domain import FOLDER_DOMAIN, DOMAIN_MAP, KEYWORD_DOMAIN
+from kb_infer import aggregate_bucket, fmt_value, infer_domain, infer_tags, list_of, infer_status, infer_summary, base_fm, AGGREGATE_DIR, AGGREGATE_LIMIT, AGGREGATE_IMPORTANCE
+from kb_io import ROOT_DEFAULT, EXCLUDE, iter_notes, FM
+from kb_metautil import is_generated_report, is_source_note, add_alias_text, record_lineage, is_index_stub, is_pointer_page, is_raw_path
+from kb_text import content_fingerprint
+from kb_infer import parse_date_str as parse_date
+from kb_text import CJK
+from kb_infer import load_note_full as load
 
 BODY_LIMIT = 2000
 # 统一从 kb_constants 取（此前本地又定义了一份 90 —— 两处一起改才不会分叉）

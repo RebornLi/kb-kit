@@ -31,8 +31,8 @@ import argparse, os, re, sys, html, subprocess
 from pathlib import Path
 from datetime import datetime
 
-import kb_common
-from kb_common import ROOT_DEFAULT, content_fingerprint, load_note
+from kb_io import ROOT_DEFAULT, load_note
+from kb_text import content_fingerprint
 
 ROOT = str(Path(__file__).resolve().parent.parent)  # template-vault 根
 RAW_TOP = "raw"

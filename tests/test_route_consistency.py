@@ -104,7 +104,7 @@ class RouteConsistencyTest(unittest.TestCase):
 
     def test_expected_covers_exactly_the_schema(self):
         """EXPECTED 必须恰好等于 `kb_common.DOMAIN_WHITELIST`（防止守卫与被测对象一起过期）。"""
-        from kb_common import DOMAIN_WHITELIST
+        from kb_config import DOMAIN_WHITELIST
         self.assertEqual(set(EXPECTED), set(DOMAIN_WHITELIST),
                          "路由守卫的 EXPECTED 与 domain 白名单不一致")
 

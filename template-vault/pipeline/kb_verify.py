@@ -25,7 +25,7 @@ import argparse, json, re, subprocess, sys, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 
 CHECKS = [
     # (键, 显示名, argv 模板, 结果解析器)

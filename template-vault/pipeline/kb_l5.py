@@ -109,7 +109,7 @@ def _read_state(root: Union[str, Path]) -> Dict[str, Any]:
 
 def _write_state(root: Union[str, Path], state: Dict[str, Any]) -> None:
     # 原子写（委托 kb_common）：半截状态会让 cycle 历史整段丢失
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(_state_path(root), json.dumps(state, ensure_ascii=False, indent=2))
 
 
@@ -127,7 +127,7 @@ def _read_config(root: Union[str, Path]) -> Dict[str, Any]:
 
 
 def _write_config(root: Union[str, Path], config: Dict[str, Any]) -> None:
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(_config_path(root), json.dumps(config, ensure_ascii=False, indent=2))
 
 

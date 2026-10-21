@@ -16,10 +16,10 @@ import argparse, os, re, sys, json, datetime, subprocess, hashlib
 from pathlib import Path
 from collections import Counter
 import rag
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
-                       infer_domain, infer_tags, list_of, fmt_value,
-                       parse_date_str as parse_date, get_dedup_thresholds,
-                       content_fingerprint)
+from kb_config import get_dedup_thresholds
+from kb_infer import load_note_full as load, infer_domain, infer_tags, list_of, fmt_value, parse_date_str as parse_date
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_text import content_fingerprint
 
 MIN_CHARS_DEFAULT = 80
 # DUP_SIM / NOVEL_SIM 已改为动态加载（Task 3），见 grade() 中 get_dedup_thresholds()

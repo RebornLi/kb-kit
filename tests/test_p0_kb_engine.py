@@ -265,7 +265,7 @@ class AtomicWriteTest(unittest.TestCase):
 
     原先只有 `state_manager._atomic_write` 是原子的，另有 4 处（kb_meta 状态与配置、
     user_manager 用户表、agent_registry 注册表）直接 `write_text`。现已统一到
-    `kb_common.atomic_write_text`。
+    `kb_io.atomic_write_text`。
     """
 
     def setUp(self):
@@ -275,26 +275,26 @@ class AtomicWriteTest(unittest.TestCase):
         shutil.rmtree(self.root, ignore_errors=True)
 
     def test_roundtrip_and_no_tmp_left(self):
-        import kb_common
+        from kb_io import atomic_write_text
         p = self.root / ".kb" / "state" / "x.json"
-        kb_common.atomic_write_text(p, '{"a": 1}')
+        atomic_write_text(p, '{"a": 1}')
         self.assertEqual(p.read_text(encoding="utf-8"), '{"a": 1}')
         self.assertFalse(p.with_name(p.name + ".tmp").exists(), "残留临时文件")
         self.assertTrue(p.parent.is_dir(), "父目录应被自动创建")
 
     def test_overwrite_existing(self):
         """第二次写入必须成功（Windows 上 Path.rename 在目标存在时会 FileExistsError）。"""
-        import kb_common
+        from kb_io import atomic_write_text
         p = self.root / "y.json"
-        kb_common.atomic_write_text(p, "1")
-        kb_common.atomic_write_text(p, "2")
+        atomic_write_text(p, "1")
+        atomic_write_text(p, "2")
         self.assertEqual(p.read_text(encoding="utf-8"), "2")
 
     def test_failure_does_not_corrupt_existing_file(self):
         """写入过程中抛错时，旧内容必须完好、且不留临时文件。"""
-        import kb_common
+        from kb_io import atomic_write_text
         p = self.root / "z.json"
-        kb_common.atomic_write_text(p, "good")
+        atomic_write_text(p, "good")
         orig = Path.write_text
 
         def boom(self, *a, **k):
@@ -303,7 +303,7 @@ class AtomicWriteTest(unittest.TestCase):
         Path.write_text = boom
         try:
             with self.assertRaises(OSError):
-                kb_common.atomic_write_text(p, "bad")
+                atomic_write_text(p, "bad")
         finally:
             Path.write_text = orig
         self.assertEqual(p.read_text(encoding="utf-8"), "good", "旧内容被破坏")
@@ -320,9 +320,14 @@ class AtomicWriteTest(unittest.TestCase):
             # 两条都算原子：直接 atomic_write_text，或走 state_manager.write_json（内部即原子写）
             n_atomic = src.count("atomic_write_text(") + src.count("write_json(")
             self.assertGreaterEqual(n_atomic, n, f"{rel} 状态写入未原子化")
-        # state_manager 应委托共享实现，而不是保留第二份同构代码
+        # state_manager 应委托共享实现，而不是保留第二份同构代码。
+        # owner 已从 kb_common（shim）迁到 kb_io —— 断言"委托 kb_io 的原子写"，
+        # 不再绑死中间层模块名（P1-1 收尾：shim 正在被摘掉）。
         sm = (PIPELINE / "state_manager.py").read_text(encoding="utf-8")
-        self.assertIn("from kb_common import atomic_write_text", sm)
+        self.assertIn("atomic_write_text", sm)
+        self.assertRegex(sm, r"from kb_io import .*atomic_write_text|import atomic_write_text")
+        self.assertNotIn("def _atomic_write\b.*\n.*text =", sm,
+                         "_atomic_write 不应再保留第二份同构实现")
 
 
 # ── 79~82：验收器必须验收「你要它验收的那个库」────────────────

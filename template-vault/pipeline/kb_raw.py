@@ -26,7 +26,9 @@ import argparse, json, os, re, sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import ROOT_DEFAULT, iter_notes, load_note_full as load, is_raw_path
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_raw_path
 
 EVIDENCE_DIRS = ("raw", "memory")           # 证据层顶层目录（原记忆 / 网页抓取）
 DEFAULT_HEAD = 40                           # show 默认只给前 N 行

@@ -8,12 +8,12 @@
 # 角色：admin / editor / reader
 # ============================================================
 import argparse, sys, json, os
-from kb_common import atomic_write_text
+from kb_io import atomic_write_text
 from pathlib import Path
 import datetime
 
 try:
-    from kb_common import ROOT_DEFAULT
+    from kb_io import ROOT_DEFAULT
 except ImportError:
     ROOT_DEFAULT = os.environ.get("KB_ROOT", ".")
 

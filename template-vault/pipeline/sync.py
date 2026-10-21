@@ -19,7 +19,8 @@
 import argparse, os, sys, json, shutil, subprocess, datetime
 from pathlib import Path
 
-from kb_common import ROOT_DEFAULT, parse_frontmatter, fmt_value
+from kb_infer import fmt_value
+from kb_io import ROOT_DEFAULT, parse_frontmatter
 # domain → (PARA 区, 子目录)，与 memory_sync.py FOLDER_TARGET 一致
 DOMAIN_TARGET = {
     "运维": ("20-技术 Technology", "基础设施"),
@@ -271,7 +272,8 @@ def cmd_ingest_any(args):
 
     # ③ 路由决策
     from intake_triage import triage_by_content_type
-    from kb_common import domain_primary, infer_domain
+    from kb_domain import domain_primary
+    from kb_infer import infer_domain
     # ClassifyResult 没有 domain 字段；以前 getattr(cr, 'domain', '综合') 恒为「综合」，
     # 路由永远走兜底。这里用与其它模块一致的推断函数。
     raw_domain = infer_domain(src.name, {}, src.stem, body)
@@ -280,7 +282,7 @@ def cmd_ingest_any(args):
 
     # ④ 写入
     from clean import aggregate_bucket, fmt_value
-    from kb_common import content_fingerprint
+    from kb_text import content_fingerprint
     import datetime
 
     if route["action"] == "trash":
@@ -332,7 +334,9 @@ def cmd_ingest_any(args):
 
     # P2: 自动标注 related_to（FR-3.3.1）
     try:
-        from kb_common import add_relation, tokenize, load_meta, iter_notes
+        from kb_domain import add_relation
+        from kb_io import load_meta, iter_notes
+        from kb_text import tokenize
         from collections import Counter
         import math
         new_toks = Counter(tokenize(body))

@@ -60,7 +60,7 @@ class Judge:
     """本地 chat 模型裁判（best-effort：不可用就拒绝裁决，绝不无证据放行）。"""
 
     def __init__(self, root: Path):
-        from kb_common import model_config
+        from kb_config import model_config
         cfg = model_config(root)
         self.base = str(cfg.get("base_url") or "").rstrip("/")
         self.model = str(cfg.get("chat_model") or "")
@@ -211,7 +211,7 @@ def _rank_of(root: Path, q: str, target: str, top: int = 10) -> Optional[int]:
 
 
 def _write_adjust(root: Path, rows: List[Dict[str, Any]]) -> None:
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     from state_manager import state_path
     atomic_write_text(state_path(root, "kb_retrieval_adjust.json"), json.dumps(
         {"adjustments": [{"query": r["query"], "action": "boost", "note": r["note"],

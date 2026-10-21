@@ -18,8 +18,8 @@ from collections import Counter, defaultdict
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import (norm, parse_date, char_vec, build_inverted_index,
-                        candidate_pairs, parse_importance)
+from kb_metautil import parse_date, parse_importance
+from kb_text import norm, char_vec, build_inverted_index, candidate_pairs
 from kb_constants import (
     DUP_SIM,
     EXTERNAL_MIN_CROSS,
@@ -116,7 +116,7 @@ def cos(a: Union[Dict[str, float], List[float]], b: Union[Dict[str, float], List
     if isinstance(a, dict) and isinstance(b, dict):
         # dict 分支委托 kb_common.cos（实测 200 组随机向量逐位一致）——
         # 本地只保留 embedding list 分支，那才是本函数存在的理由。
-        from kb_common import cos as _common_cos
+        from kb_text import cos as _common_cos
         return _common_cos(a, b)
     if isinstance(a, list) and isinstance(b, list):
         return sum(x * y for x, y in zip(a, b))

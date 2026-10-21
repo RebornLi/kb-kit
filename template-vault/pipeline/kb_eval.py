@@ -42,7 +42,7 @@ TEST_DIR = PIPE_DIR / "test_eval"
 DATASET_PATH = TEST_DIR / "eval_dataset.json"
 CONFIG_PATH = TEST_DIR / "eval_config.json"
 
-import kb_common            # tokenize 复用（与 rag 索引同构）
+from kb_text import tokenize as _kb_tokenize   # 与 rag 索引同构
 import kb_claim             # _chat 用于可选 LLM judge
 
 
@@ -56,8 +56,8 @@ _STRICT_MIN = {             # --strict 才据此判退出码 1（默认仅报告
 
 
 def _tokenize(s):
-    """复用 kb_common.tokenize（unigram+bigram CJK + 拉丁词），与 rag 索引同构。"""
-    return list(kb_common.tokenize(s or ""))
+    """复用 kb_text.tokenize（unigram+bigram CJK + 拉丁词），与 rag 索引同构。"""
+    return list(_kb_tokenize(s or ""))
 
 
 def _content_tokens(s):

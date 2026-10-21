@@ -24,7 +24,9 @@ import argparse, json, re, sys, urllib.request, urllib.error, os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import ROOT_DEFAULT, iter_notes, load_note_full as load, is_generated_report, is_raw_path
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_generated_report, is_raw_path
 
 CACHE = Path(".kb") / "context_cache.json"
 # 需要 LLM 上下文的块特征：太短（缺上下文）或没有标题（无结构）
@@ -81,7 +83,7 @@ class _LLM:
         #   为什么：cron/systemd 读不到 ~/.bashrc → key 为空 → 这里会**静默不干活**，
         #   而"静默降级"在本项目已经坑过多次（同 kb_embed / curate 的根因）。
         try:
-            from kb_common import model_config
+            from kb_config import model_config
             c = model_config()
         except Exception:
             c = {}

@@ -10,8 +10,9 @@
 import argparse, os, re, sys, json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import (ROOT_DEFAULT, EXCLUDE, DOMAIN_WHITELIST, is_generated_report,
-                       is_index_stub)
+from kb_config import DOMAIN_WHITELIST
+from kb_io import ROOT_DEFAULT, EXCLUDE
+from kb_metautil import is_generated_report, is_index_stub
 
 ENUM_STATUS  = {"draft", "active", "stable", "legacy", "archived"}
 REQUIRED = ["tags", "status", "domain", "created", "updated", "importance"]
@@ -100,7 +101,7 @@ def validate_file(path: Union[str, Path]) -> Tuple[List[str], List[str], Dict[st
     if dm is not None and dm not in DOMAIN_WHITELIST:
         # P2: 两级 domain 校验（FR-3.3.3）
         try:
-            from kb_common import is_valid_domain
+            from kb_config import is_valid_domain
             if not is_valid_domain(dm):
                 hard.append(f"domain 非法: {dm!r}（不在 domain-taxonomy.json 白名单）")
             else:

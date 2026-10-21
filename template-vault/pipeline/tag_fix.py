@@ -26,8 +26,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
-                       is_raw_path, is_generated_report)
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_raw_path, is_generated_report
 import taxonomy
 
 # 目录路径型：`40-资源库 Resources` / `40资源库Resources` / `20-技术 Technology`

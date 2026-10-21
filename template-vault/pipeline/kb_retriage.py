@@ -43,7 +43,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import kb_rsi            # 复用 collect/metrics/tokenize/is_raw/is_archive/in_inbox 守卫
-from kb_common import tokenize, atomic_write_text
+from kb_io import atomic_write_text
+from kb_text import tokenize
 from state_manager import state_path, read_state_path
 from kb_constants import (
     EXTERNAL_MIN_CROSS, EXTERNAL_FRESH_MIN_PCT,

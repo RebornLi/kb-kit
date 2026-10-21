@@ -27,7 +27,8 @@ from pathlib import Path
 from collections import Counter
 
 import rag
-from kb_common import parse_frontmatter, tokenize
+from kb_io import parse_frontmatter
+from kb_text import tokenize
 
 LEDGER_NAME = "promotions.jsonl"
 DEFAULT_COV_THR = 0.30  # Jaccard 召回率阈值：< 此值判 coverage-drop（High）

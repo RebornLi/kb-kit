@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi            # 复用 collect/compiled_notes/metrics/proposals/load_note
-from kb_common import cos as _cos, CJK  # 余弦 + 中文字正则（全仓唯一定义）
+from kb_text import cos as _cos, CJK
 
 # ── 有界门控常量 ──────────────────────────────────────────────
 MIN_ANSWER_CHARS = 60      # 答案太短 = 一次性闲聊，不提议
@@ -176,7 +176,7 @@ def _inc_daily(root):
         st_obj = {}
     per = st_obj.setdefault("per_day", {})
     per[_DATE] = per.get(_DATE, 0) + 1
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(_state_path(root), json.dumps(st_obj, ensure_ascii=False, indent=2))
 
 
@@ -301,7 +301,7 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None, force: bool =
     # 重写提案文件：**只保留未被写入的**。
     # 以前这里只做 `open(...,"w").close()` 把文件清空 —— 未选中的提案被无声删除，
     # 而返回值仍声称「剩余 N 条待审」（数据丢失 + 报告失真）。
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(_prop_path(root),
                       "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept))
     try:

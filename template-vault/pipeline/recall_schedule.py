@@ -18,8 +18,9 @@ import argparse, os, re, sys, json, subprocess, datetime
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import (ROOT_DEFAULT, EXCLUDE, parse_frontmatter, tokenize,
-                       iter_notes, parse_importance as _parse_importance)
+from kb_io import ROOT_DEFAULT, EXCLUDE, parse_frontmatter, iter_notes
+from kb_metautil import parse_importance as _parse_importance
+from kb_text import tokenize
 
 # 旧位置（只读回退）；规范位置是 <vault>/.kb/state/recall_state.json
 _LEGACY_PATHS = ("pipeline/.recall_state.json", ".recall_state.json")

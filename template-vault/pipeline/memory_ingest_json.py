@@ -16,7 +16,7 @@
 import os, json, hashlib, subprocess, datetime
 from pathlib import Path
 from collections import Counter
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 
 # 状态文件名（统一存 <vault>/.kb/state/；旧位置 .memory_ingest_state.json 只读回退）
 STATE_FILE = "memory_ingest_state.json"

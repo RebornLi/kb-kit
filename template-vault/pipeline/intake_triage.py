@@ -15,10 +15,10 @@ import argparse, os, re, sys, math, datetime
 from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import (ROOT_DEFAULT, EXCLUDE, parse_frontmatter, tokenize, CJK,
-                       iter_notes, load_note, norm, cos, load_config,
-                       parse_importance as _parse_importance, is_generated_report,
-                       add_alias_text, record_lineage)
+from kb_config import load_config
+from kb_io import ROOT_DEFAULT, EXCLUDE, parse_frontmatter, iter_notes, load_note
+from kb_metautil import parse_importance as _parse_importance, is_generated_report, add_alias_text, record_lineage
+from kb_text import tokenize, CJK, norm, cos
 
 INBOX = "00-收件箱 Inbox"
 TRASH = "90-归档 Archive/_trash"

@@ -86,7 +86,7 @@ def run(root: Path, max_seconds: int = 300, changed_only: bool = True) -> int:
           f"{'（增量模式）' if changed_only else '（全量模式）'}")
     report: List[str] = [f"# 睡眠时整理报告 · {datetime.now().isoformat(timespec='seconds')}", ""]
 
-    from kb_common import iter_notes, load_meta
+    from kb_io import iter_notes, load_meta
 
     # ① 近重复（bottom-k 候选 + 精确复核）
     #   **缓存签名**：全库算一遍 bottom-k 在 4000 篇量级要十几分钟，作为每夜任务不可接受
@@ -248,7 +248,7 @@ def run(root: Path, max_seconds: int = 300, changed_only: bool = True) -> int:
     #   原来这两段各把全库读一遍（加上签名共三遍全库）→ 每夜任务不可接受
     #   （实测首跑 >10 分钟仍未结束）。改成与签名一致的策略：按 mtime 只重算变更笔记，
     #   结果累积在状态里；下一轮通常只有个位数笔记需要重算。
-    from kb_common import parse_date
+    from kb_metautil import parse_date
     import kb_health
     import gate as _gate
     cache3 = dict(st.get("stale_cache") or {})
@@ -256,7 +256,7 @@ def run(root: Path, max_seconds: int = 300, changed_only: bool = True) -> int:
     stale = []
     gate_rows = {}
     touched = 0
-    from kb_common import is_generated_report, is_source_note
+    from kb_metautil import is_generated_report, is_source_note
     for rel in [str(x.relative_to(root)) for x in iter_notes(root)]:
         fp = root / rel
         if not fp.is_file() or is_generated_report(rel):

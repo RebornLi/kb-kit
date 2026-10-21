@@ -88,7 +88,8 @@ def schema_block(schema: Optional[dict], page_type: str) -> str:
 # ── L4 范文层：从已通过校验的正典里挑同类样例 ──────────────────
 def _canon_rows(root: Path) -> List[Dict[str, Any]]:
     """扫描库里的正典，收集可作范文的（含质量分）。"""
-    from kb_common import iter_notes, load_note_full as load
+    from kb_infer import load_note_full as load
+    from kb_io import iter_notes
     rows = []
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
@@ -130,7 +131,7 @@ def exemplars(root: Path, body: str, fm: Dict[str, Any], k: int = 2) -> List[Dic
     same = [r for r in rows if r["domain"] == dom]
     pool = same if len(same) >= k else rows
     # 再按与原文的用词重叠度挑最贴近的
-    from kb_common import tokenize
+    from kb_text import tokenize
     qt = set(tokenize(body[:2000]))
     def overlap(r):
         rt = set()

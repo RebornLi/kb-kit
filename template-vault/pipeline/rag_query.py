@@ -17,10 +17,9 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from kb_common import (
-    LAYER_MULTIPLIER, count_tokens, is_index_stub, is_stale,
-    load_meta, retrievable_status, tokenize,
-)
+from kb_io import load_meta
+from kb_metautil import LAYER_MULTIPLIER, is_index_stub, is_stale, retrievable_status
+from kb_text import count_tokens, tokenize
 from rag_index import (
     IDX_DIR, IDX_VERSION, index_file, load_index, strip_body, all_doc_vectors,
 )
@@ -45,7 +44,7 @@ def _apply_filters(scored, root, domain, content_type, author,
         # P2: domain 两级过滤（FR-3.3.3）—— 一级匹配或完整匹配
         if domain:
             fm_domain = fm.get("domain", "")
-            from kb_common import domain_primary, parse_domain
+            from kb_domain import domain_primary, parse_domain
             q_primary, q_secondary = parse_domain(domain)
             fm_primary, fm_secondary = parse_domain(fm_domain)
             if domain != fm_domain and q_primary != fm_primary:

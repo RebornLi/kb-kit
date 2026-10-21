@@ -30,7 +30,9 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import ROOT_DEFAULT, iter_notes, load_note_full as load, is_raw_path, is_generated_report
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_raw_path, is_generated_report
 
 W = {"extraction": 0.50, "corroboration": 0.25, "recency": 0.15, "verification": 0.10}
 CONF_PUBLISH = 0.55          # 低于此 → 建议人工复核

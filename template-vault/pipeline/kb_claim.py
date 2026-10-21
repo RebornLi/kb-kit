@@ -31,7 +31,7 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import CJK   # 中文字正则：全仓唯一定义（原先 9 份逐字相同的副本）
+from kb_text import CJK
 
 CLAIMS_FILE = "claims.json"           # 存于 .kb/state/claims.json（StateStore）
 CHAT_MODEL = os.environ.get("ORNITH_CHAT_MODEL", "ornith1.5-35b")  # 与 rag.py chat 同源

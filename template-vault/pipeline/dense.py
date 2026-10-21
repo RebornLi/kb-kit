@@ -88,7 +88,7 @@ class Projector:
 
 # ── 端点 ──────────────────────────────────────────────────────
 def _cfg(root):
-    from kb_common import model_config
+    from kb_config import model_config
     return model_config(root)
 
 

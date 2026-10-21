@@ -25,7 +25,7 @@ sys.path.insert(0, str(PIPELINE))
 import link_engine  # noqa: E402
 import intake_triage  # noqa: E402
 import clean  # noqa: E402
-from kb_common import is_generated_report, add_alias_text  # noqa: E402
+from kb_metautil import is_generated_report, add_alias_text
 
 
 def write(path: Path, text: str) -> None:

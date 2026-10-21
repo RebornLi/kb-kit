@@ -20,7 +20,7 @@
 #   python3 agent_registry.py ingest --root R [--agent NAME] [--list] [--dry-run]
 # ============================================================
 import argparse, os, re, sys, json, glob, shutil, importlib, datetime
-from kb_common import atomic_write_text
+from kb_io import atomic_write_text
 from pathlib import Path
 
 # 状态文件名（统一存 <vault>/.kb/state/）。旧位置有两个：vault 根 kb-agent.json（现行）

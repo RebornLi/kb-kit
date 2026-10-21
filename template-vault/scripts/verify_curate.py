@@ -25,8 +25,10 @@ def main() -> int:
     root = Path(args.root).resolve()
     sys.path.insert(0, str(root / "pipeline"))
 
-    from kb_common import (iter_notes, load_note_full as load, is_index_stub,
-                           is_pointer_page, kb_layer_of, is_generated_report)
+    from kb_io import iter_notes
+    from kb_infer import load_note_full as load
+    from kb_metautil import (is_index_stub, is_pointer_page,
+                             kb_layer_of, is_generated_report)
 
     checks = []
     def check(name, ok, detail, warn=False, na=False):

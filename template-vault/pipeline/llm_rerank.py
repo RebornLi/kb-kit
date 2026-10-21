@@ -22,7 +22,8 @@ import argparse, json, os, re, sys, time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import ROOT_DEFAULT, model_config, load_meta
+from kb_config import model_config
+from kb_io import ROOT_DEFAULT, load_meta
 
 TOP_N = 12
 ALPHA = 0.4          # 首段分权重（0.4 首段 + 0.6 模型判断）

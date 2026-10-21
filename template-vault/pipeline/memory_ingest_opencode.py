@@ -15,7 +15,7 @@
 # ============================================================
 import sqlite3, re, os, json, hashlib, datetime, glob
 from pathlib import Path
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 from memory_ingest_sqlite import (_safe_kb_path, _fm_block, _domain, _kb_target,
                                   _load_state, _save_state)
 

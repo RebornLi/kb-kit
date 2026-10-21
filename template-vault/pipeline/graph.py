@@ -9,7 +9,8 @@
 import argparse, sys, os, re
 from pathlib import Path
 
-from kb_common import ROOT_DEFAULT, iter_notes, load_note, extract_relations, domain_primary
+from kb_domain import extract_relations, domain_primary
+from kb_io import ROOT_DEFAULT, iter_notes, load_note
 
 GRAPH_OUTPUT = "70-知识治理 Governance/_graph.md"
 MAX_NODES = 200  # 防止图过大

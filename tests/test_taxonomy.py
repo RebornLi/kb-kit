@@ -21,7 +21,7 @@ sys.path.insert(0, str(PIPELINE))
 
 import taxonomy  # noqa: E402
 import clean  # noqa: E402
-from kb_common import load_meta  # noqa: E402
+from kb_io import load_meta
 
 class TaxonomyTest(unittest.TestCase):
     def setUp(self):

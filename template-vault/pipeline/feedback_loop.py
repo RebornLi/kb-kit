@@ -15,8 +15,9 @@ import argparse, os, re, sys, json, math, datetime
 from pathlib import Path
 from collections import Counter, defaultdict
 from typing import Any, Dict, List, Optional, Tuple, Union
-from kb_common import (ROOT_DEFAULT, load_note, parse_importance as _parse_importance,
-                       is_generated_report, CJK)
+from kb_io import ROOT_DEFAULT, load_note
+from kb_metautil import parse_importance as _parse_importance, is_generated_report
+from kb_text import CJK
 from kb_constants import MIN_HITS, BUMP_CAP, MIN_BUMP
 import kb_rsi  # P1-B: 复用其 load_note/vec（多样性感知所需的候选向量与领域）
 

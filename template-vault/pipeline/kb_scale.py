@@ -28,7 +28,9 @@ def indexable_count(root: Path) -> int:
     以前分母用 `kb_rsi.collect`（含 raw/、不排除生成物），分子是 RAG 索引篇数
     （排除 raw/生成物）→ 两者不同源，覆盖率数字没有意义。
     """
-    from kb_common import iter_notes, load_meta, is_generated_report, index_excluded, tokenize
+    from kb_io import iter_notes, load_meta
+    from kb_metautil import is_generated_report, index_excluded
+    from kb_text import tokenize
     n = 0
     for p in iter_notes(root):
         rel = str(p.relative_to(root))

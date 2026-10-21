@@ -278,7 +278,7 @@ def propose(root: Union[str, Path], sim_min: float = SIM_MIN,
         p["severity"] = "high" if p["issue"].startswith("requery") else "medium"
 
     # 写提案文件（全量重写，使 apply 看到最新）
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(state_path(root, PROP_FILE),
                       "\n".join(json.dumps(p, ensure_ascii=False) for p in proposals)
                       + ("\n" if proposals else ""))
@@ -341,7 +341,7 @@ def apply(root: Union[str, Path], ids: Optional[List[str]] = None,
 
     if written:
         # 契约本身 gitignore → force-add 以便 checkpoint 可回滚；整次 apply 一次提交
-        from kb_common import atomic_write_text
+        from kb_io import atomic_write_text
         atomic_write_text(apath, json.dumps({"adjustments": existing, "updated": _now_iso()},
                                             ensure_ascii=False, indent=2))
         _git_checkpoint_force(root, str(apath.relative_to(root)),

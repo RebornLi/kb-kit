@@ -21,7 +21,7 @@ reasoning 吃掉 100% 的预算、正文 0 token —— 只看"总 tok/s"会得�
 import json, sys, time, urllib.request
 from concurrent.futures import ThreadPoolExecutor
 sys.path.insert(0,'pipeline')
-from kb_common import model_config
+from kb_config import model_config
 c = model_config()
 URL = c['base_url'].rstrip('/') + "/chat/completions"; KEY = c['api_key']; MODEL = c['chat_model']
 

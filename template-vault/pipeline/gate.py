@@ -118,7 +118,8 @@ def classify(fm: Dict[str, Any], body: str, rel: str = "") -> Dict[str, Any]:
 
 
 def check(root: Path, as_json: bool = False, limit: int = 20) -> int:
-    from kb_common import iter_notes, load_meta, is_source_note
+    from kb_io import iter_notes, load_meta
+    from kb_metautil import is_source_note
     import rag
     rows: List[Dict[str, Any]] = []
     counts = {"pass": 0, "quarantine": 0, "reject": 0}
@@ -172,7 +173,7 @@ def main() -> int:
     a = ap.parse_args()
     root = Path(a.root).resolve()
     if a.cmd == "probe":
-        from kb_common import load_meta
+        from kb_io import load_meta
         fm, body = load_meta(root / a.rel)
         print(json.dumps(classify(fm, body, a.rel), ensure_ascii=False, indent=2))
         return 0

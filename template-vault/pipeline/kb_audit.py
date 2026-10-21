@@ -26,8 +26,10 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load, tokenize,
-                       is_raw_path, is_generated_report, kb_layer_of, is_index_stub)
+from kb_infer import load_note_full as load
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_raw_path, is_generated_report, kb_layer_of, is_index_stub
+from kb_text import tokenize
 
 STALE_DAYS = 120
 COHESION_MIN = 0.15          # 标签簇内聚下限
@@ -221,7 +223,7 @@ def check_structure(root: Path, notes) -> Dict[str, List[Dict[str, Any]]]:
     #   保证两个工具的数字可比，不会一个说 0 一个说 46。
     # 判据与排除集**逐条对齐 kb-healthcheck.check_orphans**，保证两工具数字可比。
     #   （曾出现 healthcheck=0 / audit=46 的相反结论，根因是排除集不同却没写明）
-    from kb_common import EXCLUDE as _EXC
+    from kb_io import EXCLUDE as _EXC
     _SYS = ("memory/", "reference/", "main/", ".git/", ".obsidian/", ".openclaw/",
             ".venvo", ".trash", "scripts/", "media/", "raw/", "docs/")
     _parts = lambda r: set(Path(r).parts)
@@ -329,7 +331,7 @@ def _safe_fix_actions_orphans(root: Path, notes) -> List[Dict[str, Any]]:
         第一版就是这么误伤 48 个文件的（还写出了 `同族： [[README]] · [[README]]` 的自链）。
       · **排除自链与重复**：父/兄弟的 stem 等于自己的一律跳过。
     """
-    from kb_common import parent_of, root_of
+    from kb_metautil import parent_of, root_of
     st = check_structure(root, notes)
     actions = []
     for o in st["orphans"]:

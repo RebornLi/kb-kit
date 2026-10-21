@@ -24,7 +24,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # 默认 vault 根：脚本位于 pipeline/，parents[1] 即 vault 根（可用 KB_ROOT 覆盖）
-from kb_common import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter, is_source_note, freshness, retrievable_status, is_generated_report
+from kb_io import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter
+from kb_metautil import is_source_note, freshness, retrievable_status, is_generated_report
 # kb-healthcheck 用 Path 对象
 ROOT_DEFAULT = Path(_ROOT_DEFAULT_STR)
 # 全名分区（与脚手架目录名一致）
@@ -262,7 +263,7 @@ def check_tags(root):
     violations, seen = [], set()
     # P2: 从 tag-taxonomy.json 加载白名单（FR-3.3.5）
     try:
-        from kb_common import load_tag_taxonomy
+        from kb_config import load_tag_taxonomy
         tag_taxonomy = load_tag_taxonomy(root)
         external_whitelist = set(tag_taxonomy.keys())
         for subs in tag_taxonomy.values():

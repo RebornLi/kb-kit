@@ -111,7 +111,7 @@ def load_config(root: Union[str, Path, None] = None) -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any], root: Union[str, Path, None] = None) -> None:
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(config_path(root), json.dumps(cfg, ensure_ascii=False, indent=2))
 
 

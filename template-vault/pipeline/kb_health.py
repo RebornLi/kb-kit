@@ -19,7 +19,9 @@ from collections import Counter
 from datetime import datetime  # metrics() 第122行 datetime.fromtimestamp 需要模块级
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from kb_common import ROOT_DEFAULT, EXCLUDE, FM, tokenize, load_note, iter_notes, norm, cos, parse_date as _kb_parse_date, build_inverted_index, candidate_pairs
+from kb_io import ROOT_DEFAULT, EXCLUDE, FM, load_note, iter_notes
+from kb_metautil import parse_date as _kb_parse_date
+from kb_text import tokenize, norm, cos, build_inverted_index, candidate_pairs
 from kb_constants import ARCHIVE_DAYS, DECAY_DAYS, PERF_WARN_THRESHOLD
 
 load = load_note  # 兼容本模块原有 load(p) 调用

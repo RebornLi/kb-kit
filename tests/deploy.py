@@ -110,13 +110,16 @@ def _load_vault_index(vault: Path):
     """用**目标库自己的** rag.py 读它的索引。
 
     必须临时把 `<vault>/pipeline` 放进 sys.path —— 否则 exec_module 时
-    `from kb_common import ...` 会 ModuleNotFoundError（实测踩过）。
+    rag.py 的 `from rag_index import ...` 会 ModuleNotFoundError（实测踩过）。
     """
     import importlib.util
     pdir = str(vault / "pipeline")
     sys.path.insert(0, pdir)
     try:
-        for name in ("rag", "kb_common", "state_manager"):
+        for name in ("rag", "rag_index", "rag_score", "rag_query",
+                     "kb_io", "kb_text", "kb_metautil",
+                     "kb_config", "kb_domain", "kb_infer",
+                     "state_manager"):
             sys.modules.pop(name, None)      # 别拿到别的库的同名模块
         spec = importlib.util.spec_from_file_location("_probe_rag", vault / "pipeline" / "rag.py")
         mod = importlib.util.module_from_spec(spec)

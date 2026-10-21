@@ -25,7 +25,7 @@ PIPELINE = REPO / "template-vault" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
 
 import rag  # noqa: E402
-from kb_common import index_excluded, is_source_note  # noqa: E402
+from kb_metautil import index_excluded, is_source_note
 
 def _load_idx(root):
     """读索引：统一走 rag.load_index（v6 起是 pickle，旧库仍是 json）。"""

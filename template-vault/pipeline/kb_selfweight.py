@@ -34,7 +34,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi            # 复用 collect/metrics（接地阀）、load_note
-from kb_common import parse_importance as _parse_importance, atomic_write_text
+from kb_io import atomic_write_text
+from kb_metautil import parse_importance as _parse_importance
 from state_manager import state_path, read_state_path
 from kb_constants import (
     EXTERNAL_MIN_CROSS, EXTERNAL_FRESH_MIN_PCT,

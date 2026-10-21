@@ -30,9 +30,10 @@ import argparse, datetime, hashlib, json, os, re, subprocess, sys, time, urllib.
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from kb_common import (ROOT_DEFAULT, iter_notes, load_note_full as load,
-                       is_index_stub, is_pointer_page, kb_layer_of, is_raw_path,
-                       is_generated_report, record_lineage, fmt_value, content_fingerprint)
+from kb_infer import load_note_full as load, fmt_value
+from kb_io import ROOT_DEFAULT, iter_notes
+from kb_metautil import is_index_stub, is_pointer_page, kb_layer_of, is_raw_path, is_generated_report, record_lineage
+from kb_text import content_fingerprint
 
 PROPOSAL_DIR = Path("70-知识治理 Governance") / "_curate"
 # 状态文件（统一存 <vault>/.kb/state/，见 state_manager.STATE_DIR）。
@@ -122,7 +123,7 @@ def _load_state(root: Path) -> Dict[str, Any]:
 
 
 def _save_state(root: Path, st: Dict[str, Any]) -> None:
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     atomic_write_text(root / STATE, json.dumps(st, ensure_ascii=False, indent=2))
 
 

@@ -28,7 +28,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import kb_rsi  # 复用 collect/metrics/load_note（向量由本地 _vec/_cos，处理中文）
-from kb_common import norm as _norm, cos as _cos, build_inverted_index, candidate_pairs, CJK
+from kb_text import norm as _norm, cos as _cos, build_inverted_index, candidate_pairs, CJK
 from kb_constants import CONTRA_SIM, MAX_NOTES_CONTRA as MAX_NOTES
 
 ROOT_DEFAULT = str(Path(__file__).resolve().parent.parent)
@@ -492,7 +492,7 @@ def main() -> int:
     except (ImportError, OSError, AttributeError, TypeError):
         pass
 
-    from kb_common import atomic_write_text
+    from kb_io import atomic_write_text
     logdir = Path(root) / "pipeline"
     logdir.mkdir(parents=True, exist_ok=True)
     # 瞬态快照：统一写 .kb/state/（以前这里绕过 _snap_path 直接写 pipeline/）

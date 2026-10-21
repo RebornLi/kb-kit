@@ -9,7 +9,9 @@ import sys, os, datetime
 from pathlib import Path
 from collections import Counter
 
-from kb_common import tokenize, load_meta, domain_primary, parse_domain
+from kb_domain import domain_primary, parse_domain
+from kb_io import load_meta
+from kb_text import tokenize
 
 
 # 权重配置

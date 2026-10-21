@@ -102,7 +102,7 @@ def iter_notes(root):
     （实测确认）。现已对齐到 `EXCLUDE`（含 pipeline/logs/backups/_curate…）+ 嵌套仓剪枝，
     作用范围与其它治理工具一致。
     """
-    from kb_common import iter_notes as _iter
+    from kb_io import iter_notes as _iter
     return _iter(root)
 
 

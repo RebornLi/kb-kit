@@ -10,7 +10,7 @@
 import argparse, os, re, sys, json, subprocess, glob, datetime
 from pathlib import Path
 
-from kb_common import ROOT_DEFAULT
+from kb_io import ROOT_DEFAULT
 
 def run_validate(root):
     p = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "validate.py"),
@@ -105,7 +105,8 @@ def check_l1_gaps(root):
 
 def check_freshness(root):
     """新鲜度统计：陈旧数 + 非可检索状态数（生命周期治理）。"""
-    from kb_common import iter_notes, load_meta, freshness, retrievable_status, is_source_note, is_generated_report
+    from kb_io import iter_notes, load_meta
+    from kb_metautil import freshness, retrievable_status, is_source_note, is_generated_report
     stale = blocked = 0
     for p in iter_notes(root):
         rel = str(p.relative_to(root))
