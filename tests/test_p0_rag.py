@@ -18,6 +18,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "template-vault" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import research_src  # noqa: E402
 sys.path.insert(0, str(PIPELINE / "plugins"))
 sys.path.insert(0, str(REPO / "scripts"))   # precheck / setup_obsidian
 sys.path.insert(0, str(REPO))               # create_vault
@@ -701,12 +703,12 @@ class DenseChannelTest(unittest.TestCase):
 class MetricWindowTest(unittest.TestCase):
     def test_usage_window_takes_newest_events(self):
         """evs 升序后取 [:N] 会一直分析最老的一批事件，必须取尾部。"""
-        text = (PIPELINE / "kb_usage.py").read_text(encoding="utf-8")
+        text = research_src("kb_usage")
         self.assertIn("return evs[-_MAX_EVENTS:]", text)
         self.assertNotIn("return evs[:_MAX_EVENTS]", text)
 
     def test_adaptretrieve_window_takes_newest(self):
-        text = (PIPELINE / "kb_adaptretrieve.py").read_text(encoding="utf-8")
+        text = research_src("kb_adaptretrieve")
         self.assertIn("events[-_MAX_EVENTS:]", text,
                       "取头部会永久忽略最新查询信号")
         self.assertNotIn("events[:_MAX_EVENTS]", text)
@@ -791,7 +793,7 @@ class L1ContractLoopTest(unittest.TestCase):
 
     def test_contract_is_declared_as_affecting_retrieval(self):
         import kb_adaptretrieve as l1
-        src = (PIPELINE / "kb_adaptretrieve.py").read_text(encoding="utf-8")
+        src = research_src("kb_adaptretrieve")
         self.assertIn('"affects_retrieval": True', src)
         self.assertIn("KB_RETRIEVAL_ADJUST=0", src)
         self.assertNotIn("没有运行时消费者", src, "闭环已接通，不应再声明无消费者")
@@ -853,6 +855,6 @@ class ConsistencyVerdictTest(unittest.TestCase):
         self.assertIsNone(r["verdict"])
 
     def test_llm_budget_constant_exists(self):
-        src = (PIPELINE / "kb_consistency.py").read_text(encoding="utf-8")
+        src = research_src("kb_consistency")
         self.assertIn("LLM_RECORD_BUDGET", src)
         self.assertIn("KB_CONSISTENCY_LLM_MAX", src)

@@ -15,6 +15,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "template-vault" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import research_src  # noqa: E402
 sys.path.insert(0, str(PIPELINE / "plugins"))
 sys.path.insert(0, str(REPO / "scripts"))   # precheck / setup_obsidian
 sys.path.insert(0, str(REPO))               # create_vault
@@ -30,15 +32,17 @@ def write(path: Path, text: str) -> None:
 
 class EvalCallersUseNoRecordTest(unittest.TestCase):
     def test_all_eval_paths_pass_no_record(self):
+        # kb_eval 已移入 _research/（P2-2），经 research_src 穿透垫片读真实实现
         targets = {
-            "pipeline/kb_eval.py": "--no-record",
+            "kb_eval": "--no-record",
             "pipeline/kb_eval_judge.py": "--no-record",
             "pipeline/llm_rerank.py": "--no-record",
             "scripts/eval_retrieval.py": "--no-record",
             "scripts/eval_retrieval_gold.py": "no_record=True",
         }
         for rel, needle in targets.items():
-            src = (REPO / "template-vault" / rel).read_text(encoding="utf-8")
+            src = (research_src(rel) if not rel.startswith(("pipeline/", "scripts/"))
+                   else (REPO / "template-vault" / rel).read_text(encoding="utf-8"))
             self.assertIn(needle, src, f"{rel} 的评测调用没有关闭使用信号记录")
 
 
@@ -82,11 +86,11 @@ class DriftModuleTest(unittest.TestCase):
         """以前 subprocess 只在 __main__ 里 import，被 import 调用时 NameError 被 except 吞掉。"""
         import kb_drift
         self.assertTrue(hasattr(kb_drift, "subprocess"))
-        src = (PIPELINE / "kb_drift.py").read_text(encoding="utf-8")
+        src = research_src("kb_drift")
         self.assertIn("import argparse, json, hashlib, datetime, os, math, subprocess", src)
 
     def test_length_ratio_uses_body(self):
-        src = (PIPELINE / "kb_drift.py").read_text(encoding="utf-8")
+        src = research_src("kb_drift")
         self.assertIn("len(body_now) - len(orig)", src,
                       "长度变化仍在用含 frontmatter 的整文件长度（与 kb_consistency 口径不一致）")
 
@@ -116,7 +120,7 @@ class ContradictionBudgetTest(unittest.TestCase):
             kc._llm_polarity = orig
 
     def test_budget_constant_exists(self):
-        src = (PIPELINE / "kb_contradiction.py").read_text(encoding="utf-8")
+        src = research_src("kb_contradiction")
         self.assertIn("LLM_PAIR_BUDGET", src)
         self.assertIn("KB_CONTRA_LLM_MAX", src)
 

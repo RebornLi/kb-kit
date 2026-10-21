@@ -14,6 +14,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 PIPELINE = REPO / "template-vault" / "pipeline"
 sys.path.insert(0, str(PIPELINE))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from conftest import research_src  # noqa: E402
 sys.path.insert(0, str(PIPELINE / "plugins"))
 sys.path.insert(0, str(REPO / "scripts"))   # precheck / setup_obsidian
 sys.path.insert(0, str(REPO))               # create_vault
@@ -70,7 +72,7 @@ class EngineDeltaTest(unittest.TestCase):
 
 class T3RatchetTest(unittest.TestCase):
     def test_t3_has_symmetric_relaxation_and_stable_is_not_stalled(self):
-        src = (PIPELINE / "kb_engine.py").read_text(encoding="utf-8")
+        src = research_src("kb_engine")
         self.assertIn("TUNED_RELAX", src, "T3 只有收紧、没有放宽（单向棘轮）")
         self.assertNotIn("fitness_trend <= 0", src,
                          "把 trend==0（稳定）当「停滞」会每次运行都收紧一档")
@@ -310,13 +312,14 @@ class AtomicWriteTest(unittest.TestCase):
         self.assertFalse(p.with_name(p.name + ".tmp").exists(), "残留临时文件")
 
     def test_state_writers_use_atomic_write(self):
+        # kb_meta 已移入 _research/（P2-2），经 research_src 穿透垫片读真实实现
         targets = {
-            "kb_meta.py": 2,            # _write_state + _write_config
-            "user_manager.py": 1,       # save_users
-            "agent_registry.py": 1,     # save_registry
+            "kb_meta": 2,                 # _write_state + _write_config
+            "user_manager": 1,            # save_users
+            "agent_registry": 1,          # save_registry
         }
         for rel, n in targets.items():
-            src = (PIPELINE / rel).read_text(encoding="utf-8")
+            src = research_src(rel)
             # 两条都算原子：直接 atomic_write_text，或走 state_manager.write_json（内部即原子写）
             n_atomic = src.count("atomic_write_text(") + src.count("write_json(")
             self.assertGreaterEqual(n_atomic, n, f"{rel} 状态写入未原子化")
