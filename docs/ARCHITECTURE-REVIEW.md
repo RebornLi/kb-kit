@@ -2,7 +2,7 @@
 
 > 调查对象：`/home/mushan/workspace/kb-kit-pure`（模板仓库，297 tracked files，171 .py）
 > 初查：2026-10-19 · 方法：codegraph 调用链追踪 + 关键模块源码精读 + git 热点统计
-> 状态核对：2026-10-21 — **P0 / P1 / P2-1 / P2-2 / P2-3 全部完成**；仅剩「不建议主动做」的 ④ 与零散遗留 ⑤
+> 状态核对：2026-10-21 — **P0 / P1 / P2-1（含第二期 4 域）/ P2-2 / P2-3 全部完成**；仅剩零散遗留 ⑤
 > ⚠️ §四、§五 保留初查时点视角；每项当前状态见 **§九 状态总账**
 
 ---
@@ -325,7 +325,7 @@ consolidate.run(max_seconds预算)
 
 ### 🥉 P2 — 较高成本，长期收益（视资源择机）
 
-#### P2-1：评估插件层简化 ✅ 已评估 + 已落地 ops 域试点（其余 4 域暂缓）
+#### P2-1：评估插件层简化 ✅ 已完成（ops 试点 + 其余 4 域复合键聚合）
 
 > **历史教训（记录在案）**：2026-10-21 首轮评估写的是「方案B：合并 39→5 个领域插件、
 > 旧 39 文件做 re-export shim、COMPAT_MAP 直接映射到聚合插件、plugin-config 39→5」。
@@ -353,9 +353,10 @@ COMPAT_MAP 119 条（首轮误记 113）/ 39 条 plugin-config / 全量 290 pass
 走完整流程（含 README / plugin-config / 测试同步）跑通一次，作为「领域合并」的
 **可复制模板与决策依据**。
 
-其余 4 个域（retrieval/crystallization/ingestion/organization）**暂缓**，理由是
-撞名 action 实例共 16 个（E 节量化），必须改名 —— 改名即改 CLI 行为，属 API 变更，
-需要单独评审。用第一步的实际账（改动量/回归风险/收益）来决定是否值得继续。
+其余 4 个域（retrieval/crystallization/ingestion/organization）当时**暂缓**，
+理由是撞名 action 实例共 16 个（E 节量化），必须改名 = API 变更。
+> **2026-10-21 已解除暂缓**：ops 域跑通后发现撞名只在「合并成单个类」时才是问题，
+> 用 `(plugin, action)` 复合键分发即可完全避免改名。见 §九 ④。
 
 **诚实预期**：这一步的收益是「验证域合并流程可行 + 为后续真合并铺路」，
 **不是本次就降低复杂度**（详见第三节末尾的冗余说明）。如果认为这个收益不值得，
@@ -698,6 +699,7 @@ CLI 契约零变更，但**新增一套与原名并存的入口**（两套入口
 | P2-1 插件层评估+试点 | ✅ | ops 域 10→1 `OpsPlugin`，CLI 契约零变更，294 passed |
 | P2-2 研究层边界固化 | ✅ | 17 个模块移入 `pipeline/_research/`；internal 改目录推导；3 条新守卫（变异验证有效）；297 passed |
 | P2-3 `curate.py` 拆分 | ✅ | 先补 `test_curate.py`（55 例，抓到 2 个既有 bug）；1289 → 1023 核心行 + `curate_cmds.py` 370 行；352 passed |
+| P2-1 第二期 4 域聚合 | ✅ | 复合键路由避免改名，COMPAT_MAP 87 条零改动；29 插件收入 4 聚合类；362 passed |
 
 **P0 / P1 全部收官。** 剩余未完成项见下。
 
@@ -871,11 +873,50 @@ codegraph / IDE 跳转恢复准确；pipeline 模块数 87 → 86，无死模块
 launcher→plugin 全链路 rc=0 · `scripts/verify_curate.py` PASS 11 ·
 两模块任意顺序独立 import 均无环。
 
-#### ④ P2-1 剩余 4 域真合并 🔶 已试点未扩展 —— 建议**不主动做**
-ops 域已跑通（可复制模板），其余 4 域各有 action 撞名（retrieval 3 /
-crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 变更。
-收益只剩"文件数"，而撞名改名成本与 CLI 兼容风险显著更高（详见 §六 P2-1 推翻记录）。
-若将来要做：先逐一评审撞名 action 改名表，并复用 `OpsAggregatePluginTest` 守卫模式。
+#### ④ P2-1 剩余 4 域真合并 ✅ 已完成（commit `186ef36` + `720d1b6`）
+
+**原判「不主动做」的前提被推翻了**：当时认为 action 撞名必须改名 = API 变更。
+实测撞名只有 10 个、**cli_aliases 零撞名**，且发现撞名只在「合并成单个类」时
+才是问题 —— 用 `(plugin, action)` **复合键**分发即可完全避免改名。
+
+**核心设计**（`plugins/_domain_plugin.py`）：
+
+| 期 | 聚合键 | 适用 |
+|---|---|---|
+| 一期 `OpsPlugin` | `action` → 路由 | 域内无撞名 |
+| 二期 `DomainPlugin` | `(plugin, action)` → 路由 | 域内有撞名 |
+
+⇒ **原插件名与原 action 名一个字都没改**，`COMPAT_MAP` 的 87 条路由一条不动，
+CLI 契约 100% 不变。旧插件降为保留 `meta.name` / `actions` / `cli_aliases` 的子类垫片。
+
+**4 个聚合类**：`retrieval`(7 插件) / `crystallization`(6) / `ingestion`(8) /
+`organization`(8)，共 29 插件、65 条路由 + 12 条委派。
+
+**三个必须记住的坑（都是「注册能过、单测绿、但 CLI 坏」）**：
+
+1. **无限递归**：4 个 agent 插件不是 `SubprocessPlugin`，聚合类要委派给它们；
+   但 shim 继承聚合类，委派表指向 shim 就成了 `shim → 委派 → shim → …`
+   （实测 `RecursionError`）。解法：实现移到 `_agent_impl.py`（`*Impl` 后缀，
+   与聚合类无继承关系），委派只指向 `*Impl`。
+2. **静默丢行为**：`IntakePlugin` 有自定义 `execute()` 注入 `--move`/`--trash`。
+   只照抄 `ACTION_MAP` 会丢掉 → `kb ingest move` 返回 0 但什么都没挪。
+   解法：`_ACTION_HOOKS` per-(plugin,action) 参数改写。
+3. **复合键被注册表挡掉**：`PluginRegistry.execute()` 先校验
+   `action in metadata.actions`。解法：`metadata().actions = 裸 action ∪ 复合键`。
+
+**守卫**（`tests/test_domain_aggregation.py`，10 例）：把改造前的基线
+**冻结成快照**嵌进测试文件（39 插件 / 65 路由 / 12 委派 / 全别名），逐条对账
+路由存在性、原子子命令、进程内快路径标记、cli 别名、shim 契约、委派目标。
+⚠️ 曾用 `git show HEAD:` 当基线，**提交后立刻自指**（HEAD 变成 shim，对账 0 条）
+—— 故改为冻结快照，与 git 历史解耦。
+
+这条守卫堵的洞是实测出来的：删掉 `raw.show` 路由时**整套既有测试毫无反应**。
+现变异测试 6 项全红（丢路由 / 快路径误标 / 别名丢失 / move 钩子失效 /
+委派条目丢失 ×2）。
+
+**顺带修**：`semantic_chunk.py` 缺 `import sys` → 直接跑必崩 `NameError`（既有缺陷）。
+**验证**：`pytest` **362 passed** · 29 个插件的 `actions` + `cli_aliases` 与改造前
+逐条一致 · 注册插件名 44 ↔ 44 零丢失 · `kb verify` 五项全绿 rc=0。
 
 #### ⑤ 遗留小项
 - `agent_detect_plugin.py` / `agent_json_plugin.py` / `agent_md_plugin.py` /
@@ -883,9 +924,10 @@ crystallization 8 / ingestion 4 / organization 2 实例），必须改名 = API 
   实测恒为 no-op（见 §六 P2-1 E 节），约 24 行装饰代码。
 - `rag.py` 门面的 33 个测试引用（`test_p0_rag.py` 等）——**不建议改**：
   它们验证的是检索域整体契约，是有意的单入口测试设计。
-- `pipeline/` 根下 17 个研究层**兼容垫片**（P2-2 留的桥）：待 `ladder`/`adjudicate`
-  的 `__import__` 与测试全部迁到 `_research.*` 后删除；`test_shims_are_only_re_exports`
-  已保证它们在等待期间不长胖。
+- **兼容垫片两批**（都是"等调用方迁完再删"，且有守卫保证不长胖）：
+  - P2-1 第二期：39 个插件 shim（保留原 `meta.name`，实现在 4 个聚合类）
+  - P2-2：`pipeline/` 根下 17 个研究层 shim（待 `ladder`/`adjudicate` 与测试迁到 `_research.*`）
+  - 守卫：`test_shims_are_only_re_exports` / `test_domain_aggregation.py`
 - `curate.py` 的 `from curate import cmd_run` 兼容层（PEP 562 `__getattr__`）：
   待调用方都迁到 `curate_cmds` 后可删；它保证 `kb curate ...` 与
   `tests/test_curate.py` 的稳定入口不变。
