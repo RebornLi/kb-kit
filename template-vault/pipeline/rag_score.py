@@ -14,7 +14,7 @@ from pathlib import Path
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
-from kb_common import cos as _common_cos  # noqa: F401
+from kb_text import cos as _common_cos  # noqa: F401
 
 # ── 评分常量 ──────────────────────────────────────────────
 
