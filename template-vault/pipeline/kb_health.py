@@ -472,7 +472,37 @@ def main() -> int:
     ap.add_argument("--json", action="store_true")
     ap.add_argument("--kpi", action="store_true",
                     help="只算抗 Goodhart 的 5 个指标（难刷），而非易刷的诊断量")
+    # 兼容旧插件壳 `kb health-metrics kpi`：把 "kpi" 子命令当 --kpi 旗标。
+    # 该路由一直是坏的（argparse 报 unrecognized arguments），补上不改变新用法。
+    ap.add_argument("action", nargs="?", choices=["kpi"], help=argparse.SUPPRESS)
+    # P3-29：FR-3.3.14「制度知识过期检测」的 check/mark 两个函数写完了却
+    # **从未接线**（无 CLI 入口、无内部调用者），等于需求实现了但用户用不到。
+    # 这里补上入口：默认只读检查，--mark-policy-stale 才写 review_needed。
+    ap.add_argument("--policy-stale", action="store_true", dest="policy_stale",
+                    help="检测 policy 笔记是否过期（只读；FR-3.3.14）")
+    ap.add_argument("--mark-policy-stale", action="store_true", dest="mark_policy_stale",
+                    help="给过期的 policy 笔记写 review_needed: true（写操作）")
     args = ap.parse_args()
+    if args.action == "kpi":
+        args.kpi = True
+    if args.policy_stale or args.mark_policy_stale:
+        stale = check_policy_stale(args.root)
+        if args.json:
+            print(json.dumps(
+                [{"rel": r, "days_overdue": d, "review_cycle": c}
+                 for r, d, c in stale], ensure_ascii=False))
+        elif not stale:
+            print("✅ 无过期的 policy 笔记")
+        else:
+            print(f"📋 过期 policy 笔记 {len(stale)} 篇：")
+            for rel, days, cycle in stale:
+                print(f"   - {rel}　超期 {days} 天（review_cycle={cycle}）")
+        if args.mark_policy_stale:
+            n = mark_policy_stale(args.root)
+            print(f"✅ 已标记 {n} 篇（review_needed: true）")
+        elif stale:
+            print("   标记：kb health-metrics --mark-policy-stale")
+        return 0
     if args.kpi:
         k = kpi(args.root)
         if args.json:

@@ -114,19 +114,22 @@ export async function showRawKB(cfg, rawId, opts = {}) {
     return { ok: false, id, content: '', note: 'non-JSON output from kb_raw.py' };
   }
   if (!data || data.ok !== true) {
-    return { ok: false, id, content: '', note: 'not found',
-             candidates: Array.isArray(data?.candidates) ? data.candidates.slice(0, 10) : undefined };
+    // `candidates` must be OMITTED (not set to undefined) when absent: the host
+    // snapshots tool output with lossless-JSON rules, and an own key whose value
+    // is `undefined` fails that snapshot (`value is not lossless JSON`).
+    const out = { ok: false, id, content: '', note: 'not found' };
+    if (Array.isArray(data?.candidates) && data.candidates.length) {
+      out.candidates = data.candidates.slice(0, 10);
+    }
+    return out;
   }
   const text = String(data.content || '');
-  return {
-    ok: text.length > 0,
-    id,
-    path: data.path,
-    chars: data.chars,
-    copies: Array.isArray(data.copies) && data.copies.length ? data.copies : undefined,
-    content: text.slice(0, maxChars),
-    truncated: text.length > maxChars,
-  };
+  // Same rule as above: build the result without `undefined`-valued own keys.
+  const out = { ok: text.length > 0, id, content: text.slice(0, maxChars), truncated: text.length > maxChars };
+  if (typeof data.path === 'string' && data.path) out.path = data.path;
+  if (typeof data.chars === 'number' && Number.isFinite(data.chars)) out.chars = data.chars;
+  if (Array.isArray(data.copies) && data.copies.length) out.copies = data.copies;
+  return out;
 }
 
 /**

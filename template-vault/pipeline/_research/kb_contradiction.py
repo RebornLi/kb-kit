@@ -277,7 +277,14 @@ def _llm_polarity(root: Union[str, Path], text_a: str, text_b: str) -> Optional[
     Returns:
         True（矛盾）/ False（不矛盾）/ None（无法判断或 LLM 不可用）
     """
-    if not os.environ.get("ORNITH_API_KEY"):
+    # 门槛判定改用 kb_config.model_config()：只读环境变量时，
+    # 用户在 .kb/model.json 配好的 KEY 会被漏掉 → LLM 极性解析永不启用。
+    try:
+        import kb_config
+        _cfg = kb_config.model_config(root)
+    except Exception:               # noqa: BLE001
+        _cfg = {}
+    if not (_cfg.get("api_key") or os.environ.get("ORNITH_API_KEY")):
         return None
     try:
         import rag
@@ -287,8 +294,14 @@ def _llm_polarity(root: Union[str, Path], text_a: str, text_b: str) -> Optional[
             f"文本B: {text_b[:500]}\n\n"
             "回答:"
         )
-        ans = rag.llm_answer(root, prompt, [])
-        if ans is None:
+        # llm_answer 返回 **(答案, 提示)** 二元组，不是字符串。
+        # 以前写成 `ans = rag.llm_answer(...)` 后直接 `ans.strip()`，
+        # 而判空只查 `if ans is None` —— 元组永不为 None，于是：
+        #   · LLM 可用时 → AttributeError: 'tuple' object has no attribute 'strip'
+        #   · LLM 不可用时 → 同样崩（元组里装着提示字符串）
+        # 这个 bug 一直被"上面的门槛先 return"掩盖，直到 LLM 真的可用才暴露。
+        ans, _hint = rag.llm_answer(root, prompt, [])
+        if not ans:
             return None
         ans = ans.strip().lower()
         if ans.startswith("是") or ans.startswith("yes"):

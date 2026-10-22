@@ -122,6 +122,8 @@ def main() -> int:
     q.add_argument("--no-record", action="store_true", dest="no_record",
                    help="不写入使用信号（agent_hits）；评测/探针/脚本调用必须带它，"
                         "否则会把「评测流量」灌进再问率、反过来压低 fitness")
+    q.add_argument("--strict-fresh", action="store_true", dest="strict_fresh",
+                   help="索引比笔记旧时以退出码 3 报告（默认只警告）")
     args = ap.parse_args()
 
     if args.cmd == "index":
@@ -136,7 +138,8 @@ def main() -> int:
                          date_from=args.date_from, date_to=args.date_to,
                          exclude_stale=args.exclude_stale,
                          include_raw=args.include_raw, include_stubs=args.include_stubs,
-                         no_record=args.no_record)
+                         no_record=args.no_record,
+                         strict_fresh=args.strict_fresh)
     return 1
 
 

@@ -23,7 +23,8 @@
 # ============================================================
 set -uo pipefail
 
-VAULT="${1:-${KB_ROOT:-/home/mushan/kb-kit-pure}}"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+VAULT="${1:-${KB_ROOT:-$SELF_DIR/..}}"
 EMBED_URL="${EMBED_URL:-http://127.0.0.1:8081/health}"
 QUERY_TIMEOUT="${QUERY_TIMEOUT:-30}"
 GROWTH_TIMEOUT="${GROWTH_TIMEOUT:-900}"

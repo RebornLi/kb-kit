@@ -102,6 +102,118 @@ def is_stale(fm, today=None) -> bool:
     """笔记是否陈旧（review_after 到期，或 updated/created 超过 DEFAULT_STALE_DAYS）。"""
     return freshness(fm, today)["stale"]
 
+
+def index_freshness(root, payload=None):
+    """索引相对笔记目录的新鲜度（P1-4：`kb query` 陈旧索引退出码为 0 的根因修复）。
+
+    ## 问题
+
+    索引文件存在、version 也对，但**笔记已经改了/增了/删了而没重建索引**。
+    此时 `kb query` 照常返回 0 —— 调用方（脚本、Agent、cron）无法区分
+    "查到了"与"拿的是过期答案"。实测：新增一篇高度相关的笔记后，
+    `kb query` 搜不到它，退出码仍是 0。
+
+    ## 数据来源
+
+    索引里**本来就有** `doc_mtimes`（rel → mtime）与 `doc_hashes`（rel → sha256），
+    只是查询路径从没用过。这里以 mtime 为主判据（便宜，一次 stat 都不用额外算），
+    缺 mtime 的条目退回 hash 比对（内容变了但 mtime 被刻意还原的场景）。
+
+    Returns: dict，字段见下；`stale=False` 不代表"内容一致"，只代表"没发现不一致"。
+      stale     bool   是否有笔记比索引新 / 索引缺失的笔记 / 索引多出的笔记
+      changed   list   内容与索引不一致的 rel（前 N 条）
+      missing   list   磁盘上存在但索引里没有的 rel（新增未建索引）
+      orphaned  list   索引里有但磁盘上已删除的 rel
+      checked   int    实际比对过的笔记数
+      reason    str    人读结论（"索引比笔记新" / "N 篇待重建"）
+    """
+    root = Path(root)
+    out = {"stale": False, "changed": [], "missing": [], "orphaned": [],
+           "checked": 0, "reason": ""}
+    if payload is None:
+        try:
+            import rag
+            idx = rag.index_file(root / "vector index")
+            if idx is None:
+                out["reason"] = "索引不存在"
+                return out
+            payload, _ver = rag.load_index(idx)
+        except Exception:
+            out["reason"] = "索引不可读"
+            return out
+    if not payload:
+        out["reason"] = "索引为空"
+        return out
+
+    idx_mtimes = payload.get("doc_mtimes") or {}
+    idx_hashes = payload.get("doc_hashes") or {}
+    if not isinstance(idx_mtimes, dict):
+        idx_mtimes = {}
+    if not isinstance(idx_hashes, dict):
+        idx_hashes = {}
+
+    from kb_io import iter_notes, load_meta
+
+    seen = set()
+    for p in iter_notes(str(root)):
+        try:
+            rel = os.path.relpath(str(p), str(root))
+        except (ValueError, OSError):
+            continue
+        rel = rel.replace(os.sep, "/")
+        # 关键：必须套用**索引自己的收录规则**（两道闸都要），否则会把 raw/、
+        # 报告产物、分块索引页等"本就不该进索引"的文件算成 missing ——
+        # 实测那样会让 freshness 在健康库上长期误报（首轮 6 篇假阳性）。
+        #   ① is_generated_report(rel)  —— 按文件名（运行期报告，无 frontmatter 标记）
+        #   ② index_excluded(fm)        —— 按 frontmatter（retire/raw/索引页…）
+        if is_generated_report(rel):
+            continue
+        try:
+            fm, _body = load_meta(p)
+            if index_excluded(fm):
+                continue
+        except Exception:
+            continue
+        seen.add(rel)
+        out["checked"] += 1
+        try:
+            mtime = p.stat().st_mtime
+        except OSError:
+            continue
+        old = idx_mtimes.get(rel)
+        if old is not None:
+            # 容差只允许**单向**：磁盘 mtime 比索引旧（old > mtime）时容忍 ~2s，
+            # 覆盖"文件系统/复制把 mtime 抹成整秒"这类回拨。
+            # 反过来（mtime > old，磁盘比索引新）必须**严格判定** ——
+            # 曾用 abs(diff) > 1.0，实测"建索引后立即改笔记"差 0.06s 也被判一致，
+            # 于是那次修改永远不进 changed，strict 模式漏报。
+            if mtime > float(old) + 0.001 or float(old) - mtime > 2.0:
+                out["changed"].append(rel)
+            continue
+        # 索引里没有该 rel 的 mtime 记录：用内容哈希兜底判定
+        if rel in idx_hashes:
+            try:
+                import kb_text
+                if kb_text.content_fingerprint(p.read_text(encoding="utf-8")) != idx_hashes[rel]:
+                    out["changed"].append(rel)
+            except Exception:
+                pass
+        else:
+            out["missing"].append(rel)
+
+    for rel in idx_mtimes:
+        if rel not in seen:
+            out["orphaned"].append(rel)
+
+    out["stale"] = bool(out["changed"] or out["missing"] or out["orphaned"])
+    if out["stale"]:
+        n = len(out["changed"]) + len(out["missing"]) + len(out["orphaned"])
+        out["reason"] = f"{n} 篇笔记与索引不一致（改 {len(out['changed'])} / "
+        out["reason"] += f"新增 {len(out['missing'])} / 已删 {len(out['orphaned'])}）"
+    else:
+        out["reason"] = f"索引与 {out['checked']} 篇笔记一致"
+    return out
+
 def index_excluded(fm) -> bool:
     """是否应从 RAG 索引排除：归档(retire)、显式 kb_index:false、非可检索状态、
     原始来源(source)、分块索引页/指针空壳（防空壳顶替真内容）。"""
@@ -213,13 +325,75 @@ def layer_multiplier(fm, rel: str = "") -> float:
     """按知识层返回排序权重乘数（canon 提升 / raw、空壳降级）。"""
     return float(LAYER_MULTIPLIER.get(kb_layer_of(fm, rel), 1.0))
 
-def is_raw_path(rel) -> bool:
-    """rel 是否位于 raw/ 证据层内（只看顶层目录，避免 `a/raw/b` 误判）。"""
+def _segments(rel):
+    """把相对路径切成小写路径段 —— **先归一分隔符**。
+
+    为什么必须先 `\\` → `/`：`pathlib.PurePosixPath("a\\raw\\b.md")`
+    把整串当成**一个文件名**，于是 `raw` 段永远匹配不到。Windows 传入的
+    相对路径（`str(Path(...).relative_to(...))` 在 Windows 上返回反斜杠）
+    会让下面所有"证据层/系统目录"判定**静默失效**——不报错，只是保护没了。
+    macOS 上盘符是 `:`（HFS 传统路径），只在无 `/` 时才回归，避免误伤
+    正常文件名里的冒号。
+    """
+    if rel is None:
+        return []
     try:
-        parts = [str(x).lower() for x in Path(str(rel)).parts]
-        return bool(parts) and parts[0] == "raw"
+        text = str(rel)
     except (TypeError, ValueError, AttributeError):
-        return False
+        return []
+    if not text:
+        return []
+    if "\\" in text:
+        text = text.replace("\\", "/")
+    elif "/" not in text and len(text) > 2 and text[1] == ":":
+        text = text[0] + "/" + text[2:].replace(":", "/")
+    return [seg.lower() for seg in text.split("/") if seg not in ("", ".")]
+
+
+def is_raw_path(rel) -> bool:
+    """rel 是否位于 raw/ 证据层内 —— **全库唯一的判定实现**（P2-1 统一）。
+
+    语义：**任意层级**出现 `raw` 目录段即算（`raw/a.md`、`x/raw/a.md`、
+    `40-资源库 Resources/raw/a.md` 全部为 True）。
+
+    ## 为什么从「只看顶层」改成「任意层」
+
+    历史上这里有**四份实现、两套语义**，互相注释「与某某同约定」但实际相反：
+
+      · kb_metautil.is_raw_path  —— `parts[0] == "raw"`（只看顶层）
+      · feedback_loop.is_raw_rel —— `"raw" in parts[:-1]`（任意层）
+      · kb_rsi.is_raw            —— `"raw" in parts[:-1]`（任意层）
+      · _research/kb_engine.is_raw_rel —— 同任意层
+
+    实测分歧（2026-10-22）：
+        `20-技术 Technology/raw/a.md`  →  kb_metautil=False，其余三处=True
+
+    后果是**保护范围不一致**：同一篇笔记，`kb clean` 认为它可以改写，
+    `kb feedback` 却拒绝它加权 —— 取决于哪个模块先碰到它。
+
+    选「任意层」而不是「顶层」的理由：`is_raw_path` 的 20 处调用**全是
+    保护性判断**（"这篇不该被清洗/结晶/改标签/进索引"），保护范围应当
+    **宁大勿小**。漏判一个嵌套 `raw/` 就会真的改写证据层原文，而误判一个
+    正常目录只是让那篇笔记少被处理一次。代价不对称，取宽。
+
+    ## 反例：确实需要「只在顶层」时
+
+    用 `is_raw_root(rel)`（本文件同处定义）。目前只有"判断某笔记是否属于
+    证据层顶层分区"这类展示性场景需要，写入守卫一律用本函数。
+    """
+    parts = _segments(rel)
+    # parts[:-1]：文件名本身叫 raw.md 不算证据层
+    return "raw" in parts[:-1]
+
+
+def is_raw_root(rel) -> bool:
+    """rel 是否在 **顶层** `raw/` 分区内（严格版）。
+
+    仅用于需要区分"证据层顶层分区"与"别的目录里恰好叫 raw 的子目录"的
+    展示/统计场景。**写入守卫不要用这个** —— 那是 `is_raw_path` 的职责。
+    """
+    parts = _segments(rel)
+    return bool(parts) and parts[0] == "raw"
 
 # 运行期生成的报告文件（非知识内容）：不入检索 / 不参与补链 / 不再分块
 GENERATED_REPORTS = {

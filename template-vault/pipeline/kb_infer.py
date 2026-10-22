@@ -172,7 +172,11 @@ def infer_domain(rel: str, fm: Dict[str, Any], title: str, body: str) -> str:
 
 def infer_status(rel: str, fm: Dict[str, Any], mtime: float) -> str:
     """推断笔记 status：归档路径 > fm > mtime 年龄。"""
-    if "归档" in rel or "trash" in rel.lower():
+    # 只看**目录段**，不能看整条路径：文件名里带「归档」的治理笔记
+    # （如 `02-SOP-流转归档.md`）曾被误判 archived，导致 clean 后 verify 报
+    # 「非可检索状态」。
+    parts = Path(rel).parts[:-1]
+    if any("归档" in p or "trash" in p.lower() for p in parts):
         return "archived"
     if fm.get("status") in STATUS_SET:
         return fm["status"]
@@ -208,6 +212,13 @@ def base_fm(rel: str, fm: Dict[str, Any], extra: Dict[str, Any]) -> Dict[str, An
     fm.update(extra)
     if isinstance(fm.get("tags"), str):
         fm["tags"] = [t.strip() for t in re.split(r"[,\s]+", fm["tags"]) if t.strip()]
+    # 分块会继承父文档的 importance；越界值必须在写盘前夹紧，
+    # 否则 chunk 文件会带着 importance: 1.5 直接触发 validate 硬错误。
+    if "importance" in fm:
+        try:
+            fm["importance"] = max(0.0, min(1.0, float(fm["importance"])))
+        except (TypeError, ValueError):
+            pass
     return fm
 
 

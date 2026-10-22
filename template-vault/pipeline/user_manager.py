@@ -65,9 +65,12 @@ def cmd_add(args):
         "created": today,
         "inbox": inbox,
     }
-    # 创建用户收件箱目录
+    # 创建用户收件箱目录。空目录会被 healthcheck 当「空目录」报警，
+    # 导致刚 `kb user add` 完 `kb verify` 就变红；放一个 .gitkeep 占位。
     inbox_path = Path(root) / inbox
     inbox_path.mkdir(parents=True, exist_ok=True)
+    if not any(inbox_path.iterdir()):
+        (inbox_path / ".gitkeep").touch()
     save_users(root, data)
     print(f"✅ 用户已添加: {name} (role={role}, inbox={inbox})")
     return 0
@@ -98,8 +101,19 @@ def cmd_remove(args):
     if name == "default":
         print("✗ 不能删除 default 用户")
         return 1
+    inbox = users[name].get("inbox", f"{INBOX_BASE}/{name}")
     del users[name]
     save_users(root, data)
+    # 收件箱只有占位文件时才清掉，避免删除用户后留下空目录。
+    inbox_path = Path(root) / inbox
+    if inbox_path.is_dir():
+        leftovers = [p for p in inbox_path.iterdir() if p.name != ".gitkeep"]
+        if not leftovers:
+            (inbox_path / ".gitkeep").unlink(missing_ok=True)
+            try:
+                inbox_path.rmdir()
+            except OSError:
+                pass
     print(f"✅ 用户已删除: {name}")
     return 0
 
@@ -115,6 +129,8 @@ def cmd_inbox(args):
     inbox = users[name].get("inbox", f"{INBOX_BASE}/{name}")
     inbox_path = Path(root) / inbox
     inbox_path.mkdir(parents=True, exist_ok=True)
+    if not any(inbox_path.iterdir()):
+        (inbox_path / ".gitkeep").touch()
     files = sorted(inbox_path.glob("*.md")) if inbox_path.exists() else []
     print(f"📥 {name} 的收件箱: {inbox}")
     print(f"   待处理: {len(files)} 篇")

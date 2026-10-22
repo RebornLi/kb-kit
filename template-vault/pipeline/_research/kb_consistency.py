@@ -89,8 +89,14 @@ def _endpoint_reachable(timeout=5):
     """轻量可达性预检：只 ping /models（即使 401/403 也算可达）。
     失败（主机不可达/超时）→ False，调用方据此静默跳过 LLM 层。
     目的：避免对可达但 chat 端点极慢的 host 阻塞整次审计。"""
-    url = os.environ.get("ORNITH_BASE_URL", "").strip()
-    key = os.environ.get("ORNITH_API_KEY")
+    # 同样统一走 model_config()（环境变量 > .kb/model.json）
+    try:
+        import kb_config
+        _cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        _cfg = {}
+    url = (_cfg.get("base_url") or os.environ.get("ORNITH_BASE_URL") or "").strip()
+    key = _cfg.get("api_key") or os.environ.get("ORNITH_API_KEY")
     if not key or not url:
         return False
     try:

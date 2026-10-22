@@ -222,11 +222,23 @@ def main():
     ap.add_argument("text", nargs="?", help="要分类的文本（缺省从 stdin 读）")
     ap.add_argument("--signals", default=None, help="信号词配置文件路径")
     ap.add_argument("--quality", action="store_true", help="运行质量门禁")
-    # 兼容插件包装器（SubprocessPlugin 总会注入 --root）；本模块不依赖 vault 根
-    ap.add_argument("--root", default=None, help="vault 根（兼容插件注入，未使用）")
+    # P3-27：这个 --root 以前标注「兼容插件注入，未使用」—— 因为基类总会注入它，
+    # 而本模块确实没读。但"没读"本身是个缺陷：signals 配置的查找只认
+    # `Path(__file__).parents[1]/reference`（= 脚本旁边的模板目录），
+    # 用户在库根自定义过 content-type-signals.json 时不会生效。
+    # 现在让它真正参与：显式 --signals > 库根配置 > 脚本旁模板配置。
+    ap.add_argument("--root", default=None, help="vault 根（优先从这里找 reference/ 配置）")
     args = ap.parse_args()
     text = args.text if args.text else sys.stdin.read()
-    signals_path = args.signals or Path(__file__).resolve().parents[1] / "reference" / "content-type-signals.json"
+    signals_path = args.signals
+    if not signals_path:
+        # 库根的配置优先于脚本旁的模板：用户在库里改过的词表应该赢
+        if args.root:
+            cand = Path(args.root) / "reference" / "content-type-signals.json"
+            if cand.exists():
+                signals_path = str(cand)
+        if not signals_path:
+            signals_path = Path(__file__).resolve().parents[1] / "reference" / "content-type-signals.json"
     if args.quality:
         r = classify_quality(text, signals_path=signals_path)
         print(f"content_type: {r.content_type}")

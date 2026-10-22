@@ -8,7 +8,7 @@ chat_decision / chat_knowledge / chat_todo 笔记。
 
 零依赖（只用 Python 标准库）。
 """
-import csv, json, re
+import csv, json, re, sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -313,6 +313,8 @@ def parse_chat(file_path, platform=None, channel=""):
 def main():
     import argparse, sys
     ap = argparse.ArgumentParser(description="聊天记录解析器")
+    # 插件层统一附加 --root；脚本本身不需要，但必须接受，否则 CLI 路由必失败。
+    ap.add_argument("--root", default=None)
     ap.add_argument("file", help="聊天导出文件路径")
     ap.add_argument("--platform", default=None, help="平台（wechat_work/dingtalk/feishu/slack/generic）")
     ap.add_argument("--channel", default="", help="频道名")

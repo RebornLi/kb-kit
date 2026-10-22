@@ -145,7 +145,7 @@ kb query "怎么备份知识库"
 
 **结构审计与契约**
 - `kb audit [scan | fix [--confirm] | log]`　结构审计（溯源漂移/标签簇内聚/索引一致性/孤儿/死链）；`fix` 需 `--confirm` 才写
-- `kb schema [check [--limit N] [--json] | fields | bitemporal [--apply]]`　知识契约（`reference/kb-schema.json`）只读对照 + 字段使用率；`bitemporal` 为**双时态字段迁移**（`valid_from`/`valid_to`/`recorded_at`/`superseded_by`/`conflict_with`），默认 dry-run，`--apply` 才写、写前自动 checkpoint
+- `kb schema [check [--limit N] [--json] | fields | bitemporal [--apply]]`　知识契约（`reference/kb-schema.json`）只读对照 + 字段使用率；`bitemporal` 为**双时态字段迁移**（`valid_from`/`valid_to`/`recorded_at`/`superseded_by`/`conflicts_with`），默认 dry-run，`--apply` 才写、写前自动 checkpoint
 - `kb tagfix [scan | fix [--apply]]`　标签越界治理（删目录路径型 / 归一别名 / 扩受控词表），默认 dry-run
 
 **置信分与矛盾（人工在环）**
@@ -190,6 +190,11 @@ kb query "怎么备份知识库"
 **研究层（可选，RSI）**
 - `kb rsi [--json] [--verbose]`　RSI 只读探针（改进建议）
 - `kb compile query --query Q | status | apply --all`　查询→知识 正回路（写提案，人工在环）
+- `kb research usage | fitness | drift | scale`　**研究层只读视图**（全部零写操作）
+  - `usage`　真实使用信号：查询成功率 / 再问率（`analyze` / `stats` 可细分）
+  - `fitness`　外部锚定适应度 0–1，含四分量与权重归一化说明
+  - `drift`　晋升漂移度量：内容漂移率 / 出处保留率（`--window day|week|month`、`--decay`）
+  - `scale`　规模档位（flat / indexed）与索引层覆盖率
 
 ---
 
@@ -224,7 +229,7 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
 - **睡眠时整理**：`pipeline/consolidate.py`（四阶段：近重复 / claim 对齐 / 陈旧 / 闸门；签名缓存 +
   阶段落盘，后续运行增量；**只提议不合并**，产物进 `.kb/state/`）。
 - **双时态**：`valid_from`/`valid_to`（事件时间）+ `recorded_at`（事务时间）；更新用
-  `superseded_by`/`conflict_with` **标记而非删除**（`kb schema bitemporal --apply` 迁移）。
+  `superseded_by`/`conflicts_with` **标记而非删除**（`kb schema bitemporal --apply` 迁移）。
 - **知识结晶**：`pipeline/curate.py`（**空闲本地 Agent** 把日志/碎片炼成结论优先的正典）。
   Agent 输出结构化 JSON（`verdict/title/sections/facts/sources/confidence`），代码守三关：
   **接地关**（`facts` 逐条回原文核对，未接地一律丢弃）、**信息守恒关**（正典/原文长度比落在
@@ -247,16 +252,17 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
 - **安装引擎**：`create_vault.py`（复制模板 → 接线 Agent → demo 建索引 → git → 全局 `kb`
   → 首页/快捷卡兜底 → 自检）。
 
-> **研究层**：`pipeline/` 下另有一批 RSI/反馈阶梯模块（`kb_engine`、`kb_l4/l5`、`kb_meta`、
-> `kb_selfweight`、`kb_claim`、`kb_usage` 等）。它们只有 `kb_rsi` / `kb_query` 暴露了 CLI
-> 入口，其余作为内部研究层，由 `tests/test_reachability.py` 显式登记与管理。
+> **研究层**：`pipeline/_research/` 下有一批 RSI/反馈阶梯模块（18 个，约 6900 行）。
+> 其中 **零写操作** 的四个已通过 `kb research` 暴露只读视图（usage / fitness / drift / scale）；
+> 会写盘的（`kb_calibrate`、`kb_contradiction`、`kb_ingest`、`kb_usage mark`）刻意不暴露，
+> 需经 `ladder` / `adjudicate` 等人工在环路径调用。可达性由 `tests/test_reachability.py` 守卫。
 
 ### 插件清单（`kb list`）
 
-实测 **44 个**：4 个 Agent 适配器 + 40 个 KB 模块。新增插件放进 `pipeline/plugins/` 即被发现。
+实测 **45 个**：4 个 Agent 适配器 + 41 个 KB 模块。新增插件放进 `pipeline/plugins/` 即被发现。
 
 - **Agent 适配器（4）**：`agent_registry`、`agent_json`、`agent_md`、`agent_sqlite`
-- **KB 模块（40）**：
+- **KB 模块（41）**：
   - 检索与索引：`rag`、`rerank`、`semantic_chunk`、`contextual`
   - 摄入与清洗：`intake`、`clean`、`classify`、`ingest_chat`、`ingest_convert`、`sync`
   - 记忆与图谱：`memory_sync`、`graph`、`link`
@@ -269,6 +275,7 @@ kb / kb.cmd ──► pipeline/kb_launcher.py ──► PluginRegistry ──►
   - 域聚合（P2-1 试点）：`ops`（备份/同步/巡检/度量/仪表盘/审计/评测/验收/用户管理 的统一路由，与上述原名单手并存）
   - 域聚合（P2-1 第二期）：`retrieval`（检索域）、`crystallization`（结晶域）、`ingestion`（摄入域）、`organization`（整理域）
     —— 每域一个复合键入口（如 `kb retrieval rag.query`），与原名单手并存；**原插件名与 action 名未改，CLI 契约不变**
+  - 研究层只读视图（P2-3）：`research`（`kb research usage|fitness|drift|scale`，全部零写操作；会写盘的模块刻意不暴露，见上「研究层」段）
 
 > 该清单由注册中心实测得出；`tests/test_readme_plugin_list.py` 会比对 README 与实际
 > 插件，防止再次漂移。
@@ -325,7 +332,7 @@ kb-kit/
 | `valid_from` / `valid_to` | 可选 | 双时态**事件时间**（内容何时为真）；`kb schema bitemporal` 迁移生成 |
 | `recorded_at` | 可选 | 双时态**事务时间**（何时记入知识库） |
 | `superseded_by` | 可选 | 被哪篇取代（更新不删，标记追踪） |
-| `conflict_with` | 可选 | 与哪篇矛盾（冲突显式化） |
+| `conflicts_with` | 可选 | 与哪篇矛盾（冲突显式化；`kb contradict apply` 写入。旧名 `conflict_with` 已废弃） |
 | `source_tier` | 可选 | 来源分级 1–5（official/spec=1 … 低可信=5），门禁用 |
 | `derived` | 可选 | `true` 表示 LLM 生成物，须带非 LLM 来源指针（回灌防护） |
 | `generated_by` | 可选 | 生成方（如 `kb-curate`），审计溯源用 |

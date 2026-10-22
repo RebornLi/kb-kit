@@ -19,7 +19,8 @@
 # ============================================================
 set -uo pipefail
 
-VAULT="${1:-${KB_ROOT:-/home/mushan/kb-kit-pure}}"
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+VAULT="${1:-${KB_ROOT:-$SELF_DIR/..}}"
 PY="${PYTHON:-python3}"
 CONSOLIDATE_ENABLE="${CONSOLIDATE_ENABLE:-1}"
 CONSOLIDATE_MAX_LOAD="${CONSOLIDATE_MAX_LOAD:-4.0}"

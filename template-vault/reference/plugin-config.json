@@ -1,7 +1,7 @@
 {
   "_meta": {
     "version": 2,
-    "description": "插件启用/禁用配置（44 个插件全覆盖：原 39 + 5 个域聚合）"
+    "description": "插件启用/禁用配置（45 个插件全覆盖：原 39 + 6 个域聚合/研究层）"
   },
   "rag": {
     "enabled": true,
@@ -178,5 +178,9 @@
   "organization": {
     "enabled": true,
     "description": "整理域聚合入口：清洗/契约/补链/标签/分类/图谱/分块/校验（P2-1 第二期，与原名单手并存）"
+  },
+  "research": {
+    "enabled": true,
+    "description": "研究层只读视图入口：usage/fitness/drift/scale（P2-3，全部零写操作）"
   }
 }

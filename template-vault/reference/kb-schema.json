@@ -231,7 +231,7 @@
     "conflicts_with": {
       "type": "list",
       "required": false,
-      "note": "P3 矛盾在环"
+      "note": "与本条目冲突的其他笔记路径（`kb contradict apply` 写入）。两条都保留，冲突交人工/L4 裁决。 历史别名 `conflict_with` 已废弃——见 _aliases。"
     },
     "superseded_by": {
       "type": "path",
@@ -317,8 +317,9 @@
     "conflict_with": {
       "type": "list",
       "required": false,
-      "_maturity": "aspirational",
-      "note": "与本条目冲突的其他笔记路径；两条都保留，冲突交人工/L4 裁决。"
+      "_maturity": "deprecated",
+      "_alias_of": "conflicts_with",
+      "note": "**已废弃**：曾是 aspirational 字段，从未有代码写入；`kb contradict` 实际写 `conflicts_with`。 保留此声明仅为让 `kb schema check` 对存量笔记里的旧字段名不报越界。 新笔记请用 `conflicts_with`。"
     },
     "source_tier": {
       "type": "enum",
@@ -389,7 +390,7 @@
     "archive_after_days": 90
   },
   "bitemporal": {
-    "_note": "时间语义约定（2025–2026 时序知识图谱研究的核心结论）：\n  · valid_from/valid_to = **事件时间**（这条知识在世界上何时成立）\n  · recorded_at        = **事务时间**（我们何时得知）\n  · 两者分离才能区分「事实随时间变化」（时序更新，不是矛盾）与\n    「同一时刻的两个冲突说法」（矛盾）。\n  · 冲突处理一律 **标记 + 保留**，绝不物理删除：`superseded_by` / `conflict_with`。"
+    "_note": "时间语义约定（2025–2026 时序知识图谱研究的核心结论）：\n  · valid_from/valid_to = **事件时间**（这条知识在世界上何时成立）\n  · recorded_at        = **事务时间**（我们何时得知）\n  · 两者分离才能区分「事实随时间变化」（时序更新，不是矛盾）与\n    「同一时刻的两个冲突说法」（矛盾）。\n  · 冲突处理一律 **标记 + 保留**，绝不物理删除：`superseded_by` / `conflicts_with`。"
   },
   "gate": {
     "_note": "写入前质量门禁三态（pipeline/gate.py，`kb gate check`）：\n  pass       正常入库\n  quarantine 入库但标记 + 降权 + 进复核队列（噪声嫌疑）\n  reject     **只用于不变量**：无可追溯来源的编译产物 / 缺必填字段 / 空正文或纯占位符\n取舍依据：个人库里误拒不可恢复，误收可用降权挽回 —— 所以除不变量外一律不拒。\n回灌防护：2025 年中约 35% 新网页为 AI 生成，AI 文本语义相似度高 33%（'语义收缩'）；\n  derived 内容必须挂非 LLM source_ref，且 tier=5 默认降权。"

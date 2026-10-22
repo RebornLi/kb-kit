@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# 注意：精确去重/结构化归一已部分由 RSI 引擎（kb_rsi/kb_engine，内部研究层）接管；
-#   但 chunk（分块）与清洗仍是 `kb clean` 的正式入口，文档将其列为治理命令。
+# 注意：精确去重/结构化归一**由本模块与 RSI 引擎分工**（不是被取代）；
+#   chunk（分块）与清洗仍是 `kb clean` 的正式入口，文档将其列为治理命令。
 #   本模块部分函数（aggregate_bucket/fmt_value）仍被 memory_sync/memory_ingest 复用。
 # ============================================================
 # clean.py —— 知识库清洗（方案 v4.0 §3 + §5 最佳实践落地）
@@ -13,11 +13,20 @@
 #   created+updated(优先原日期/回退ctime) / importance(默认0.5)/保留原附加字段 /
 #   kb_target(当前分区) / kb_action(归档→retire 否则 new) / kb_summary(首句)
 # 建议顺序：先 --apply（结构化）再 --chunk（分块）。
-# ── SUPERSEDED（2026-09-20 用户决定）──
-#   本文件已被 RSI 引擎取代：精确去重/结构化归一由 kb_rsi（dups 指标 + T1 收敛提议）/
-#   kb_engine --run t1 接管。今后 kb-kit 清洗/收敛动作默认走 RSI CLI，不再直接调本文件 CLI。
-#   保留原因：aggregate_bucket/fmt_value 等函数仍被 memory_sync.py / memory_ingest.py 摄入路径
-#   import 复用，故不删，仅标 superseded 停用。要彻底移除需先解耦上述 import。
+#
+# ── 状态说明（2026-10-22 P2-4 修正）──
+#   这里**曾经**标注为"已被 RSI 引擎取代、不再直接调本文件 CLI"（2026-09-20）。
+#   该标记与事实不符，已移除，理由是实测核对：
+#     · `kb clean` 的 8 个动作（dry-run/apply/report/chunk/refine/taxonomy/
+#       repair/repair-headings）全部经 `organization_plugin._ROUTES` 路由到本文件；
+#     · `clean.refine` 是 README/quickstart 都推荐的「一条龙整理」入口；
+#     · `aggregate_bucket` / `fmt_value` / `fmt_value` 仍被 memory_sync /
+#       memory_ingest 的摄入路径 import。
+#   也就是说：本模块是**活跃的生产入口**，不是待删除的遗留。
+#   与 RSI 的真实关系是**分工**：kb_engine T1 做"提议式"收敛（只产提议、
+#   人工在环），本模块做"显式调用式"清洗（用户敲 `kb clean` 才执行）。
+#   两者语义不同，不能互相替代 —— 标成 superseded 会让读代码的人以为可以删。
+#
 # 用法:
 #   python3 pipeline/clean.py --dry-run
 #   python3 pipeline/clean.py --apply
@@ -133,7 +142,9 @@ def _parse_importance(v):
         m = re.search(r"[-+]?\d*\.?\d+", str(v))
     except TypeError:
         return 0.5
-    return float(m.group()) if m else 0.5
+    # importance 的契约是 0–1；夹紧越界值，避免 clean/chunk 把 1.5 原样写回，
+    # 造成「清洗完成后 validate 反而报硬错误」。
+    return max(0.0, min(1.0, float(m.group()))) if m else 0.5
 
 
 def git(args: List[str], cwd: str) -> Any:
@@ -200,7 +211,9 @@ def clean_note(root: Union[str, Path], p: Path) -> Tuple[str, str]:
     domain = infer_domain(rel, fm, title, body)
     status = infer_status(rel, fm, mtime)
     importance = _parse_importance(fm.get("importance"))
-    is_archive = ("归档" in rel) or ("trash" in rel.lower())
+    # 同 infer_status：只认目录段。文件名里含「归档」的治理笔记不是归档笔记。
+    _parts = Path(rel).parts[:-1]
+    is_archive = any("归档" in p or "trash" in p.lower() for p in _parts)
     # 空值键（`url:` / `note:` 这类有意占位）必须原样保留：以前用 `v is not None` 过滤，
     # 会把它们永久删除（P0-2）。渲染时 None 写成 `key:`，不写成 `key: None`。
     extras = {k: v for k, v in fm.items() if k not in REQUIRED}

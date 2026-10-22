@@ -1,21 +1,37 @@
 #!/usr/bin/env python3
-# ⚠️ DEPRECATED — 本模块已由 RSI 引擎替代
-# 替代方案: kb sync → kb_engine.py (T1/T2/T3 编排) / kb_rsi.py
-# 保留原因: 向后兼容旧 CLI 调用和回滚/摄入兼容链路
-# 迁移指引: 使用 `kb engine` 命令（通过 kb_launcher.py 路由到 RSI 引擎）
 # ============================================================
-# sync.py —— 知识同步管道（方案 v4.0 §5）幂等 / dry-run / 回滚
+# sync.py —— 知识同步管道（方案 v4.0 §5）幂等 / dry-run / 回滚 / 统一摄取
 #   流程: 写前 checkpoint commit → 校验(硬错误即中止) → 路由写入 → 提交
 # 用法:
-#   python3 pipeline/sync.py dry-run   [--root R] [--allow-existing-issues]
-#   python3 pipeline/sync.py apply     [--root R] <note.md> [--allow-existing-issues]
-#   python3 pipeline/sync.py rollback  [--root R] [--no-purge]
-#   python3 pipeline/sync.py history  [--root R]
+#   python3 pipeline/sync.py dry-run    [--root R] [--allow-existing-issues]
+#   python3 pipeline/sync.py apply      [--root R] <note.md> [--allow-existing-issues]
+#   python3 pipeline/sync.py rollback   [--root R] [--no-purge]
+#   python3 pipeline/sync.py history    [--root R]
+#   python3 pipeline/sync.py ingest-any [--root R] <file> [--author A]
 # ============================================================
-# ── SUPERSEDED（2026-09-20 用户决定）──
-#   本文件已被 RSI 引擎取代：知识同步/校验/收敛由 kb_engine（T1/T2/T3 编排）/ kb_rsi 接管。
-#   今后 kb-kit 同步动作默认走 RSI CLI，不再直接调本文件 CLI。保留原因：既有调用方（如 sync.py
-#   内部 import clean、回滚/摄入兼容链路）仍需其函数，故不删，仅标 superseded 停用。
+# ── 状态说明（2026-10-22 P2-4 修正）──
+#   本文件**曾**同时标着两处互相矛盾的"已废弃"标记：
+#     · 顶部说本模块已被 RSI 引擎替代，并让用户改用某个**根本不存在的**
+#       `engine` 子命令；
+#     · 中段说本文件 CLI 已被取代、不应再直接调用。
+#   两者都与事实不符，已删除，理由是实测核对：
+#     1. **`kb engine` 命令根本不存在** —— COMPAT_MAP 里没有任何 `engine` 条目，
+#        敲 `kb engine` 得到的是「❓ 未知命令」。让用户迁移到一个不存在的命令，
+#        比没有迁移指引更糟。
+#     2. `kb sync` 的 5 个动作（dry-run / apply / rollback / history / ingest-any）
+#        全部经 `ops_plugin._ROUTES` 主动路由到本文件，是**活跃生产入口**。
+#     3. `kb ingest-any <文件>` 是 README「统一摄取入口」，实现在本文件
+#        （`cmd_ingest_any`：归一化 → 分类 → 质量门 → 路由 → 写入 → 标相关）。
+#
+#   与 RSI 的真实关系：`_research/kb_engine.py` 是**编排实验代码**（T1/T2/T3，
+#   默认只提议、需 --auto 才写），没有对用户暴露的 CLI 入口；本文件是
+#   **生产同步与摄取管道**。两者不是替代关系。
+#
+#   若将来真要让 kb_engine 接管，正确顺序是：
+#     ① 先给 kb_engine 加 COMPAT_MAP 入口并跑通；
+#     ② 再把本文件的 CLI 标为废弃并给出**可执行**的迁移指引。
+#   ——反过来先标废弃，等于凭空制造一个"用户没法照做"的指引。
+# ============================================================
 import argparse, os, sys, json, shutil, subprocess, datetime
 from pathlib import Path
 
@@ -52,7 +68,11 @@ def checkpoint(root):
     sub(["add", "-u"], root)
     sub(["commit", "-q", "-m", f"pre-write checkpoint @ {datetime.datetime.now():%F %T}"], root)
     ck = sub(["rev-parse", "HEAD"], root).stdout.strip()
-    (Path(root) / CKPT_FILE).write_text(ck, encoding="utf-8")
+    # 新库可能还没有 logs/（安装只建 .kb/ 等运行态目录）；这里补建，
+    # 否则 `kb sync apply` 会在写 checkpoint 时 FileNotFoundError 崩溃。
+    ckpt = Path(root) / CKPT_FILE
+    ckpt.parent.mkdir(parents=True, exist_ok=True)
+    ckpt.write_text(ck, encoding="utf-8")
     return ck
 
 

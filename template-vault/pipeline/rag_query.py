@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 from kb_io import load_meta
 from kb_metautil import LAYER_MULTIPLIER, is_index_stub, is_stale, retrievable_status
 from kb_text import count_tokens, tokenize
+import kb_config
 from rag_index import (
     IDX_DIR, IDX_VERSION, index_file, load_index, strip_body, all_doc_vectors,
 )
@@ -274,7 +275,8 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
               date_from: Optional[str] = None, date_to: Optional[str] = None,
               exclude_stale: bool = False,
               include_raw: bool = False, include_stubs: bool = False,
-              no_record: bool = False) -> int:
+              no_record: bool = False,
+              strict_fresh: bool = False) -> int:
     t0 = time.time()
     # 是否记录使用信号。评测/探针（kb eval、kb_adaptretrieve、对照实验）必须关掉：
     # 它们用 rag query 当 oracle，若照常写 agent_hits，一小时内的重跑会把再问率顶到 1、
@@ -331,6 +333,29 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
         else:
             print("✗ 索引不存在，先跑: rag.py index", file=sys.stderr)
         return 2
+
+    # P1-4：索引**新鲜度**检测。上面的 `payload is None` 只覆盖"索引文件没了"，
+    # 覆盖不了"索引在、但笔记已改/已增/已删而没重建"——那种情况下旧实现
+    # 照常 return 0，调用方无法区分"查到了"与"拿的是过期答案"。
+    # 实测：新增一篇高度相关笔记后 `kb query` 搜不到它，退出码仍是 0。
+    #
+    # 默认只警告（保持向后兼容：大量脚本/Agent 依赖 query 返回 0）；
+    # 显式 `--strict-fresh` 时以退出码 3 报告"答案是旧的"。
+    fresh = None
+    if strict_fresh or not as_json:
+        try:
+            from kb_metautil import index_freshness
+            fresh = index_freshness(Path(root), payload)
+        except Exception:
+            fresh = None      # 检测本身失败不该影响查询
+    if fresh is not None and fresh.get("stale"):
+        _stale_msg = (f"⚠️ 索引可能过期：{fresh.get('reason')} —— "
+                      f"建议跑 `kb rag index` 重建后重查")
+        if as_json:
+            # JSON 消费者按字段判断，不依赖人读警告
+            pass
+        else:
+            print(_stale_msg, file=sys.stderr)
     if ver < IDX_VERSION:
         if not as_json:
             print(f"⚠️ 索引格式旧（version {ver} < {IDX_VERSION}），建议跑 `rag.py index` 重建；当前仍可查询。", file=sys.stderr)
@@ -557,6 +582,15 @@ def cmd_query(root: Union[str, Path], q: str, top: int, answer: bool, as_json: b
             hit_list_for_record.append(_build_hit(rel, sc, fm, body, q, context))
         _record_hits(q, hit_list_for_record, session, root)
 
+    # P1-4：strict_fresh 时把"索引过期"升格为退出码 3。
+    # 查询本身是成功的（结果已打印），所以用 3 而不是 1/2 ——
+    # 1 保留给参数/运行错误，2 是索引缺失，3 专指"答案可能过期"。
+    if strict_fresh and fresh is not None and fresh.get("stale"):
+        if as_json:
+            print(json.dumps({"stale_index": True, "reason": fresh.get("reason"),
+                              "query": q}, ensure_ascii=False))
+        return 3
+
     return 0
 
 # ── 同义词扩展（FR-3.2.4 + FR-3.2.5）────────────────────────
@@ -598,7 +632,8 @@ def _expand_query(q):
     """
     # **默认关闭**：受控实测 canon@K 88.7% → 88.3%、top3 70% → 67%（轻微负增益）。
     #   机理：双向扩展把大量同义表述塞进查询，等于给查询加了噪声——
-    #   而自指问题的痛点已由 docs/concepts.md（集中定义）解决，不靠扩展。
+    #   自指类问题的痛点靠**集中定义概念**解决，不靠查询扩展。
+    #   （原注释指向 docs/concepts.md，该文件已不在仓内，此处改为陈述结论本身。）
     if os.environ.get("KB_SYNONYM_EXPAND", "0") != "1":
         # P6：可选 **LLM 查询改写**（KB_QUERY_EXPAND=llm）
         #   实测 30 题：canon@K 91.3% → **95.3%**（top1 100% 不降 / top3 90% 不降）
@@ -699,28 +734,44 @@ def llm_answer(root: Union[str, Path], q: str, hits: List[Tuple[str, float]]) ->
         (None, "提示")   → 配置不全或端点不可达，给出精准指引（让用户知道缺什么/怎么修）
         (答案, "")      → 成功作答
     """
-    key = os.environ.get("ORNITH_API_KEY")
-    # vLLM 地址必须通过环境变量 ORNITH_BASE_URL 显式指定，绝不连写死的 LAN 地址。
-    url = os.environ.get("ORNITH_BASE_URL", "").strip()
+    # 配置统一走 kb_config.model_config()：环境变量 > .kb/model.json。
+    # 以前只读环境变量，用户在库内 .kb/model.json 配好的端点/KEY/模型名全部不生效；
+    # 且模型名硬编码 "ornith1.5-35b" —— 用户起的是别的模型时 vLLM 返回 404，
+    # 而旧代码把 404 也报成"连接失败"，误导人去查网络而不是查模型名。
+    try:
+        cfg = kb_config.model_config(root)
+    except Exception:               # noqa: BLE001  配置读取失败不该阻断作答降级
+        cfg = {}
+    key = cfg.get("api_key") or os.environ.get("ORNITH_API_KEY")
+    # vLLM 地址必须显式指定，绝不连写死的 LAN 地址。
+    url = (cfg.get("base_url") or os.environ.get("ORNITH_BASE_URL") or "").strip()
+    model = (cfg.get("chat_model") or os.environ.get("ORNITH_CHAT_MODEL")
+             or "ornith1.5-35b")
     if not key and not url:
         return None, ""                                          # 都没配：信息级
     if not url:
-        return None, ("检测到 ORNITH_API_KEY 但未设 ORNITH_BASE_URL，无法调用模型；"
-                      "请 export ORNITH_BASE_URL=http://<vllm>/v1"
-                      "（Windows：set ORNITH_BASE_URL=<url>），或用检索片段作答。")
+        return None, ("检测到 API KEY 但未设模型地址，无法调用模型；"
+                      "请设 ORNITH_BASE_URL=http://<vllm>/v1，"
+                      "或在 .kb/model.json 里配 base_url，或用检索片段作答。")
     if not key:
-        return None, ("已设 ORNITH_BASE_URL 但缺 ORNITH_API_KEY，无法认证；"
-                      "请 export ORNITH_API_KEY=…（Windows：set ORNITH_API_KEY=…），或用检索片段作答。")
+        return None, ("已设模型地址但缺 API KEY，无法认证；"
+                      "请设 ORNITH_API_KEY=…，或在 .kb/model.json 里配 api_key，"
+                      "或用检索片段作答。")
     try:
         import urllib.request
         ctx = "\n".join(f"[{r}] {best_sentence((Path(root)/r).read_text(encoding='utf-8'),q)}" for r,_ in hits)
         msgs = [{"role":"system","content":"你是知识库助手，仅依据下方资料回答。"},
                  {"role":"user","content":f"资料:\n{ctx}\n\n问题：{q}"}]
         req = urllib.request.Request(url.rstrip("/") + "/chat/completions", data=json.dumps(
-            {"model":"ornith1.5-35b","messages":msgs,"temperature":0.2}).encode(),
+            {"model":model,"messages":msgs,"temperature":0.2,
+             # 推理型模型（nemotron / ornith 系）会先产出 600–1400 token 的
+             # reasoning_content，它占用 completion 预算。不给 max_tokens 时
+             # 服务端默认值常把 content 挤成空 —— 实测表现为"能连通却没答案"。
+             "max_tokens":3000}).encode(),
             headers={"authorization":f"Bearer {key}","content-type":"application/json"})
-        content = json.loads(urllib.request.urlopen(req,timeout=40).read())["choices"][0]["message"]["content"]
+        content = json.loads(urllib.request.urlopen(req,timeout=60).read())["choices"][0]["message"]["content"]
         return content, ""
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
-        return None, (f"连接 ORNITH 端点 {url} 失败（{e}）；请检查 ORNITH_BASE_URL 是否可访问，"
-                      "已返回检索片段作为答案。")
+        return None, (f"调用模型 {model} @ {url} 失败（{e}）；"
+                      f"请检查地址与模型名是否匹配（vLLM 的 --served-model-name），"
+                      f"已返回检索片段作为答案。")

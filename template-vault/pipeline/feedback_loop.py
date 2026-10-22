@@ -367,12 +367,15 @@ def _today():
 
 # ── P0-1: raw/ 不可变层硬隔离守卫 ─────────────────────────
 def is_raw_rel(rel: str) -> bool:
-    """rel 是否在 raw/ 下（不可变外部源）。与 kb_engine/kb_rsi 同约定。"""
-    try:
-        parts = [str(x).lower() for x in Path(rel).parts]
-    except (TypeError, ValueError, AttributeError):
-        return False
-    return "raw" in parts[:-1]
+    """rel 是否在 raw/ 下（不可变外部源）。
+
+    P2-1：**委托 `kb_metautil.is_raw_path`**（全库唯一实现）。
+    此前这里有第二份实现（`"raw" in parts[:-1]`），与 kb_metautil 的
+    「只看顶层」语义相反，导致同一篇笔记在 clean 与 feedback 里得到
+    不同结论。现在统一口径，保留本函数名仅为兼容既有调用方。
+    """
+    from kb_metautil import is_raw_path
+    return is_raw_path(rel)
 
 
 def _is_raw_path(p):

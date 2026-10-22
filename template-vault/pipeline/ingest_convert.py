@@ -10,7 +10,7 @@
   - 不认识格式不崩溃，存镜像 + 标记 convert_needed: true
   - 任何异常都不崩溃
 """
-import csv, json, re, shutil, subprocess
+import csv, json, re, shutil, subprocess, sys
 from dataclasses import dataclass
 from pathlib import Path
 from html.parser import HTMLParser
@@ -325,6 +325,8 @@ def convert(file_path, mirror_dir):
 def main():
     import argparse, sys
     ap = argparse.ArgumentParser(description="格式归一化器")
+    # 插件层统一附加 --root；脚本本身不需要，但必须接受，否则 CLI 路由必失败。
+    ap.add_argument("--root", default=None)
     ap.add_argument("file", help="要转换的文件路径")
     ap.add_argument("--mirror-dir", default=None, help="镜像目录")
     args = ap.parse_args()

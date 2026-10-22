@@ -282,6 +282,8 @@ def chunk(body, parent_path, chunk_size=2000, overlap=500):
 def main():
     import argparse, sys
     ap = argparse.ArgumentParser(description="语义分块器")
+    # 插件层统一附加 --root；本脚本只按文件路径工作，但必须接受该参数。
+    ap.add_argument("--root", default=None)
     ap.add_argument("file", help="要分块的文件路径")
     ap.add_argument("--chunk-size", type=int, default=2000)
     ap.add_argument("--overlap", type=int, default=500)

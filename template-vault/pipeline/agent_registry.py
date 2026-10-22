@@ -420,7 +420,9 @@ def _ingest_session(root, aname, srcs, dry_run, out):
 
 def main():
     ap = argparse.ArgumentParser(description="多 agent 记忆摄取注册表")
-    sub = ap.add_parser("sub") if False else ap
+    # P3-29：曾写 `sub = ap.add_parser("sub") if False else ap` ——
+    # `if False` 是永久死亡分支，只会让读者以为还有一层 "sub" 子命令组。
+    # 实际结构就是一组平铺的子命令，直接写清楚。
     sub = ap.add_subparsers(dest="cmd", required=True)
     P = {}
     for c in ("detect", "list", "setup", "ingest", "add", "enable"):

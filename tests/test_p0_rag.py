@@ -185,7 +185,10 @@ class FastCosineTest(unittest.TestCase):
         old = dict(self.payload)
         for k in drop:
             old.pop(k, None)
-        (d / "df_idf.json").write_text(json.dumps(old, ensure_ascii=False), encoding="utf-8")
+        # v8 的 dense 向量是 array('f')，JSON 不认识；旧格式里这些向量本来就是
+        # 普通 list，用 default=list 模拟旧序列化即可。
+        (d / "df_idf.json").write_text(
+            json.dumps(old, ensure_ascii=False, default=list), encoding="utf-8")
         (d / "df_idf.pkl").unlink(missing_ok=True)
 
     def test_fast_and_fallback_cosine_agree_numerically(self):

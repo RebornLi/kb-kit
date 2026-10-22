@@ -13,14 +13,69 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 # ── vault 根默认值（所有模块共用）────────────────────────────
 ROOT_DEFAULT = os.environ.get("KB_ROOT") or str(Path(__file__).resolve().parents[1])
 
-# ── os.walk 排除集合（与其他 pipeline 模块保持一致）──────────
+# ── 遍历与"系统文件"排除（P2-2：全库唯一定义）──────────────
+#
+# 历史上这里有**三套**集合，元素不同、语义也不同：
+#   · kb_io.EXCLUDE                 —— os.walk 剪枝（按**目录名精确匹配**）
+#   · kb-healthcheck.SYSTEM_HINTS   —— 内容层判定（按**子串匹配**）
+#   · kb_audit._SYS                 —— 与上面的内容逐字相同，但按**路径段匹配**
+#
+# 后果（kb_audit.py 的原注释记录）：「曾出现 healthcheck=0 / audit=46 的
+# 相反结论，根因是排除集不同却没写明。」修过一次，但**没有收敛到单一常量**，
+# 下次新增目录仍会分叉。
+#
+# 现在拆成两个语义清晰、职责不重叠的常量：
+#   EXCLUDE         遍历层：os.walk 遇到这些**目录名**就不进去
+#   SYSTEM_SEGMENTS 内容层：已经遍历到的文件，若**路径段**命中就不算知识笔记
+
 EXCLUDE = {".git", "backups", "logs", "vector index", "pipeline", "_SELF_OPT",
            ".obsidian", "__pycache__", ".pytest_cache", ".agents", ".trash", ".codeartsdoer",
-           "_curate",
+           "_curate", "_audit",
+           # `_trash` 是归档垃圾桶（intake trash / clean 去重的旧份）。
+           # 它可能装着没有 frontmatter 的原始输入；若参与遍历，`kb validate`
+           # 会把垃圾当笔记报硬错误，`kb rag index` 还会把垃圾索引进检索结果。
+           "_trash",
            # `.kb` 是**运行态目录**（状态文件 + 报告），永远不是笔记。
            # 漏排的实测后果：consolidate 把报告写成 `.kb/state/consolidate_report.md` 后，
            # `kb validate` 把它当笔记扫进去 → 报「缺少 frontmatter」硬错误。
            ".kb"}
+
+# 内容层的"系统/特殊目录"：位于这些顶层分区里的文件不参与
+# 死链/骨架/标签/孤儿/颗粒度等**知识笔记**巡检。
+#   memory/    Agent 记忆镜像（待晋升，不是知识正文）
+#   reference/ 参考与契约（核心文件镜像、项目上下文）
+#   raw/       证据层（抓取物 + 保号原文），天生无出链、非字数受控对象
+#   docs/      人写的交付文档（报告/手册），本来就长，分块会毁可读性
+#   scripts/ main/ media/ 工程与媒体资源
+#   点开头的（.git/.obsidian/.openclaw/.venvo/.trash）是工具运行时态
+SYSTEM_SEGMENTS = frozenset({
+    "memory", "reference", "main", "media", "raw", "docs", "scripts",
+    ".git", ".obsidian", ".openclaw", ".venvo", ".trash", "_trash", "_audit",
+})
+
+
+def is_system_path(rel) -> bool:
+    """rel 是否是"系统/特殊目录"下的文件（**不属于知识笔记**）。
+
+    P2-2 唯一实现。**按路径段精确匹配**，不做子串匹配 ——
+    子串匹配会误伤 `mydocs/a.md`（被 `docs/` 子串命中）和
+    `a.venvo/b.md`（被 `.venvo` 子串命中），实测两者都会从巡检里消失。
+    """
+    if rel is None:
+        return False
+    try:
+        text = str(rel)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    if not text:
+        return False
+    # 先归一分隔符：Windows 反斜杠不归一会让整串变成一个"文件名"，
+    # 系统目录判定静默全部失效（同 kb_metautil._segments 的理由）。
+    if "\\" in text:
+        text = text.replace("\\", "/")
+    parts = [seg.lower() for seg in text.split("/") if seg not in ("", ".")]
+    return any(p in SYSTEM_SEGMENTS for p in parts[:-1]) or (
+        bool(parts) and parts[0] in SYSTEM_SEGMENTS)
 
 # ── frontmatter 边界正则 ────────────────────────────────────
 FM = re.compile(r"^---\s*$", re.M)

@@ -23,10 +23,18 @@ STATE_FILE = "memory_ingest_state.json"
 
 
 def _domain(content):
+    """从正文猜 domain，**结果保证合法**（P0-3）。
+
+    以前这里用自己的主题词表，产出 `AI与LLM` / `基础设施` / `测试` 等
+    **不在 `DOMAIN_WHITELIST` 内的值**，导致 `kb validate` 报硬错误、
+    `kb verify` 的笔记校验项变红。现在统一走 `memory_ingest.normalize_domain()`
+    （所有记忆适配器的唯一 domain 出口），非法值归一到「综合」。
+    """
+    from memory_ingest import normalize_domain
     for d in ("AI与LLM", "运维", "安全", "开发", "测试", "产品", "数据", "基础设施"):
         if d in content:
-            return d
-    return "综合"
+            return normalize_domain(d)
+    return normalize_domain(None)
 
 
 def _kb_target(content):
@@ -38,15 +46,18 @@ def _kb_target(content):
     if "决策" in content or "decision" in content.lower():
         return "30-决策日志 Decisions/决策记录.md"
     # 技术域 -> 20-技术 Technology/<子域>/<子域>.md
+    # P0-3：submap 的 key 以前是**旧主题词表**（AI与LLM/基础设施/测试），与
+    # DOMAIN_WHITELIST 不一致；现已改为白名单值，避免目录名与 domain 字段分叉。
     submap = {"运维": "部署运维", "安全": "安全", "开发": "AI与LLM",
-              "测试": "测试", "基础设施": "基础设施", "数据": "数据库"}
+              "产品": "综合", "管理": "综合", "综合": "综合", "数据": "数据库"}
     sub = submap.get(dom, "综合")
     return f"20-技术 Technology/{sub}/{sub}.md"
 
 
 def _folder(d):
+    """子目录名（与 _kb_target 的 submap 同口径，P0-3 起 key 为白名单值）。"""
     return {"运维": "部署运维", "安全": "安全", "开发": "AI与LLM",
-            "测试": "测试", "基础设施": "基础设施"}.get(d, "综合")
+            "产品": "综合", "管理": "综合", "综合": "综合", "数据": "数据库"}.get(d, "综合")
 
 
 def _safe_kb_path(root, target):
@@ -147,7 +158,9 @@ def ingest(root, json_path, dry_run=False):
 
 def _imp(v):
     try:
-        return round(float(v) / 2.0, 2)  # DSH 的 0/1/2 -> 0.0/0.5/1.0
+        # DSH 的 0/1/2 -> 0.0/0.5/1.0。实测源数据会出现 3（越界），
+        # 不夹紧就会写出 importance: 1.5，触发 `kb validate` 硬错误。
+        return max(0.0, min(1.0, round(float(v) / 2.0, 2)))
     except (TypeError, ValueError):
         return 0.6
 

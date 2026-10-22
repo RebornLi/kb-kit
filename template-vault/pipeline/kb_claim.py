@@ -34,7 +34,17 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 from kb_text import CJK
 
 CLAIMS_FILE = "claims.json"           # 存于 .kb/state/claims.json（StateStore）
-CHAT_MODEL = os.environ.get("ORNITH_CHAT_MODEL", "ornith1.5-35b")  # 与 rag.py chat 同源
+# 模型名**不再**在模块导入时定死：那时读不到 .kb/model.json（用户在库里配的
+# chat_model 会被忽略），实测换了模型名后这里仍拿旧的 ornith1.5-35b → vLLM 404。
+# 改为每次调用时经 kb_config.model_config() 现取（该函数自带缓存，开销可忽略）。
+def _chat_model() -> str:
+    try:
+        import kb_config
+        cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        cfg = {}
+    return (cfg.get("chat_model") or os.environ.get("ORNITH_CHAT_MODEL")
+            or "ornith1.5-35b")
 _MAX_PER_NOTE = 5                      # 每条笔记最多抽几条声明
 _MAX_TOTAL = 300                       # 全库声明总数上限
 _MAX_PAIRS = 60                        # 单次 validate 最多判定多少对
@@ -50,22 +60,31 @@ _EMBED_CACHE = {}
 # ── LLM chat 接线（照搬 rag.py 铁律，绝不连写死地址）───────
 def _chat(messages):
     """返回 (content 或 None, reason)。key/url 任一缺失或端点不可达 → None（静默降级）。"""
-    key = (os.environ.get("ORNITH_API_KEY") or "").strip()
-    url = (os.environ.get("ORNITH_BASE_URL") or "").strip()
+    try:
+        import kb_config
+        cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        cfg = {}
+    key = (cfg.get("api_key") or os.environ.get("ORNITH_API_KEY") or "").strip()
+    url = (cfg.get("base_url") or os.environ.get("ORNITH_BASE_URL") or "").strip()
+    model = _chat_model()
     if not key or not url:
-        return None, ("未设 ORNITH_API_KEY/ORNITH_BASE_URL，声明抽取/判定跳过"
-                      "（需 export ORNITH_BASE_URL=http://<vllm>/v1）")
+        return None, ("未设模型地址/API KEY（.kb/model.json 或 ORNITH_BASE_URL/ORNITH_API_KEY），"
+                      "声明抽取/判定跳过")
     try:
         import urllib.request
         req = urllib.request.Request(url.rstrip("/") + "/chat/completions",
-            data=json.dumps({"model": CHAT_MODEL, "messages": messages,
-                             "temperature": 0.0}).encode("utf-8"),
+            data=json.dumps({"model": model, "messages": messages,
+                             "temperature": 0.0,
+                             # 推理模型的 reasoning 会吃掉 completion 预算，
+                             # 不给足 max_tokens 会拿到空 content（实测坑）。
+                             "max_tokens": 3000}).encode("utf-8"),
             headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
         content = json.loads(urllib.request.urlopen(req, timeout=_LLM_TIMEOUT)
                              .read().decode("utf-8"))["choices"][0]["message"]["content"]
         return content, ""
     except (OSError, json.JSONDecodeError, KeyError, ValueError) as e:
-        return None, f"连接 {url} 失败({e})"
+        return None, f"调用模型 {model} @ {url} 失败({e})"
 
 
 # ── 结构化解析（ tolerant：允许 LLM 包 markdown fence）────────

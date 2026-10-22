@@ -93,17 +93,33 @@ def _save_state(root: Path, state):
 # 本地模型调用（best-effort：缺配置/不可达 → 返回 (None, 原因)）
 # ------------------------------------------------------------
 def llm_ready():
-    return bool((os.environ.get("ORNITH_API_KEY") or "").strip()
-                and (os.environ.get("ORNITH_BASE_URL") or "").strip())
+    """模型是否可用：配置来源统一走 kb_config.model_config()（环境变量 > .kb/model.json）。
+
+    以前只读环境变量，用户在库里 .kb/model.json 配好的端点/KEY 不生效，
+    于是 cron 跑蒸馏时永远走"只落原始轮"那条降级路径。
+    """
+    try:
+        import kb_config
+        cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        cfg = {}
+    return bool((cfg.get("api_key") or os.environ.get("ORNITH_API_KEY") or "").strip()
+                and (cfg.get("base_url") or os.environ.get("ORNITH_BASE_URL") or "").strip())
 
 
 def _chat(prompt):
     """返回 (content 或 None, 原因)。"""
-    key = (os.environ.get("ORNITH_API_KEY") or "").strip()
-    url = (os.environ.get("ORNITH_BASE_URL") or "").strip()
-    model = (os.environ.get("ORNITH_CHAT_MODEL") or "ornith1.5-35b").strip()
+    try:
+        import kb_config
+        cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        cfg = {}
+    key = (cfg.get("api_key") or os.environ.get("ORNITH_API_KEY") or "").strip()
+    url = (cfg.get("base_url") or os.environ.get("ORNITH_BASE_URL") or "").strip()
+    model = (cfg.get("chat_model") or os.environ.get("ORNITH_CHAT_MODEL")
+             or "ornith1.5-35b").strip()
     if not key or not url:
-        return None, "未设 ORNITH_API_KEY/ORNITH_BASE_URL（蒸馏跳过，退回只落原始轮）"
+        return None, "未设模型地址/API KEY（.kb/model.json 或 ORNITH_* 环境变量）（蒸馏跳过，退回只落原始轮）"
     try:
         import urllib.request
         req = urllib.request.Request(
@@ -112,13 +128,15 @@ def _chat(prompt):
                 "model": model,
                 "messages": [{"role": "system", "content": SYSTEM_PROMPT},
                              {"role": "user", "content": prompt}],
-                "temperature": 0.2, "max_tokens": 2048,
+                "temperature": 0.2,
+                # 推理模型 reasoning 占预算，2048 常把正文挤空 → 放宽到 4000
+                "max_tokens": 4000,
             }).encode("utf-8"),
             headers={"authorization": f"Bearer {key}", "content-type": "application/json"})
         raw = urllib.request.urlopen(req, timeout=CHAT_TIMEOUT).read().decode("utf-8", "replace")
         return (json.loads(raw)["choices"][0]["message"].get("content") or "").strip(), ""
     except Exception as e:  # 网络/解析/超时一律降级，不打断流水线
-        return None, f"调用 {url} 失败({e})"
+        return None, f"调用模型 {model} @ {url} 失败({e})"
 
 
 # ------------------------------------------------------------

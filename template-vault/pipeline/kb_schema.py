@@ -181,7 +181,7 @@ def cmd_fields(root: Path) -> int:
 #   「同一时刻的冲突说法」是两件事，必须靠 **事件时间 vs 事务时间** 分开才能区分。
 #   而拿到这个语义**不需要图数据库** —— frontmatter 加字段即可（零依赖）。
 #   本命令把存量笔记补上 valid_from / recorded_at（用 created / updated 作为最佳代理），
-#   valid_to / superseded_by / conflict_with 留空（只在真的发生取代/冲突时写）。
+#   valid_to / superseded_by / conflicts_with 留空（只在真的发生取代/冲突时写）。
 #
 #   **默认 dry-run**：要改几百篇笔记 frontmatter，必须先让人看到清单。
 def cmd_bitemporal(root: Path, apply: bool, limit: int) -> int:
@@ -263,7 +263,7 @@ def cmd_bitemporal(root: Path, apply: bool, limit: int) -> int:
         print(f"   回滚命令：git -C {root} checkout {rollback_sha[:10]} -- <要回滚的文件>")
     else:
         print(f"\n   ✅ 已写入 {written} 篇（非 git 库 → 无 git 回滚点，请自行备份）")
-    print(f"   提示：valid_to / superseded_by / conflict_with 交由冲突检测按需写入，不在本次批量填充。")
+    print(f"   提示：valid_to / superseded_by / conflicts_with 交由冲突检测按需写入，不在本次批量填充。")
     return 0
 
 

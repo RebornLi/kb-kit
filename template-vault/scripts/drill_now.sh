@@ -8,7 +8,10 @@
 set -euo pipefail
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 VAULT="${1:-$SELF_DIR/..}"
-DST="$VAULT/70-知识治理 Governance/audit"
+# 必须是 `_audit`（引擎产物目录，validate/healthcheck/rag 会排除）；
+# 旧值 `audit/` 不在排除表里，演练写出的无 frontmatter 报告会直接把
+# `kb validate` / `kb gate check` / `kb verify` 变成红灯。
+DST="$VAULT/70-知识治理 Governance/_audit"
 mkdir -p "$DST"
 
 mapfile -t ZS < <(ls -t "$VAULT/backups/daily"/*-vault.zip 2>/dev/null || true)

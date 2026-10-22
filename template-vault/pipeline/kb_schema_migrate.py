@@ -170,18 +170,20 @@ def main():
 
     git_backup(root, "pre-schema-migrate checkpoint")
     applied = 0
-    from state_manager import state_path
+    from state_manager import append_jsonl
     # 统一 .kb/state/（旧位置 pipeline/.kb_schema_migrate.jsonl 只读回退）
-    logp = state_path(root, "kb_schema_migrate.jsonl")
+    # ⚠️ 必须用 `append_jsonl`：`state_path()` 只拼路径**不建目录**，而 `.kb/state/`
+    #   在全新库上不存在。以前这里是裸 `open(logp, "a")`，全新库上 `--apply`
+    #   跑到第一条就 `FileNotFoundError`（与 kb_rsi.py 同一个坑，2026-10-22 修）。
     for x in plan:
         p = Path(root) / x["rel"]
         for k, (old, new) in x["changes"].items():
             if set_fm(p, k, new):
                 applied += 1
-                with open(logp, "a", encoding="utf-8") as f:
-                    f.write(json.dumps({"ts": datetime.now().isoformat(timespec="seconds"),
-                                        "rel": x["rel"], "field": k,
-                                        "from": old, "to": new}, ensure_ascii=False) + "\n")
+                append_jsonl(root, "kb_schema_migrate.jsonl", {
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                    "rel": x["rel"], "field": k,
+                    "from": old, "to": new})
     # 写后提交（审计）
     import subprocess
     subprocess.run(["git", "-C", str(root), "add", "-u"], capture_output=True)

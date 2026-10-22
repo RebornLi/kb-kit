@@ -102,28 +102,52 @@ def check_vault_structure(vault: Path) -> VerifyItem:
 
 
 def check_vector_index(vault: Path) -> VerifyItem:
-    """检查向量索引存在且可查询。"""
-    index_file = vault / "vector index" / "df_idf.json"
-    if not index_file.exists():
+    """检查向量索引存在且可查询。
+
+    P1-1 修复：这里曾**硬编码** `df_idf.json`，而引擎的索引从 v8 起就是
+    `df_idf.pkl`（pickle）。后果是"索引明明存在也永远报不存在"——
+    一个必然误报的校验项，用户会以为索引坏了。
+
+    不再猜文件名，而是**按候选名 + 真实内容探测**：
+      1. 候选：`df_idf.pkl`（v8 现行）→ `df_idf.json`（v7 及更早）
+      2. 找到哪个算哪个；都找不到才判失败；
+      3. 文档数从**索引自身**读（pkl 走 pickle.load，json 走 json.load），
+         不再从文件名推断格式 —— 将来再换容器格式也只改这个函数。
+    """
+    index_dir = vault / "vector index"
+    index_file = None
+    for name in ("df_idf.pkl", "df_idf.json"):
+        cand = index_dir / name
+        if cand.exists():
+            index_file = cand
+            break
+    if index_file is None:
         return VerifyItem("向量索引", False,
-                          "索引文件不存在",
+                          f"索引文件不存在（找过 df_idf.pkl / df_idf.json）",
                           "kb rag index")
 
-    # 验证可 JSON 解析
+    # 验证索引可解析，并取出文档数
+    n_docs = None
     try:
-        with open(index_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
+        if index_file.suffix == ".pkl":
+            import pickle
+            with open(index_file, "rb") as f:
+                data = pickle.load(f)
+        else:
+            with open(index_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
         if not isinstance(data, dict) or not data:
             return VerifyItem("向量索引", False,
                               "索引文件为空或格式错误",
                               "kb rag index")
-    except (json.JSONDecodeError, OSError) as e:
+        raw_n = data.get("n_docs", data.get("docs", 0))
+        n_docs = raw_n if isinstance(raw_n, int) else len(raw_n or {})
+    except Exception as e:
         return VerifyItem("向量索引", False,
                           f"索引文件损坏: {e}",
                           "kb rag index")
 
-    # 验证可查询
-    n_docs = data.get("n_docs", 0) if isinstance(data.get("n_docs", 0), int) else 0
+    # 验证可查询（n_docs 已由上面的探测逻辑取出）
     rag = vault / "pipeline" / "rag.py"
     if not rag.exists():
         return VerifyItem("向量索引", True,

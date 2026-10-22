@@ -24,7 +24,8 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # 默认 vault 根：脚本位于 pipeline/，parents[1] 即 vault 根（可用 KB_ROOT 覆盖）
-from kb_io import ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter
+from kb_io import (ROOT_DEFAULT as _ROOT_DEFAULT_STR, EXCLUDE, parse_frontmatter,
+                   is_system_path, SYSTEM_SEGMENTS as _SYSTEM_SEGMENTS)
 from kb_metautil import is_source_note, freshness, retrievable_status, is_generated_report
 # kb-healthcheck 用 Path 对象
 ROOT_DEFAULT = Path(_ROOT_DEFAULT_STR)
@@ -37,9 +38,11 @@ VAULT_DIRS = ["00-收件箱 Inbox", "10-项目 Projects", "20-技术 Technology"
 #   `docs/` = **人写的交付文档**（报告/手册），本来就长，分块会毁掉可读性，
 #             且不属于 `NN-` 编号的 PARA 目录体系。
 #   这两条曾让 discipline(2) 与 overlong(10) 长期误报（全是 docs/ 报告）。
-SYSTEM_HINTS = ("memory/", "reference/", "main/", ".git/", ".obsidian/",
-                ".openclaw/", ".venvo", ".trash", "scripts/", "media/",
-                "raw/", "docs/")
+# P2-2：**不再本地复制一份**。系统目录判定统一走 `kb_io.is_system_path()`
+# （按路径段精确匹配）。这里保留 SYSTEM_HINTS 仅作兼容别名与文档用途 ——
+# 历史上它与 kb_audit._SYS 内容相同却各存一份，且本文件用**子串匹配**、
+# audit 用**段匹配**，实测 `mydocs/a.md` 与 `a.venvo/b.md` 被本文件误排除。
+SYSTEM_HINTS = tuple(sorted(_SYSTEM_SEGMENTS))
 FRONTMATTER_FIELDS = {"tags", "status", "domain", "importance"}
 
 # 标签白名单：系统层 + 主题白名单 + 历史沿用通用标签
@@ -118,7 +121,7 @@ def cached_stems(root):
     stems = set()
     for fp in collect_md(root, include_reports=True):
         s = str(fp.relative_to(root))
-        if any(h in s for h in SYSTEM_HINTS):
+        if is_system_path(s):
             continue
         if "00-收件箱 Inbox" not in s and "10-项目 Projects" not in s and \
            "20-技术" not in s and "30-决策日志" not in s and \
@@ -166,9 +169,8 @@ def is_absent(raw_path, stems, titles, root):
         if basename and basename in titles:
             return False
     # 过滤系统目录链接
-    for h in SYSTEM_HINTS:
-        if raw_path.startswith(h) or "/" + h in raw_path:
-            return False
+    if is_system_path(raw_path):
+        return False
     # 归一化 ../
     resolved = []
     for seg in raw_path.split("/"):
@@ -222,7 +224,7 @@ def check_deadlinks(root):
     for fp in collect_md(root, include_reports=True):
         rel = str(fp.relative_to(root))
         _nav = Path(rel).name in NAV_FILES
-        if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
+        if (is_system_path(rel) or rel.startswith("50-模板")
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or "/kb-kit/" in rel or is_generated_report(rel)) and not _nav:
             continue  # 模板/嵌套仓/raw 来源/归档/生成产物：不参与死链统计（导航文件除外）
@@ -262,7 +264,7 @@ def check_skeletons(root):
     skels, now = [], datetime.now(timezone.utc)
     for fp in collect_md(root):
         s = str(fp.relative_to(root))
-        if any(h in s for h in SYSTEM_HINTS) or s.startswith("50-模板"):
+        if is_system_path(s) or s.startswith("50-模板"):
             continue
         if is_generated_report(s):
             continue          # 运行产物不是"写了一半的笔记"
@@ -285,9 +287,21 @@ def check_tags(root):
             external_whitelist.update(subs)
     except ImportError:
         external_whitelist = set()
+    # `clean taxonomy` 按 taxonomy.json 的 tag_hierarchy 归一成 `group/leaf`
+    # （如 knowledge/moc、tech/ops）；tag-taxonomy.json 只列一级键，
+    # 两套词表不合并就会让 `clean taxonomy --apply` 制造出巡检越界标签。
+    try:
+        from taxonomy import load_taxonomy
+        _tax = load_taxonomy(root)
+        for group, leaves in (_tax.get("tag_hierarchy") or {}).items():
+            external_whitelist.add(group)
+            external_whitelist.update(f"{group}/{leaf}" for leaf in leaves)
+        external_whitelist.update((_tax.get("aliases") or {}).values())
+    except Exception:
+        pass
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if any(h in rel for h in SYSTEM_HINTS):
+        if is_system_path(rel):
             continue
         m = re.search(r"^tags:\s*\[(.*)\]", fp.read_text(encoding="utf-8", errors="replace"), re.M)
         if not m:
@@ -344,7 +358,7 @@ def check_frontmatter(root):
     missing = []
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("."):
+        if is_system_path(rel) or rel.startswith("."):
             continue
         if not fp.read_text(encoding="utf-8", errors="replace").startswith("---"):
             continue
@@ -407,7 +421,7 @@ def check_orphans(root):
     present = set()
     for fp in collect_md(root):
         r = str(fp.relative_to(root))
-        if any(h in r for h in SYSTEM_HINTS):
+        if is_system_path(r):
             continue
         present.add(Path(r).stem)
     # include_reports=True：`_INDEX.md` / `_MOC.md` 这类导航页在 REPORT_NAMES 里，
@@ -427,7 +441,7 @@ def check_orphans(root):
             linked.add(_wiki_stem(tgt))
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板"):
+        if is_system_path(rel) or rel.startswith("50-模板"):
             continue
         if rel.startswith(("raw/", "memory/")) or "_curated" in rel:
             continue                       # ① 证据层不算孤儿
@@ -464,7 +478,7 @@ def check_overlong(root):
     over = []
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if (any(h in rel for h in SYSTEM_HINTS) or rel.startswith("50-模板")
+        if (is_system_path(rel) or rel.startswith("50-模板")
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or is_generated_report(rel)):
             continue  # 模板/raw 来源/归档/生成产物：不参与颗粒度巡检
@@ -497,7 +511,7 @@ def check_freshness(root):
     stale, blocked = [], []
     for fp in collect_md(root):
         rel = str(fp.relative_to(root))
-        if (any(h in rel for h in SYSTEM_HINTS)
+        if (is_system_path(rel)
                 or rel.startswith("raw/") or rel.startswith("90-归档")
                 or is_generated_report(rel)):
             continue  # 来源/归档/产物：不做新鲜度巡检

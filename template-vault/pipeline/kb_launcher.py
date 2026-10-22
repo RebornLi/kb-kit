@@ -69,6 +69,7 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     # 健康
     ("healthcheck", None): ("healthcheck", "check"),
     ("health-metrics", None): ("health_metrics", "metrics"),
+    ("health-metrics", "kpi"): ("health_metrics", "kpi"),
     ("kb-healthcheck", None): ("healthcheck", "check"),
 
     # 仪表盘
@@ -194,6 +195,25 @@ COMPAT_MAP: Dict[Tuple[str, Optional[str]], Tuple[str, Optional[str]]] = {
     ("compile", None):     ("compile", None),        # action 由子命令决定
     ("rsi", None):         ("rsi", "probe"),
 
+    # 研究层只读入口（P2-3）：使用信号 / 适应度 / 漂移 / 规模
+    # 此前这 4 个模块的 main() 完整可跑，却**没有任何 CLI 入口** ——
+    # 用户不知道它们存在，也就从没用过（README 曾自述"26% 的代码、0% 的动作"）。
+    # 只暴露零写操作的模块；kb_usage 的 mark（会提升 importance）刻意不暴露。
+    # 无子命令时 action 必须留 None：launcher 会从 params_args 里取第一个非旗标
+    # token 当 action（`kb research report` 的 `report`）。这里若写死 "report"，
+    # 那个 `report` 就会作为**位置参数**透传给 kb_usage.py，argparse 报
+    # `unrecognized arguments: report`。`kb research`（无子命令）由
+    # `ResearchPlugin._ALIASES["research"]` → ("kb_usage","report") 兜底。
+    ("research", None):        ("research", None),
+    ("research", "usage"):     ("research", "kb_usage.report"),
+    ("research", "analyze"):   ("research", "kb_usage.analyze"),
+    ("research", "stats"):     ("research", "kb_usage.stats"),
+    ("research", "fitness"):   ("research", "kb_fitness.fitness"),
+    ("research", "drift"):     ("research", "kb_drift.drift"),
+    ("research", "scale"):     ("research", "kb_scale.scale"),
+    ("research", "bracket"):   ("research", "kb_scale.bracket"),
+    ("research", "fabric"):    ("research", "kb_scale.fabric"),
+
     # 特殊命令
     ("list", None):        ("__list__", None),
     ("help", None):        ("__help__", None),
@@ -212,8 +232,10 @@ BOOL_FLAGS = {
     "--full", "--generate", "--help", "--include-evidence", "--include-raw",
     "--include-stubs", "--incremental", "--json", "--list", "--llm",
     "--log", "--move", "--no-purge", "--no-record", "--out", "--path-only",
-    "--pending", "--quality", "--report", "--reset-config", "--review",
-    "--semantic", "--status", "--stdin", "--strict", "--trash",
+    "--mark-policy-stale", "--pending", "--policy-stale", "--quality",
+    "--report", "--reset-config", "--review",
+    "--semantic", "--status", "--stdin", "--strict", "--strict-fresh",
+    "--trash",
     "--verbose", "--with-index",
     "-h",
     "--kpi",
@@ -357,9 +379,11 @@ class KBLauncher:
                     params_args = [a for a in params_args if a != action]
                 meta = plugin.metadata()
                 if action is None:
-                    # 无 action，显示可用 actions
-                    print(f"插件 {meta.name} 支持的动作: {', '.join(meta.actions)}")
-                    return 0
+                    # 无 action，显示可用 actions（P3-26：返回 2，见下方同处说明）
+                    print(f"插件 {meta.name} 需要指定动作，支持: "
+                          f"{', '.join(meta.actions)}", file=sys.stderr)
+                    print(f"  例: kb {tool} {meta.actions[0]}", file=sys.stderr)
+                    return 2
                 if action not in meta.actions:
                     print(f"❓ 插件 {meta.name} 不支持动作 {action}，"
                           f"可用: {', '.join(meta.actions)}", file=sys.stderr)
@@ -398,8 +422,15 @@ class KBLauncher:
                 plugin = self.registry.get_plugin(plugin_name)
                 if plugin:
                     meta = plugin.metadata()
-                    print(f"插件 {meta.name} 支持的动作: {', '.join(meta.actions)}")
-                    return 0
+                    # P3-26：这里曾 `return 0`。问题是**语义撒谎** ——
+                    # 用户/cron 敲 `kb sync` 想触发同步，得到动作清单 + 退出码 0，
+                    # 于是"看起来成功、实际什么都没做"；而底层 sync.py 的 argparse
+                    # 是 required=True，真跑会返回 2。列清单本身是有用的，但必须
+                    # 伴随非零退出码，让调用方能分辨"这是用法提示，不是执行成功"。
+                    print(f"插件 {meta.name} 需要指定动作，支持: "
+                          f"{', '.join(meta.actions)}", file=sys.stderr)
+                    print(f"  例: kb {tool} {meta.actions[0]}", file=sys.stderr)
+                    return 2
 
         params = self._parse_params(params_args)
         params.setdefault("root", self.vault_root)
@@ -507,6 +538,12 @@ class KBLauncher:
         print("  kb compile query --query Q 查询→知识（写提案，人工在环）")
         print("  kb compile status          查看待审提案")
         print("  kb compile apply --all     写入全部待审提案（写操作）")
+        print("")
+        print("研究层只读视图（P2-3，全部只读）:")
+        print("  kb research usage          真实使用信号（查询成功率 / 再问率）")
+        print("  kb research fitness        外部锚定适应度（0-1，含四分量）")
+        print("  kb research drift          晋升漂移度量（内容漂移率 / 出处保留率）")
+        print("  kb research scale          规模档位与索引层覆盖")
         print("")
         print("其他:")
         print("  kb backup [daily|weekly]  全量快照")

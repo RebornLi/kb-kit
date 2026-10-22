@@ -45,7 +45,11 @@ def parse_args():
                     help="目标知识库目录（绝对或相对路径；留空=当前目录/kb-kit）")
     ap.add_argument("--no-git", action="store_true", help="不初始化 git")
     ap.add_argument("--no-demo", action="store_true", help="不跑 demo（不建向量索引）")
-    ap.add_argument("--force", action="store_true", help="目标目录非空时也覆盖安装")
+    ap.add_argument("--force", action="store_true",
+                    help="目标目录非空时也覆盖安装（**会先完整备份原库到 <目标>/backups/ "
+                         "pre-reinstall-<时间戳>/，备份失败则整体放弃**）")
+    ap.add_argument("--yes", "-y", action="store_true",
+                    help="跳过 --force 的交互确认（cron / 无人值守场景用；仍会先备份）")
     ap.add_argument("--interactive", action="store_true",
                     help="交互模式：agent 探测时提问选择（默认非交互，全部启用）")
     ap.add_argument("--no-verify", action="store_true", help="跳过安装自检")
@@ -54,22 +58,129 @@ def parse_args():
     return ap.parse_args()
 
 
-def ensure_target(vault, force):
-    """目标不存在则新建；为空则复用；非空且未 --force 则拒绝。"""
+# ── P0-2：--force 的破坏性删除必须「先备份、再确认」──────────────────
+#
+# 事故背景（2026-10-22 审计发现）：原实现是裸 `shutil.rmtree(child)` /
+# `child.unlink()`，用户手滑加一个 --force（或从旧文档复制命令行）→
+# 几百篇笔记 + 全部 .git 历史一次性消失，**无备份、无确认**。
+#
+# 更矛盾的是：项目自己的 `scripts/verify.py` 早就写明了这个风险——
+#   「绝不能建议用户跑 create_vault.py --force，那条路径在 create_vault.py:63-68
+#     会先 rmtree/unlink 目标目录的每个子项（= 用户全部笔记 + .git 历史）」
+# 也就是说风险已被记录，但代码一直没修。
+#
+# 与 `sync.py:167 _backup_before_purge` 完全相同的纪律（那个模块已经做对了）：
+#   「删除前把即将被清理的未跟踪路径备份到 backups/rollback-<ts>/；
+#    任何一项备份失败即返回 None —— 宁可不清，也不丢数据。」
+# 本修复把同一条纪律搬到安装器上。
+
+PRE_REINSTALL_BACKUP = "pre-reinstall"
+
+
+def _backup_vault(vault: Path) -> "tuple":
+    """把整个目标库备份到 `<vault>/backups/<PRE_REINSTALL_BACKUP>-<时间戳>/`。
+
+    返回 `(备份目录, 文件数)`；**任何一项失败返回 None** —— 调用方必须整体放弃清理。
+
+    备份放在目标库自己的 `backups/` 下有两个原因：
+      1. `backups/` 已在 `template-vault/.gitignore` 里，不会污染 git；
+      2. 与被覆盖的库同盘，`shutil.move`（同分区 rename）比跨盘 copy 快得多。
+    """
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    dst = vault / "backups" / f"{PRE_REINSTALL_BACKUP}-{stamp}"
+    n = 0
+    for child in sorted(vault.iterdir()):
+        name = child.name
+        # 备份目的地自身不备份（否则递归）
+        if name == "backups":
+            continue
+        tgt = dst / name
+        try:
+            if child.is_symlink():
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                tgt.symlink_to(os.readlink(child))
+                n += 1
+            elif child.is_dir():
+                shutil.copytree(child, tgt)
+                n += 1
+            else:
+                tgt.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(child, tgt)
+                n += 1
+        except (OSError, shutil.Error) as e:
+            print(f"  ⚠️ 备份失败：{name}（{e}）", file=sys.stderr)
+            # 清掉半截备份，别留下一个"看起来能恢复其实不能"的目录
+            shutil.rmtree(dst, ignore_errors=True)
+            return None
+    return dst, n
+
+
+def _count_notes(vault: Path) -> int:
+    """粗略统计目标库里的笔记数（给用户的确认提示用）。"""
+    n = 0
+    for dp, dn, fn in os.walk(vault):
+        dn[:] = [d for d in dn if d not in (".git", ".obsidian", "backups",
+                                            "__pycache__", "vector index")]
+        n += sum(1 for f in fn if f.endswith(".md"))
+    return n
+
+
+def ensure_target(vault, force, assume_yes=False):
+    """目标不存在则新建；为空则复用；非空且未 --force 则拒绝。
+
+    `--force` 路径（P0-2 修复）：**先完整备份，再要求确认，最后才删除**。
+      1. 备份失败 → 直接放弃安装（宁可装不上，也不能丢数据）
+      2. 非 `--yes` 且是交互终端 → 要求输入目标库名确认（防手滑）
+      3. `--yes` → 跳过确认（cron/无人值守），但备份仍然强制
+    """
     if vault.exists():
         if vault.is_file():
             print(f"❌ 目标已存在且是一个文件: {vault}", file=sys.stderr)
             return False
         if list(vault.iterdir()) and not force:
             print(f"❌ 目标目录非空: {vault}", file=sys.stderr)
-            print("   选一个空目录，或加 --force 覆盖（会清空其中的文件）。", file=sys.stderr)
+            print("   选一个空目录，或加 --force 覆盖（会先备份再清空）。", file=sys.stderr)
             return False
         if force:
+            # ── 1. 先备份（失败即整体放弃）──
+            print(f"⛳ --force：先完整备份现有库 → {vault}/backups/{PRE_REINSTALL_BACKUP}-<时间戳>/ …")
+            res = _backup_vault(vault)
+            if res is None:
+                print("⛔ 备份不完整 → 已放弃覆盖安装，**未删除任何文件**。", file=sys.stderr)
+                print("   请检查磁盘空间/权限后重试；或改用空目录安装，"
+                      "再用 `kb backup` 迁移。", file=sys.stderr)
+                return False
+            backup_dir, n_files = res
+            print(f"   已备份 {n_files} 个顶层条目 → {backup_dir}")
+
+            # ── 2. 确认（除非 --yes）──
+            n_notes = _count_notes(vault)
+            if not assume_yes and sys.stdin.isatty():
+                print(f"\n⚠️  即将**清空并覆盖**：{vault}")
+                print(f"   其中约 {n_notes} 篇 .md 笔记（含 .git 历史）将被删除。")
+                print(f"   备份已就绪：{backup_dir}（可手动恢复）")
+                try:
+                    ans = input(f"   确认请输入目标库名 `{vault.name}`（其他任何输入 = 取消）: ").strip()
+                except EOFError:
+                    ans = ""
+                if ans != vault.name:
+                    print("⛔ 已取消（未删除任何文件；备份保留，可手动删除）。")
+                    return False
+            elif not assume_yes:
+                # 非交互（cron / 管道）且没给 --yes：不猜，直接拒绝
+                print("⛔ 非交互环境下的 --force 需要同时给 `--yes`（仍会先备份）。",
+                      file=sys.stderr)
+                return False
+
+            # ── 3. 确认过才删 ──
             for child in vault.iterdir():
+                if child.name == "backups":
+                    continue        # 备份要留着！
                 if child.is_dir() and not child.is_symlink():
                     shutil.rmtree(child)
                 else:
                     child.unlink()
+            print(f"   已清空（备份保留于 {backup_dir}）")
     else:
         vault.mkdir(parents=True, exist_ok=True)
     return True
@@ -521,7 +632,7 @@ def main():
     vault = Path(args.vault).expanduser() if args.vault else Path.cwd() / "kb-kit"
     vault = vault.resolve()
 
-    if not ensure_target(vault, args.force):
+    if not ensure_target(vault, args.force, assume_yes=args.yes):
         return 2
     if not copy_template(vault):
         return 2

@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from kb_infer import load_note_full as load, fmt_value
 from kb_io import ROOT_DEFAULT, iter_notes
+import kb_config
 from kb_metautil import is_index_stub, is_pointer_page, kb_layer_of, is_raw_path, is_generated_report, record_lineage
 from kb_text import content_fingerprint
 
@@ -160,11 +161,28 @@ class LLM:
     """本地 OpenAI 兼容端点客户端。无 KEY / 不可达 → available() False，业务静默降级。"""
 
     def __init__(self, model: Optional[str] = None, base: Optional[str] = None,
-                 key: Optional[str] = None, timeout: int = 180):
-        self.base = (base or os.environ.get("ORNITH_BASE_URL")
-                     or os.environ.get("OPENAI_BASE_URL") or "http://127.0.0.1:8000/v1").rstrip("/")
-        self.key = key or os.environ.get("ORNITH_API_KEY") or os.environ.get("OPENAI_API_KEY") or ""
-        self.model = model or os.environ.get("ORNITH_CHAT_MODEL") or "ornith1.5-35b"
+                 key: Optional[str] = None, timeout: int = 180, root=None):
+        # 配置来源统一走 kb_config.model_config()（环境变量 > .kb/model.json）。
+        # 以前这里只读环境变量，导致用户在 `.kb/model.json` 里配好的 key/base/model
+        # 完全不生效 —— 实测：模型服务起着、配置也写着，`available()` 却报
+        # "未设置 ORNITH_API_KEY"，`kb curate` 永远只出 plan。
+        # 显式传入的参数仍然优先（便于测试与单点覆盖）。
+        try:
+            cfg = kb_config.model_config(root)
+        except Exception:           # noqa: BLE001  配置读取失败不应阻断构造
+            cfg = {}
+        self.base = (base or cfg.get("base_url")
+                     or os.environ.get("ORNITH_BASE_URL")
+                     or os.environ.get("OPENAI_BASE_URL")
+                     or "http://127.0.0.1:8000/v1").rstrip("/")
+        self.key = (key or cfg.get("api_key")
+                    or os.environ.get("ORNITH_API_KEY")
+                    or os.environ.get("OPENAI_API_KEY") or "")
+        # 模型名不再硬编码 ornith1.5-35b：实测用户起的是 nemotron-3.5-lightning，
+        # 名字不符 → vLLM 返回 404 "The model ... does not exist"，
+        # 而错误信息只说"连接失败"，极易误判成端点没起。
+        self.model = (model or cfg.get("chat_model")
+                      or os.environ.get("ORNITH_CHAT_MODEL") or "ornith1.5-35b")
         self.timeout = timeout
 
     def available(self) -> Tuple[bool, str]:

@@ -92,6 +92,72 @@ DOMAIN_BUCKET = {"运维": "20-技术 Technology", "安全": "20-技术 Technolo
                  "管理": "10-项目 Projects", "综合": "40-资源库 Resources"}
 CORE_FILES = ["MEMORY.md", "USER.md", "SOUL.md", "AGENTS.md", "TOOLS.md", "IDENTITY.md"]
 
+# ── P0-3：domain 归一（所有记忆适配器的唯一出口）─────────────────────
+#
+# 事故背景（2026-10-22 审计发现）：`memory_ingest_json._domain()` /
+# `memory_ingest_sqlite._domain()` / `memory_ingest_opencode` 用的是**另一套**
+# 主题词表 `("AI与LLM","运维","安全","开发","测试","产品","数据","基础设施")`，
+# 而契约白名单 `kb_config.DOMAIN_WHITELIST` 只有
+# `{"产品","安全","开发","数据","管理","综合","运维"}` 7 个值。
+#
+# 实测后果：含「AI与LLM / 基础设施 / 测试」的记忆被写成
+#   `domain: AI与LLM` / `domain: 基础设施` / `domain: 测试`
+# → `kb validate` 立刻报**硬错误**「domain 非法」
+# → `kb verify` 的「笔记校验」项变红 → **每日验收闸门失效**
+# → 而这一切发生在 `kb ingest agent` 这个最常用的写入路径上。
+#
+# 另外 `memory_ingest.extract_entries()` 的 domain 来自 MEMORY.md 里手写的
+# `[domain:: xxx]` 标注，**完全不受控**，同样会写出非法值。
+#
+# 修复：所有适配器统一走 `normalize_domain()`，映射到白名单内的合法值。
+# 未知值一律落到「综合」（契约里的跨领域兜底），绝不把非法值写进 frontmatter。
+_DOMAIN_FALLBACK = "综合"
+
+# 非白名单取值 → 白名单取值。key 覆盖实测语料里的常见主题词。
+# 依据 kb_domain.DOMAIN_MAP 与 KEYWORD_DOMAIN 的既有口径，不新造词。
+_DOMAIN_ALIASES = {
+    # 技术族 → 开发
+    "AI与LLM": "开发", "AI与LLM AI": "开发", "AI": "开发", "技术": "开发",
+    "后端开发": "开发", "前端开发": "开发", "测试 Testing": "开发", "测试": "开发",
+    "智能客服 Smart-Customer": "开发", "career": "综合",
+    # 基础设施族 → 运维
+    "基础设施 Infra": "运维", "基础设施": "运维", "部署运维": "运维", "部署": "运维",
+    "deploy": "运维",
+    # 数据库族 → 数据
+    "数据库 Database": "数据", "数据库": "数据", "database": "数据",
+    # 项目管理族 → 管理
+    "项目管理 PM": "管理", "项目管理": "管理", "PM": "管理",
+    "知识管理": "管理", "决策": "管理", "职业": "综合", "项目": "综合",
+    # 杂项
+    "生活": "综合", "其他": "综合", "记忆维护": "综合", "记忆维护 Memory": "综合",
+    "Career-Pivot": "综合", "面试准备": "综合",
+    "光钟圆环模型 Light-Clock": "综合",
+    "AI测试求职 AI-Testing-Port": "综合",
+}
+
+
+def normalize_domain(value):
+    """把任意来源的 domain 归一成 `kb_config.DOMAIN_WHITELIST` 内的合法值。
+
+    顺序：白名单直通 → 别名表 → 二级域取一级 → 兜底「综合」。
+    **绝不返回白名单外的值** —— 这是 `kb validate` 的硬要求。
+    """
+    from kb_config import DOMAIN_WHITELIST
+    s = str(value or "").strip()
+    if not s:
+        return _DOMAIN_FALLBACK
+    if s in DOMAIN_WHITELIST:
+        return s
+    if s in _DOMAIN_ALIASES:
+        return _DOMAIN_ALIASES[s]
+    # 两级域写法（"开发/后端"）→ 取一级
+    primary = s.split("/", 1)[0].strip()
+    if primary in DOMAIN_WHITELIST:
+        return primary
+    if primary in _DOMAIN_ALIASES:
+        return _DOMAIN_ALIASES[primary]
+    return _DOMAIN_FALLBACK
+
 # 命名空间归一表: 摄入路径里的简写 / 带与不带空格变体 → 标准 PARA 命名空间
 # 防重根因: 此前 DOMAIN_BUCKET 只输出 "20-技术" / "10-项目"(无英文后缀),
 # sync()/extract() 用 Path(root)/target 原样落盘, 凭空造出与标准域并行的游离目录。
@@ -263,7 +329,9 @@ def mirror(root, agent_src, agent_name="openclaw"):
         fm["source_hash"] = source_hash  # FR-3.3.9 保真镜像
         # 补全 validate 必填字段（agent 记忆源通常缺这些）
         fm.setdefault("status", "active")
-        fm.setdefault("domain", "综合")
+        # P0-3：不用 setdefault —— agent 日报若自己带了非法 domain（如 AI与LLM），
+        # setdefault 会把它原样写进 KB → kb validate 硬错误。强制归一。
+        fm["domain"] = normalize_domain(fm.get("domain"))
         fm.setdefault("created", fm.get("date", datetime.date.today().strftime("%F")))
         fm.setdefault("updated", fm.get("date", datetime.date.today().strftime("%F")))
         fm.setdefault("importance", 0.5)
@@ -341,7 +409,8 @@ def mirror_project_context(root, roots=None, agent_name="project-context", dry_r
                 fm["memory_source"] = f"{agent_name}/{rel}"
                 fm["kb_target"] = f"reference/project-context/{base}/{rel}"
                 fm.setdefault("status", "active")
-                fm.setdefault("domain", "综合")
+                # P0-3：强制归一，理由同 mirror()（agent 源可能带非法 domain）
+                fm["domain"] = normalize_domain(fm.get("domain"))
                 fm.setdefault("created", datetime.date.today().strftime("%F"))
                 fm.setdefault("updated", datetime.date.today().strftime("%F"))
                 fm.setdefault("importance", 0.5)
@@ -435,8 +504,13 @@ def sync(root, agent_src, agent_name="openclaw"):
             _audit_after_write(entry, summary)
         else:
             kb_path.parent.mkdir(parents=True, exist_ok=True)
+            # P0-3 顺带修掉一个更老的疏漏：这里**根本没写 domain**，
+            # 而 domain 是 `kb validate` 的必填字段 → 每次 sync 新建笔记都会报硬错误。
+            # 现在补上，并同样走 normalize_domain 归一。
             kb_path.write_text(frontmatter_block({"tags": [str(t) for t in (fm.get("tags") or ["knowledge"])],
-                                                  "status": "active", "kb_source": agent_name,
+                                                  "status": "active",
+                                                  "domain": normalize_domain(fm.get("domain")),
+                                                  "kb_source": agent_name,
                                                   "kb_synced_from": f"{agent_name}/{p.name}"}) +
                                f"# {summary}\n\n{entry}", encoding="utf-8")
             _audit_after_write(entry, summary)
@@ -476,7 +550,8 @@ def mirror_core(root, agent_root, agent_name="openclaw"):
         today = fm["mirror_date"]
         fm.setdefault("tags", ["reference"])
         fm.setdefault("status", "active")
-        fm.setdefault("domain", "综合")
+        # P0-3：强制归一，理由同 mirror()（核心文件可能带非法 domain）
+        fm["domain"] = normalize_domain(fm.get("domain"))
         fm.setdefault("created", today)
         fm.setdefault("updated", today)
         fm.setdefault("importance", 0.0)
@@ -533,12 +608,15 @@ def extract(root, agent_root, density_thr, min_chars, semantic, agent_name="open
         if not p.exists():
             continue
         rels = extract_entries(p)
-        for title, body, domain in rels:
+        for title, body, raw_domain in rels:
             if f"{name}::{title}" in extracted:
                 continue
             g = gate(body, density_thr, min_chars)
             if not g["pass"]:
                 continue
+            # P0-3：MEMORY.md 里的 `[domain:: xxx]` 是**手写标注，完全不受控**，
+            # 必须归一成白名单内的合法值才能写进 frontmatter（否则 kb validate 硬错误）。
+            domain = normalize_domain(raw_domain)
             sim, rel = top_sim(vocab, idf, rel2vec, body)
             # Task 3: 动态 dup_sim 阈值
             _dup_sim = get_dedup_thresholds(domain, root)["dup_sim"]

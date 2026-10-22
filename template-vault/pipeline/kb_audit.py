@@ -221,17 +221,18 @@ def check_structure(root: Path, notes) -> Dict[str, List[Dict[str, Any]]]:
                 dead.append({"rel": rel, "target": l})
     # 孤儿：与 kb-healthcheck 同口径（知识层 · 无出链且无入链 · 排除归档态与产物），
     #   保证两个工具的数字可比，不会一个说 0 一个说 46。
-    # 判据与排除集**逐条对齐 kb-healthcheck.check_orphans**，保证两工具数字可比。
     #   （曾出现 healthcheck=0 / audit=46 的相反结论，根因是排除集不同却没写明）
-    from kb_io import EXCLUDE as _EXC
-    _SYS = ("memory/", "reference/", "main/", ".git/", ".obsidian/", ".openclaw/",
-            ".venvo", ".trash", "scripts/", "media/", "raw/", "docs/")
+    #
+    # P2-2：排除集**不再本地复制**，统一走 `kb_io.is_system_path()`。
+    #   历史上这里是第三份 `_SYS` 元组，与 kb-healthcheck.SYSTEM_HINTS 内容
+    #   完全相同却各存一份，两边一旦有人改一处就再次分叉。
+    #   `_curated` 是 audit 特有的额外判断（证据层里的保号原文目录），保留。
+    from kb_io import is_system_path
     _parts = lambda r: set(Path(r).parts)
     for rel, n in notes.items():
         if n["generated"]:
             continue                       # 生成产物（_MOC/_graph/_audit…）不算孤儿
-        if any(h.rstrip("/") in _parts(rel) for h in _SYS) or "raw" in _parts(rel) \
-                or "memory" in _parts(rel) or "_curated" in _parts(rel):
+        if is_system_path(rel) or "_curated" in _parts(rel):
             continue                       # 证据层/参考层/交付文档：不该按活跃笔记要求互链
         if Path(rel).name.startswith(("_", "🏠", "📖", "01-", "如何使用")):
             continue

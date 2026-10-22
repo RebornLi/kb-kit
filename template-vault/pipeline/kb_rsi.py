@@ -8,7 +8,8 @@
 #   无外部真值 = Self-Improvement Paradox（ACL 2025）。
 # ------------------------------------------------------------
 #   本脚本只做"提议"，不改动任何笔记正文/元数据；
-#   唯一写入：pipeline/.kb_rsi_proposals.jsonl（追加一条运行记录 = 决策日志）。
+#   唯一写入：.kb/state/kb_rsi_proposals.jsonl（追加一条运行记录 = 决策日志）。
+#             旧位置 pipeline/.kb_rsi_proposals.jsonl 只读回退。
 #   用法:
 #     python3 pipeline/kb_rsi.py [--root R] [--json] [--verbose]
 # ============================================================
@@ -159,8 +160,13 @@ def is_moc(rel: str, root: Optional[str] = None) -> bool:
 
 # ── 主度量 ────────────────────────────────────────────────
 def is_raw(rel: str) -> bool:
-    """rel 是否在 raw/ 下——不可变外部源，RSI 只读、永不写入。"""
-    return "raw" in Path(rel).parts[:-1]
+    """rel 是否在 raw/ 下——不可变外部源，RSI 只读、永不写入。
+
+    P2-1：**委托 `kb_metautil.is_raw_path`**（全库唯一实现）。
+    此前这里是第二份实现，与 kb_metautil 语义相反（见 is_raw_path 的 docstring）。
+    """
+    from kb_metautil import is_raw_path
+    return is_raw_path(rel)
 
 
 def collect(root: Union[str, Path]) -> List[Dict[str, Any]]:
@@ -419,7 +425,11 @@ def render(proposals: List[Dict[str, Any]], m: Dict[str, Any], grounded_note: st
         items = "、".join(p["items"]) if p["items"] else "（无）"
         L.append(f"- **[{round(p['score']*100)}%] {p['type']}** — {items}")
         L.append(f"    - 门: {p['gate']}  |  建议: {p['action']}")
-    L += ["", "> 说明：本探针只读，不改任何笔记。提议+决策已写入 `pipeline/.kb_rsi_proposals.jsonl`。"]
+    # 文案里的路径必须是**规范写入位置**（.kb/state/）。以前这里写死的是老位置
+    # pipeline/.kb_rsi_proposals.jsonl —— 与 main() 实际写入的地方不一致，
+    # 用户按提示去找会找不到文件（P3-1，2026-10-22 修）。
+    L += ["", "> 说明：本探针只读，不改任何笔记。"
+              "提议+决策已写入 `.kb/state/kb_rsi_proposals.jsonl`。"]
     return "\n".join(L) + "\n"
 
 
@@ -450,12 +460,18 @@ def main() -> int:
         "proposals": props,
         "concentration": m["concentration"],
     }
-    logdir = Path(root) / "pipeline"
-    logdir.mkdir(parents=True, exist_ok=True)
-    from state_manager import state_path
-    logp = state_path(root, "kb_rsi_proposals.jsonl")   # 统一 .kb/state/（旧位置 pipeline/ 只读回退）
-    with open(logp, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    # ⚠️ 必须走 `state_manager.append_jsonl`，**不要**在 state_path 之后直接追加写：
+    #   `state_path()` 只负责拼路径，**不创建父目录**；而 `.kb/state/` 在**全新库上
+    #   根本不存在**（它由 StateStore / atomic_write_text 首次写入时才建）。实测后果
+    #   （2026-10-22）：`kb rsi` 在任何没跑过其它命令的新库上必崩
+    #   `FileNotFoundError: .kb/state/kb_rsi_proposals.jsonl` —— 而这是研究层
+    #   仅有的两个 CLI 入口之一（另一个是 kb compile），README 第 191 行也列出了它。
+    #   `append_jsonl` 第一行就是 `p.parent.mkdir(parents=True, exist_ok=True)`，
+    #   是现成的正确实现。
+    # 顺带修掉输出文案：以前打印的是 `pipeline/.kb_rsi_proposals.jsonl`，
+    #   实际写的是 `.kb/state/`（P3-1），现在直接回显真实路径。
+    from state_manager import append_jsonl
+    logp = append_jsonl(root, "kb_rsi_proposals.jsonl", record)
 
     conc = record["concentration"]
     conc_s = (f"Simpson {conc['simpson']} · 归一化Shannon {conc['shannon_norm']} · "

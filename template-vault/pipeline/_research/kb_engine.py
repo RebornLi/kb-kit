@@ -153,12 +153,14 @@ def git_backup(root: Union[str, Path], msg: str) -> None:
 
 # ── P0-1: raw/ 不可变层硬隔离守卫 ─────────────────────────
 def is_raw_rel(root: Union[str, Path], rel: str) -> bool:
-    """rel 是否在 raw/ 下（不可变外部源）。与 kb_rsi.is_raw 同约定，供引擎复用。"""
-    try:
-        parts = [str(x).lower() for x in Path(rel).parts]
-    except (TypeError, ValueError, AttributeError):
-        return False
-    return "raw" in parts[:-1]
+    """rel 是否在 raw/ 下（不可变外部源），供引擎复用。
+
+    P2-1：**委托 `kb_metautil.is_raw_path`**（全库唯一实现）。
+    此前这里是第四份实现，与 kb_metautil 的「只看顶层」语义相反，
+    导致写入守卫的保护范围比其它模块窄。
+    """
+    from kb_metautil import is_raw_path
+    return is_raw_path(rel)
 
 
 def _raw_guard(root, p):

@@ -20,8 +20,13 @@ rem backup 由 pipeline/backup.py 跨平台实现，不再依赖 bash
 rem 目标库优先级：--root > KB_ROOT 环境变量 > 本文件所在目录
 if not defined KB_ROOT set "KB_ROOT=%VAULT%"
 "%PY%" "%VAULT%\pipeline\kb_launcher.py" %*
-goto :eof
+rem **必须显式透传退出码**：cmd 脚本末尾没有 `exit /b` 时，
+rem 无论 kb_launcher 成功还是失败，`kb.cmd` 都返回 0。
+rem Windows 侧的 cron / 任务计划 / 安装自检因此永远看不到失败 ——
+rem 与 bash 侧 `kb-verify-cron.sh` 曾有的缺陷同类（P1-3/P3-31）。
+exit /b %ERRORLEVEL%
 
 :nopys
 echo ❌ 未找到 Python。请先安装 Python 3.8+（装时勾选 Add to PATH 或加进 PATH），再重试。
-goto :eof
+rem 找不到解释器同样是失败，不能返回 0
+exit /b 3

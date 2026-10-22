@@ -42,6 +42,56 @@ CODE_DIRS = ("pipeline", "scripts")
 # 明确排除的非代码（防止将来有人往这两个目录里放内容文件被误覆盖）
 SKIP_SUFFIX = (".md",)
 
+# ── P2-6：契约漂移检测 ────────────────────────────────────────────
+#
+# 问题（2026-10-22 审计）：本工具只复制 `pipeline/` 与 `scripts/`，
+# **完全不碰 `reference/`**。但代码改动经常要求契约同步升级，例如：
+#   · `kb-schema.json` 新增/废弃字段（本轮 `conflict_with` → `conflicts_with`）
+#   · `tag-taxonomy.json` 新增受控标签
+#   · `triage-config.json` 调整阈值权重
+#   · `content-type-signals.json` 增加信号词
+# 部署后目标库仍跑**旧契约**，于是新代码读不到新字段/新词表，行为悄悄退化，
+# 而 deploy 报告「升级成功」。
+#
+# 这里不自动覆盖 `reference/`（那可能冲掉用户的本地定制），而是**检测并报告**
+# 哪些契约文件与开发仓不一致，让操作者显式决定。
+CONTRACT_DIR = "reference"
+# 这些是「契约」：改了会影响运行时行为，必须提示
+CONTRACT_FILES = (
+    "kb-schema.json", "tag-taxonomy.json", "taxonomy.json",
+    "triage-config.json", "content-type-signals.json",
+    "dedup-config.json", "domain-taxonomy.json", "synonyms.json",
+)
+# 这些是「用户私有配置」，**绝不覆盖也绝不提示**（api key、用户表）
+PRIVATE_FILES = ("users.json", "plugin-config.json", "model.json")
+
+
+def contract_drift(target: Path) -> List[Tuple[str, str, str]]:
+    """比较目标库与模板的 `reference/` 契约文件哈希。
+
+    Returns: [(文件名, 目标哈希, 模板哈希), ...]，只列出**不一致或缺失**的。
+    目标缺失也列出（哈希为空串）：缺契约 = 新代码找不到字段定义。
+    """
+    out: List[Tuple[str, str, str]] = []
+    for name in CONTRACT_FILES:
+        a = target / CONTRACT_DIR / name
+        b = TEMPLATE / CONTRACT_DIR / name
+        ha = _sha(a) if a.exists() else ""
+        hb = _sha(b) if b.exists() else ""
+        if ha != hb:
+            out.append((name, ha, hb))
+    return out
+
+
+def _contract_warning(drift: List[Tuple[str, str, str]]) -> str:
+    """把契约漂移压成一行摘要（供 plan / apply 提示）。"""
+    if not drift:
+        return ""
+    names = ", ".join(n for n, _a, _b in drift[:6])
+    more = f" 等 {len(drift)} 个" if len(drift) > 6 else ""
+    return (f"⚠️ 契约漂移：{names}{more} 与开发仓不一致 —— "
+            f"新代码可能读不到新字段/新词表（reference/ 不由本工具部署）")
+
 
 def _sha(p: Path) -> str:
     try:
@@ -169,6 +219,15 @@ def cmd_plan(args) -> int:
               f"　→ 升级后需重建索引（旧索引仍可读，但慢）")
     except Exception:               # noqa: BLE001
         pass
+
+    # P2-6：契约漂移（reference/ 不在部署范围内，必须显式提示）
+    drift = contract_drift(target)
+    if drift:
+        print("\n  契约漂移（reference/，本工具不部署）：")
+        for name, ha, hb in drift:
+            state = "目标库缺失" if not ha else ("开发仓缺失" if not hb else "内容不同")
+            print(f"    {name:32} {state}")
+        print("    → 若本次代码依赖新契约，请手动同步对应文件后再升级。")
     return 0
 
 
@@ -308,6 +367,11 @@ def cmd_apply(args, target: Path) -> int:
     print(f"     rc={r['code']} {(r['out'] or r['err']).strip().splitlines()[-1:]}")
     fails = _verify(target, args._baseline)
     print(f"\n  {'✅ 升级完成' if fails == 0 else f'⚠️ 有 {fails} 项验证未过'}")
+    # P2-6：升级后再次提示契约漂移（reference/ 不会被本工具覆盖）
+    drift = contract_drift(target)
+    if drift:
+        print(f"\n  {_contract_warning(drift)}")
+        print("    处理：手动复制 template-vault/reference/<文件> 到目标库，再跑 kb verify。")
     print(f"  回滚：`tar -xzf {bk} -C {target}` 然后 `git -C {target} checkout -- .`")
     return 0 if fails == 0 else 1
 

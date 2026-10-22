@@ -40,6 +40,10 @@ class SubprocessPlugin(PluginBase):
     ACTION_MAP: Dict[str, Optional[str]] = {}  # action → 原子命令（None 表示直接用 action）
     # 允许**进程内执行**的 action 白名单（只放只读命令）；默认空 = 全部走 subprocess
     IN_PROCESS_ACTIONS: set = set()
+    # P3-24：子进程超时（秒）。默认 2h —— 足够跑完最慢的全量索引重建，
+    # 又不让死锁的子进程永久占用终端。子类可覆盖；**None 才表示不限制**
+    # （0 在 subprocess.run 里是"立即超时"，别拿它当"不限"用）。
+    TIMEOUT_SECS: Optional[int] = 7200
 
     def initialize(self, ctx: PluginContext) -> None:
         self._ctx = ctx
@@ -87,6 +91,15 @@ class SubprocessPlugin(PluginBase):
         positional = params.get("_positional", [])
         cmd.extend(positional)
 
+        # P3-25（审计建议"加 capture 开关"，结论：**不实现**）
+        #   理由一：无真实消费者。全仓的 capture_output 用法都在**模块内部**
+        #   调 git（kb_query/memory_sync/memory_ingest_json），没有一处是插件层
+        #   需要回读子进程输出。
+        #   理由二：会破坏长任务体验。`clean refine` / `curate run` 靠实时进度
+        #   让用户知道"还在跑"；一旦捕获，用户眼里就是静默挂起，反而更糟。
+        #   若将来真需要（例如聚合插件要汇总多个子命令输出），正确做法是加一个
+        #   显式的 `capture=True` 参数并按调用点开启，而不是改默认行为。
+
         # 进程内快路径（只读命令）：省一次解释器启动 + import
         if action in self.IN_PROCESS_ACTIONS:
             rc = self._execute_in_process(cmd, script_path)
@@ -96,11 +109,27 @@ class SubprocessPlugin(PluginBase):
 
         # 调用原脚本
         try:
-            result = subprocess.run(cmd)
+            # P3-24：默认超时。此前没有 timeout=，长任务（clean refine /
+            # curate run / eval run / rag index --full）会把插件层无限挂起，
+            # 而 kb_verify.py 自己另实现了一套 TimeoutExpired→124，风格分裂。
+            # 这里给一个宽默认值（2h）：足够跑完最慢的全量重建，
+            # 又不至于让一个死锁的子进程永久占用终端。
+            # 单插件可在自己的类里覆盖 TIMEOUT_SECS；**只有 None 表示不限制** ——
+            # 不用 0/False 表示"不限制"，因为 timeout=0 在 subprocess 里
+            # 语义是"立即超时"，两者混用会让 `TIMEOUT_SECS = 0` 静默失效。
+            timeout = self.TIMEOUT_SECS
+            result = (subprocess.run(cmd, timeout=timeout)
+                      if timeout is not None else subprocess.run(cmd))
             return result.returncode
         except KeyboardInterrupt:
             return 130
-        except (OSError, subprocess.CalledProcessError) as e:
+        except subprocess.TimeoutExpired:
+            # 与 kb_verify.py 的约定一致：124 = 超时，与业务失败(1)区分开
+            print(f"❌ 执行超时（{timeout}s）：{self.SCRIPT_NAME}", file=sys.stderr)
+            return 124
+        except OSError as e:
+            # P3-23：曾写 `except (OSError, subprocess.CalledProcessError)`，
+            # 但上面没传 check=True，CalledProcessError 永不抛出 —— 是死代码。
             print(f"❌ 执行失败: {e}", file=sys.stderr)
             return 1
 

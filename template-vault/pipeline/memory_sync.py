@@ -222,7 +222,7 @@ def grade(rel, fm, body, vocab, idf, rel2vec, meta_all, density_thr, min_chars, 
     if not q4: reasons.append("④与 KB 已覆盖(增量比高)")
     # ①②③ 语义（可选）
     semantic_ok = True
-    if semantic and os.environ.get("ORNITH_API_KEY"):
+    if semantic and _llm_key():
         try:
             ans = semantic_ask(root, body, matches)
             semantic_ok = (ans is not None) and ("不晋升" not in ans)
@@ -322,12 +322,30 @@ def ledger_append(root, entry):
         sys.stderr.write("⚠️ ledger-write-skipped: %s\n" % e)
 
 
+def _llm_key() -> str:
+    """本地模型的 API KEY：环境变量优先，回退 .kb/model.json（经 kb_config）。"""
+    try:
+        import kb_config
+        cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        cfg = {}
+    return (cfg.get("api_key") or os.environ.get("ORNITH_API_KEY") or "").strip()
+
+
 def _semantic_status(semantic: bool) -> str:
     """语义五问可用性一句话说明（缺 key 时明确告知，不静默降级）。"""
     if not semantic:
         return "语义五问：关闭（纯关键词门禁）"
-    if not os.environ.get("ORNITH_API_KEY"):
-        return "⚠️ 语义五问：已请求但不可用（未设 ORNITH_API_KEY）→ 本轮退回关键词门禁"
+    # 统一走 model_config()：只读环境变量会漏掉 .kb/model.json 里的配置，
+    # 于是"明明配了却显示不可用"，用户以为没配上。
+    try:
+        import kb_config
+        _cfg = kb_config.model_config()
+    except Exception:               # noqa: BLE001
+        _cfg = {}
+    if not (_cfg.get("api_key") or os.environ.get("ORNITH_API_KEY")):
+        return ("⚠️ 语义五问：已请求但不可用（未设 API KEY：.kb/model.json 或 "
+                "ORNITH_API_KEY）→ 本轮退回关键词门禁")
     return "语义五问：开启（本地模型判 ①根因②泛化③持久）"
 
 

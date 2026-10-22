@@ -37,8 +37,10 @@ except Exception:          # pragma: no cover
 
 # 是否把上下文字符串（CCH）拼进索引文本。默认开；`KB_CONTEXT_IN_INDEX=0` 可关闭。
 # 开关存在的意义是**可量化**：Anthropic 的 Contextual Retrieval 报告失败率 −35%/−49%/−67%，
-# 但那是他们语料上的数字。本库的增益此前**从未单独测量**（代码注释里只有"默认开"），
-# 于是留下一处"看起来有依据、实际没测过"的配置。见 tests/../docs/EVOLUTION-REVIEW.md 实测记录。
+# 但那是他们语料上的数字。本库的增益需在**本库语料**上单独测量后才能当作依据，
+# 不能直接引用外部报告的数字 —— 所以保留这个开关，便于 A/B 对照实测。
+# （原注释指向 docs/EVOLUTION-REVIEW.md 的实测记录，该文件已不在仓内；
+#   实测数据以 scripts/eval_retrieval_gold.py 的输出为准。）
 CONTEXT_IN_INDEX = os.environ.get("KB_CONTEXT_IN_INDEX", "1") not in ("0", "false", "no")
 
 IDX_DIR = "vector index"
